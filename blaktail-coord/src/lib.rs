@@ -1,7 +1,13 @@
 mod admin;
+pub mod connectors;
+pub mod flows;
+pub mod https_fallback;
+pub mod https_services;
+pub mod ipam;
 mod metrics;
 mod org_dns;
 mod shares;
+pub mod tailnet_lock;
 mod webhooks;
 mod wg_only;
 
@@ -65,7 +71,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 13;
+pub const CURRENT_SCHEMA_VERSION: i64 = 18;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -188,6 +194,31 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         name: "node shares and applied DNS revision",
         postgres_sql: include_str!("../migrations/postgres/0013_shares_and_dns_applied.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "organisation IPAM pools and reservations",
+        postgres_sql: include_str!("../migrations/postgres/0014_ipam.sql"),
+    },
+    Migration {
+        version: 15,
+        name: "opt-in flow visibility settings and records",
+        postgres_sql: include_str!("../migrations/postgres/0015_flows.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "domain application connectors",
+        postgres_sql: include_str!("../migrations/postgres/0016_connectors.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "private HTTPS services and CSRs",
+        postgres_sql: include_str!("../migrations/postgres/0017_https_services.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "tailnet lock admission roots",
+        postgres_sql: include_str!("../migrations/postgres/0018_tailnet_lock.sql"),
     },
 ];
 
@@ -387,6 +418,11 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             11 => migrate_sqlite_to_v11(&mut tx).await?,
             12 => migrate_sqlite_to_v12(&mut tx).await?,
             13 => migrate_sqlite_to_v13(&mut tx).await?,
+            14 => migrate_sqlite_to_v14(&mut tx).await?,
+            15 => migrate_sqlite_to_v15(&mut tx).await?,
+            16 => migrate_sqlite_to_v16(&mut tx).await?,
+            17 => migrate_sqlite_to_v17(&mut tx).await?,
+            18 => migrate_sqlite_to_v18(&mut tx).await?,
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -405,6 +441,11 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             11 => "PRAGMA user_version=11",
             12 => "PRAGMA user_version=12",
             13 => "PRAGMA user_version=13",
+            14 => "PRAGMA user_version=14",
+            15 => "PRAGMA user_version=15",
+            16 => "PRAGMA user_version=16",
+            17 => "PRAGMA user_version=17",
+            18 => "PRAGMA user_version=18",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -819,6 +860,174 @@ async fn migrate_sqlite_to_v13(
         "dns_applied_revision",
         "INTEGER NOT NULL DEFAULT 0",
     )
+    .await?;
+    Ok(())
+}
+
+async fn migrate_sqlite_to_v14(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS ipam_pools (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            cidr TEXT NOT NULL,
+            exclusions_json TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            UNIQUE(org_id, name)
+        );
+        CREATE TABLE IF NOT EXISTS ipam_reservations (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            pool_id TEXT NOT NULL REFERENCES ipam_pools(id) ON DELETE CASCADE,
+            address TEXT NOT NULL,
+            node_id TEXT,
+            enrol_key_hash TEXT,
+            state TEXT NOT NULL DEFAULT 'active',
+            reason TEXT NOT NULL DEFAULT '',
+            expires_at INTEGER,
+            created_at INTEGER NOT NULL,
+            UNIQUE(pool_id, address)
+        );
+        CREATE INDEX IF NOT EXISTS ipam_pools_org_idx ON ipam_pools(org_id);
+        CREATE INDEX IF NOT EXISTS ipam_reservations_org_idx
+            ON ipam_reservations(org_id, state);",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_sqlite_to_v15(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS flow_settings (
+            org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+            sampling_rate REAL NOT NULL DEFAULT 1.0,
+            retention_days INTEGER NOT NULL DEFAULT 7,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS flow_records (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            device_id TEXT NOT NULL,
+            service TEXT NOT NULL DEFAULT '',
+            start_bucket INTEGER NOT NULL,
+            end_bucket INTEGER NOT NULL,
+            proto TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            packets INTEGER NOT NULL DEFAULT 0,
+            transport TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS flow_records_org_bucket_idx
+            ON flow_records(org_id, start_bucket);",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_sqlite_to_v16(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS domain_apps (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            hostnames_json TEXT NOT NULL DEFAULT '[]',
+            ports_json TEXT NOT NULL DEFAULT '[]',
+            protocols_json TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            UNIQUE(org_id, name)
+        );
+        CREATE TABLE IF NOT EXISTS app_connector_assignments (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            app_id TEXT NOT NULL REFERENCES domain_apps(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(app_id, node_id)
+        );
+        CREATE TABLE IF NOT EXISTS app_resolutions (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            app_id TEXT NOT NULL REFERENCES domain_apps(id) ON DELETE CASCADE,
+            host TEXT NOT NULL,
+            addrs_json TEXT NOT NULL DEFAULT '[]',
+            resolved_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS app_resolutions_app_host_idx
+            ON app_resolutions(app_id, host, resolved_at);",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_sqlite_to_v17(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS org_services (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            service_name TEXT NOT NULL,
+            target_node TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(org_id, service_name)
+        );
+        CREATE TABLE IF NOT EXISTS service_csrs (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            service_name TEXT NOT NULL,
+            target_node TEXT NOT NULL,
+            csr_pem TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS service_csrs_org_service_idx
+            ON service_csrs(org_id, service_name, created_at);",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_sqlite_to_v18(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS org_admission_roots (
+            org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+            secret_hash TEXT NOT NULL,
+            epoch INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            rotated_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS admission_signatures (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            pubkey_b64 TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            valid_from INTEGER NOT NULL,
+            valid_to INTEGER NOT NULL,
+            signature TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(org_id, node_id, epoch)
+        );
+        CREATE INDEX IF NOT EXISTS admission_signatures_org_idx
+            ON admission_signatures(org_id, valid_to);",
+    )
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -9135,7 +9344,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        sqlx::raw_sql("PRAGMA user_version=14")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 18);
+        sqlx::raw_sql("PRAGMA user_version=19")
             .execute(&pool)
             .await
             .unwrap();

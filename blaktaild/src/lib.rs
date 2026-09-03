@@ -817,6 +817,8 @@ pub trait Network {
     fn listen_endpoint(&mut self, interface: &str) -> Result<Option<std::net::SocketAddr>, Error>;
     /// Reconciles forwarding/NAT for a subnet or exit-node advertisement and
     /// returns the original IPv4-forwarding setting for safe restoration.
+    /// IPv6 routes (including `::/0`) are handled symmetrically via
+    /// `ip6tables` inside the Linux implementation; see its docs for details.
     fn configure_router(
         &mut self,
         _interface: &str,
@@ -861,6 +863,13 @@ fn iproute_family(value: &str) -> Result<&'static str, Error> {
     } else {
         "-6"
     })
+}
+
+/// Classifies a route string as IPv6 when it contains a colon. This covers
+/// `::/0` (exit-node default), ULA advertisements such as `fd00::/8`, and
+/// any other v6 CIDR; everything else is treated as IPv4.
+fn is_ipv6_route(route: &str) -> bool {
+    route.contains(':')
 }
 /// Normalises a base64 WireGuard public key to the hex form used by the
 /// userspace UAPI, so path-management bookkeeping is uniform per platform.
@@ -1115,10 +1124,36 @@ impl LinuxNetwork {
         }
     }
 
+    fn ipv6_forwarding() -> Result<bool, Error> {
+        let output = Command::new("sysctl")
+            .args(["-n", "net.ipv6.conf.all.forwarding"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| Error::Message(format!("could not execute sysctl: {error}")))?;
+        if !output.status.success() {
+            return Err(Error::Message(format!(
+                "could not read net.ipv6.conf.all.forwarding: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            value => Err(Error::Message(format!(
+                "unexpected net.ipv6.conf.all.forwarding value {value}"
+            ))),
+        }
+    }
+
     fn remove_router_rules(interface: &str, routes: &[String]) {
         for route in routes {
+            let bin = if is_ipv6_route(route) {
+                "ip6tables"
+            } else {
+                "iptables"
+            };
             Self::run_ignore(
-                "iptables",
+                bin,
                 &[
                     "-D",
                     "FORWARD",
@@ -1135,25 +1170,27 @@ impl LinuxNetwork {
                 ],
             );
         }
-        Self::run_ignore(
-            "iptables",
-            &[
-                "-D",
-                "FORWARD",
-                "-o",
-                interface,
-                "-m",
-                "conntrack",
-                "--ctstate",
-                "RELATED,ESTABLISHED",
-                "-m",
-                "comment",
-                "--comment",
-                "blaktail-router",
-                "-j",
-                "ACCEPT",
-            ],
-        );
+        for bin in ["iptables", "ip6tables"] {
+            Self::run_ignore(
+                bin,
+                &[
+                    "-D",
+                    "FORWARD",
+                    "-o",
+                    interface,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "RELATED,ESTABLISHED",
+                    "-m",
+                    "comment",
+                    "--comment",
+                    "blaktail-router",
+                    "-j",
+                    "ACCEPT",
+                ],
+            );
+        }
         Self::run_ignore(
             "iptables",
             &[
@@ -1163,6 +1200,26 @@ impl LinuxNetwork {
                 "POSTROUTING",
                 "-s",
                 "100.64.0.0/10",
+                "!",
+                "-o",
+                interface,
+                "-m",
+                "comment",
+                "--comment",
+                "blaktail-router",
+                "-j",
+                "MASQUERADE",
+            ],
+        );
+        Self::run_ignore(
+            "ip6tables",
+            &[
+                "-t",
+                "nat",
+                "-D",
+                "POSTROUTING",
+                "-s",
+                "fd00::/8",
                 "!",
                 "-o",
                 interface,
@@ -1353,6 +1410,21 @@ impl Network for LinuxNetwork {
             .map_err(|_| Error::Message("wg listen-port is not numeric".into()))?;
         Ok((port != 0).then(|| std::net::SocketAddr::from(([127, 0, 0, 1], port))))
     }
+    /// Reconciles forwarding/NAT for subnet and exit-node advertisements.
+    ///
+    /// IPv4 routes (including the `0.0.0.0/0` exit-node default) are
+    /// installed via `iptables` with MASQUERADE from `100.64.0.0/10`, while
+    /// IPv6 routes (including `::/0`) go via `ip6tables` with MASQUERADE
+    /// from `fd00::/8`. Each family's filter/NAT rules and sysctl
+    /// (`net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding`) are only
+    /// touched when that family has advertised routes.
+    ///
+    /// The return value preserves the original IPv4-forwarding setting for
+    /// safe restoration (`None` once no routes remain); IPv6 forwarding is
+    /// managed symmetrically inside but its original value is not returned,
+    /// to keep this signature stable for existing callers. On teardown the
+    /// IPv6 flag is restored to `0` only when the stored IPv4 original is
+    /// `Some(false)`, i.e. this node enabled forwarding.
     fn configure_router(
         &mut self,
         interface: &str,
@@ -1370,13 +1442,30 @@ impl Network for LinuxNetwork {
             if original_ipv4_forward == Some(false) && Self::ipv4_forwarding()? {
                 Self::run("sysctl", &["-w", "net.ipv4.ip_forward=0"])?;
             }
+            // Symmetric best-effort v6 restore, gated on the same stored
+            // original so a no-op teardown (None) never touches sysctl.
+            if original_ipv4_forward == Some(false) {
+                if let Ok(enabled) = Self::ipv6_forwarding() {
+                    if enabled {
+                        Self::run("sysctl", &["-w", "net.ipv6.conf.all.forwarding=0"])?;
+                    }
+                }
+            }
             return Ok(None);
         }
 
+        let has_v4 = desired_routes.iter().any(|route| !is_ipv6_route(route));
+        let has_v6 = desired_routes.iter().any(|route| is_ipv6_route(route));
+
         let installed = (|| {
             for route in desired_routes {
+                let bin = if is_ipv6_route(route) {
+                    "ip6tables"
+                } else {
+                    "iptables"
+                };
                 Self::run(
-                    "iptables",
+                    bin,
                     &[
                         "-I",
                         "FORWARD",
@@ -1394,66 +1483,117 @@ impl Network for LinuxNetwork {
                     ],
                 )?;
             }
-            Self::run(
-                "iptables",
-                &[
-                    "-I",
-                    "FORWARD",
-                    "1",
-                    "-o",
-                    interface,
-                    "-m",
-                    "conntrack",
-                    "--ctstate",
-                    "RELATED,ESTABLISHED",
-                    "-m",
-                    "comment",
-                    "--comment",
-                    "blaktail-router",
-                    "-j",
-                    "ACCEPT",
-                ],
-            )?;
-            Self::run(
-                "iptables",
-                &[
-                    "-t",
-                    "nat",
-                    "-A",
-                    "POSTROUTING",
-                    "-s",
-                    "100.64.0.0/10",
-                    "!",
-                    "-o",
-                    interface,
-                    "-m",
-                    "comment",
-                    "--comment",
-                    "blaktail-router",
-                    "-j",
-                    "MASQUERADE",
-                ],
-            )
+            for bin in ["iptables", "ip6tables"] {
+                let wanted = (bin == "iptables" && has_v4) || (bin == "ip6tables" && has_v6);
+                if !wanted {
+                    continue;
+                }
+                Self::run(
+                    bin,
+                    &[
+                        "-I",
+                        "FORWARD",
+                        "1",
+                        "-o",
+                        interface,
+                        "-m",
+                        "conntrack",
+                        "--ctstate",
+                        "RELATED,ESTABLISHED",
+                        "-m",
+                        "comment",
+                        "--comment",
+                        "blaktail-router",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+            }
+            if has_v4 {
+                Self::run(
+                    "iptables",
+                    &[
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        "100.64.0.0/10",
+                        "!",
+                        "-o",
+                        interface,
+                        "-m",
+                        "comment",
+                        "--comment",
+                        "blaktail-router",
+                        "-j",
+                        "MASQUERADE",
+                    ],
+                )?;
+            }
+            if has_v6 {
+                Self::run(
+                    "ip6tables",
+                    &[
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        "fd00::/8",
+                        "!",
+                        "-o",
+                        interface,
+                        "-m",
+                        "comment",
+                        "--comment",
+                        "blaktail-router",
+                        "-j",
+                        "MASQUERADE",
+                    ],
+                )?;
+            }
+            Ok::<(), Error>(())
         })();
         if let Err(error) = installed {
             Self::remove_router_rules(interface, desired_routes);
             return Err(error);
         }
-        let current = match Self::ipv4_forwarding() {
-            Ok(current) => current,
-            Err(error) => {
-                Self::remove_router_rules(interface, desired_routes);
-                return Err(error);
+        let original = if has_v4 {
+            let current = match Self::ipv4_forwarding() {
+                Ok(current) => current,
+                Err(error) => {
+                    Self::remove_router_rules(interface, desired_routes);
+                    return Err(error);
+                }
+            };
+            let original = original_ipv4_forward.unwrap_or(current);
+            if !current {
+                if let Err(error) = Self::run("sysctl", &["-w", "net.ipv4.ip_forward=1"]) {
+                    Self::remove_router_rules(interface, desired_routes);
+                    return Err(error);
+                }
             }
+            Some(original)
+        } else {
+            original_ipv4_forward
         };
-        let original = original_ipv4_forward.unwrap_or(current);
-        if !current {
-            if let Err(error) = Self::run("sysctl", &["-w", "net.ipv4.ip_forward=1"]) {
-                Self::remove_router_rules(interface, desired_routes);
-                return Err(error);
+        if has_v6 {
+            let current = match Self::ipv6_forwarding() {
+                Ok(current) => current,
+                Err(error) => {
+                    Self::remove_router_rules(interface, desired_routes);
+                    return Err(error);
+                }
+            };
+            if !current {
+                if let Err(error) = Self::run("sysctl", &["-w", "net.ipv6.conf.all.forwarding=1"]) {
+                    Self::remove_router_rules(interface, desired_routes);
+                    return Err(error);
+                }
             }
         }
-        Ok(Some(original))
+        Ok(original)
     }
 }
 
@@ -2155,6 +2295,38 @@ mod tests {
         assert_eq!(iproute_family("100.64.0.1/32").unwrap(), "-4");
         assert_eq!(iproute_family("fd12:3456::1/128").unwrap(), "-6");
         assert!(parse_cidr("fd12:3456::1/129").is_err());
+    }
+
+    #[test]
+    fn ipv6_route_helper_classifies_by_colon() {
+        assert!(!is_ipv6_route("10.20.0.0/16"));
+        assert!(!is_ipv6_route("0.0.0.0/0"));
+        assert!(!is_ipv6_route("192.168.1.0/24"));
+        assert!(is_ipv6_route("fd00::/8"));
+        assert!(is_ipv6_route("::/0"));
+        assert!(is_ipv6_route("2001:db8::/32"));
+        assert!(is_ipv6_route("fd12:3456::1/128"));
+    }
+
+    #[test]
+    fn empty_router_routes_short_circuit_without_touching_sysctl() {
+        // With no stored original, teardown must not read sysctl at all, so
+        // this passes without root or Linux networking tools present.
+        let mut network = LinuxNetwork::default();
+        assert_eq!(
+            network
+                .configure_router("blaktail0", &[], &[], None)
+                .unwrap(),
+            None
+        );
+        // Best-effort cleanup of stale rules (run_ignore) must not fail.
+        let previous = vec!["10.20.0.0/16".to_string(), "fd00::/8".to_string()];
+        assert_eq!(
+            network
+                .configure_router("blaktail0", &previous, &[], None)
+                .unwrap(),
+            None
+        );
     }
 
     #[cfg(target_os = "macos")]

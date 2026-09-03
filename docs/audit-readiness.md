@@ -39,7 +39,9 @@ Do not start an independent review against a moving `main` commit. Freeze:
 - No signed/notarized agent release (#33).
 - No independent assessor engaged.
 - No public residual-risk report.
-- Coordinator-compromise admission (#46) is not implemented.
+- Coordinator-compromise admission (#46) has a first slice: HMAC admission
+  statements with epoch monotonicity plus rotation-state tables (schema v18);
+  specialist cryptographic review is still required before production use.
 - Windows and Linux desktop agents are out of scope.
 
 Re-run this matrix before each major protocol, auth, or release change.

@@ -1,0 +1,64 @@
+# Rollout: two-VM end-to-end (issue #33)
+#
+# This workflow is **manual / self-hosted by design**. The two-VM drill in
+# `scripts/two-vm-test.sh` needs root SSH to two disposable Linux VMs (and,
+# for the literal acceptance case, each behind a different NAT with no
+# inbound port forwarding). Ordinary GitHub-hosted runners do not provide
+# that topology, so this job never runs there.
+#
+# - Trigger: `workflow_dispatch` (manual) or weekly schedule.
+# - Runner: `self-hosted` label — configure a controller host that can reach
+#   both VMs and holds no long-lived secrets (join keys arrive as
+#   per-run inputs/secrets and are unset afterwards).
+# - The drill itself: see `docs/two-node-drill.md`.
+
+name: Two-VM E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      coord:
+        description: Coordinator HTTPS URL (e.g. https://coord.example.org)
+        required: true
+        type: string
+      preinstalled:
+        description: VMs already have the same published package installed
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    # Weekly; still requires a self-hosted runner to actually execute.
+    - cron: "0 3 * * 1"
+
+jobs:
+  two-vm-e2e:
+    name: Two-VM WireGuard + MagicDNS drill
+    # Honest constraint: hosted runners cannot provide two NAT-separated VMs.
+    # This job only runs where a self-hosted controller with VM access exists.
+    runs-on: [self-hosted]
+    env:
+      COORD: ${{ inputs.coord }}
+      PREINSTALLED: ${{ inputs.preinstalled && '1' || '0' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate script syntax
+        shell: bash
+        run: sh -n scripts/two-vm-test.sh
+
+      - name: Run two-VM drill
+        shell: bash
+        env:
+          VM1: ${{ secrets.BLAKTAIL_TWO_VM_VM1 }}
+          VM2: ${{ secrets.BLAKTAIL_TWO_VM_VM2 }}
+          JOIN_KEY1: ${{ secrets.BLAKTAIL_TWO_VM_JOIN_KEY1 }}
+          JOIN_KEY2: ${{ secrets.BLAKTAIL_TWO_VM_JOIN_KEY2 }}
+          COORD: ${{ inputs.coord }}
+          PREINSTALLED: ${{ inputs.preinstalled && '1' || '0' }}
+          BLAKTAILD: ${{ vars.BLAKTAIL_TWO_VM_BLAKTAILD }}
+        run: |
+          set -euo pipefail
+          # Join keys are single-use and short-lived; the drill script pipes
+          # them over SSH without writing them to disk.
+          scripts/two-vm-test.sh

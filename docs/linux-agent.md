@@ -148,3 +148,11 @@ an environment file. Optional file configuration is selected by setting
 `BLAKTAIL_CONFIG=/etc/blaktail/config.toml` in `/etc/blaktail/agent.env`; see
 [configuration.md](configuration.md). See the
 [upgrade/version-skew policy](upgrades.md) before replacing a running agent.
+
+## Linux tray (scaffold, issue #12)
+
+`apps/linux-tray/` holds an honest scaffold for a GTK/AppIndicator tray
+that drives the `blaktaild` CLI on the same host (connect/disconnect/status,
+sign-in via the normal browser-approval enrolment URL). It is not packaged,
+not released, and not yet validated on Ubuntu 26.04. See its README for the
+scope and the remaining `TODO` markers.

@@ -75,6 +75,10 @@ See [console.md](console.md).
 - Not a released product; source builds are the only supported install path
 - Not a hosted SaaS or a closed-source agent
 - Not a Windows agent, and not a Windows or Linux desktop app
+- Scaffold note (2026-09-03, history above unchanged): `apps/linux-tray/`
+  (issue #12) and `docs/windows-agent.md` plus `blaktaild/windows-service.md`
+  (issue #11) now exist as honest scaffolds/notes only — no functional agent
+  or desktop app ships yet.
 - Not a completed iPhone relay path: the phone joins as a WireGuard client over
   direct UDP; Australian relay fallback and hole punch are still the Mac/Linux
   agent cut

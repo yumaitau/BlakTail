@@ -110,7 +110,9 @@ sudo blaktaild status
 ```
 
 A second machine repeats steps 4–7 against the same coordinator. Enrolment
-over SSH works the same way.
+over SSH works the same way. Two machines behind separate NATs with no
+inbound forwarding rely on the relay fallback, which is not yet proven
+across independent NAT paths (see project status).
 
 Example inputs live in [examples/](examples/). The full configuration schema is
 [config/blaktail.toml.example](config/blaktail.toml.example).
