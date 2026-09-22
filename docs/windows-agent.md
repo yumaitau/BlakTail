@@ -3,7 +3,10 @@
 The windowed Windows client is not built. The tool that is built is
 `blaktail-windows` (same sign-in callback as the Mac and iPhone apps) plus
 `packaging/windows/install-blaktail-service.ps1` for `blaktaild run`.
-The userspace tunnel backend is still the open cut below.
+`blaktaild` on Windows uses `WindowsNetwork`: WinTun for the adapter and the
+shared boringtun engine for WireGuard. `wintun.dll` must sit beside the
+executable. This tree has not produced a Windows binary; the cross link needs
+`x86_64-w64-mingw32-gcc`, which is not installed on the development Mac.
 
 ## Direction
 

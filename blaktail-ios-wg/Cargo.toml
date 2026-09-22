@@ -8,10 +8,15 @@ repository.workspace = true
 
 [lib]
 name = "blaktail_ios_wg"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+jni = ["dep:jni"]
 
 [dependencies]
 boringtun = "0.7.1"
+jni = { version = "0.21", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]

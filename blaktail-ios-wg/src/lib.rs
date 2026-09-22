@@ -1,3 +1,6 @@
+#[cfg(feature = "jni")]
+mod android;
+
 use boringtun::noise::{Tunn, TunnResult};
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -85,6 +88,7 @@ struct PeerSlot {
     public_key: [u8; 32],
     tunn: Tunn,
     allowed: Vec<Cidr>,
+    last_handshake_unix: u64,
 }
 
 pub struct BlakTailTunnel {
@@ -120,6 +124,7 @@ impl TunnelInner {
                 public_key,
                 tunn,
                 allowed,
+                last_handshake_unix: 0,
             },
         );
         true
@@ -166,6 +171,27 @@ fn apply_result(
     }
 }
 
+/// # Safety
+/// `private_key` and `out` must each point at 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_public_key(private_key: *const u8, out: *mut u8) -> i32 {
+    if private_key.is_null() || out.is_null() {
+        return -1;
+    }
+    let mut raw = [0u8; 32];
+    raw.copy_from_slice(slice::from_raw_parts(private_key, 32));
+    let public = PublicKey::from(&StaticSecret::from(raw));
+    slice::from_raw_parts_mut(out, 32).copy_from_slice(public.as_bytes());
+    0
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn parse_allowed(raw: &str) -> Vec<Cidr> {
     raw.split(',')
         .map(str::trim)
@@ -205,6 +231,32 @@ pub unsafe extern "C" fn blaktail_tunnel_free(tunnel: *mut BlakTailTunnel) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         drop(Box::from_raw(tunnel));
     }));
+}
+
+/// # Safety
+/// `tunnel` and `public_key` must be valid. Writes the unix time of the last
+/// decrypted transport packet for that peer, or zero when none has arrived.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_last_handshake(
+    tunnel: *mut BlakTailTunnel,
+    public_key: *const u8,
+) -> u64 {
+    if tunnel.is_null() || public_key.is_null() {
+        return 0;
+    }
+    let key = slice::from_raw_parts(public_key, 32);
+    (*tunnel)
+        .inner
+        .lock()
+        .ok()
+        .and_then(|inner| {
+            inner
+                .peers
+                .values()
+                .find(|peer| peer.public_key.as_slice() == key)
+                .map(|peer| peer.last_handshake_unix)
+        })
+        .unwrap_or(0)
 }
 
 /// # Safety
@@ -312,6 +364,12 @@ pub unsafe extern "C" fn blaktail_tunnel_decapsulate(
                 let public = peer.public_key;
                 let result = peer.tunn.decapsulate(None, packet, output);
                 if !matches!(result, TunnResult::Err(_)) {
+                    if matches!(
+                        result,
+                        TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _)
+                    ) {
+                        peer.last_handshake_unix = unix_now();
+                    }
                     return apply_result(result, length, peer_out, public);
                 }
             }

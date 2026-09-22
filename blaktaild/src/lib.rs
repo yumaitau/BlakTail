@@ -24,6 +24,10 @@ pub use dns::{
     published_resolver_suffixes, remove_system_dns, MagicDns,
 };
 pub use relay_client::RelayMesh;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::WindowsNetwork;
 pub use share::{
     disable_share, enable_share, load_shares, overlay_ipv4, put_share_file, save_shares,
     LocalShare,
