@@ -189,6 +189,10 @@ export const identityProvider = pgTable(
       .$type<string[]>()
       .notNull()
       .default([]),
+    allowGroupsJson: jsonb("allow_groups_json")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     jitMembership: boolean("jit_membership").notNull().default(false),
     defaultRole: text("default_role")
       .notNull()

@@ -12,6 +12,7 @@ export type IdentityProviderSummary = {
   jitMembership: boolean;
   defaultRole: string;
   allowDomainsJson: string[];
+  allowGroupsJson: string[];
   callbackUrl: string;
 };
 
@@ -87,6 +88,14 @@ export function OidcProviderManager({
             name="allowDomains"
             defaultValue={current?.allowDomainsJson.join(", ") ?? ""}
             placeholder="org.example"
+          />
+        </label>
+        <label>
+          Allowed identity-provider groups (comma-separated, optional)
+          <input
+            name="allowGroups"
+            defaultValue={current?.allowGroupsJson.join(", ") ?? ""}
+            placeholder="staff, rangers"
           />
         </label>
         <label className="route-option">

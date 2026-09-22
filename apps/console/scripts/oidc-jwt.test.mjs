@@ -2,6 +2,7 @@ import { createSign, generateKeyPairSync } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import {
   emailDomainAllowed,
+  groupsAllowed,
   requireVerifiedEmail,
   subjectAllowed,
   syntheticOidcEmail,
@@ -78,6 +79,10 @@ describe("OIDC ID token verification", () => {
     expect(emailDomainAllowed("outsider@other.example", ["org.example"])).toBe(false);
     expect(subjectAllowed("user-1", [])).toBe(true);
     expect(subjectAllowed("user-1", ["user-2"])).toBe(false);
+    expect(groupsAllowed({ ...valid, groups: ["rangers"] }, [])).toBe(true);
+    expect(groupsAllowed({ ...valid, groups: ["rangers"] }, ["staff", "rangers"])).toBe(true);
+    expect(groupsAllowed({ ...valid, groups: ["visitors"] }, ["staff"])).toBe(false);
+    expect(groupsAllowed(valid, ["staff"])).toBe(false);
     expect(() =>
       requireVerifiedEmail(
         { ...valid, email_verified: false },

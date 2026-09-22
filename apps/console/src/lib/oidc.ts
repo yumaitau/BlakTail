@@ -13,6 +13,7 @@ import {
   OidcTokenError,
   emailDomainAllowed,
   findJwk,
+  groupsAllowed,
   requireVerifiedEmail,
   signBetterAuthCookie,
   subjectAllowed,
@@ -81,6 +82,7 @@ export async function listIdentityProviders(organisationId: string) {
       jitMembership: identityProvider.jitMembership,
       defaultRole: identityProvider.defaultRole,
       allowDomainsJson: identityProvider.allowDomainsJson,
+      allowGroupsJson: identityProvider.allowGroupsJson,
     })
     .from(identityProvider)
     .where(eq(identityProvider.organisationId, organisationId));
@@ -97,6 +99,7 @@ export async function upsertIdentityProvider(input: {
   clientSecret: string;
   enabled: boolean;
   allowDomains: string[];
+  allowGroups: string[];
   jitMembership: boolean;
   actorUserId: string;
   actorEmail: string;
@@ -123,6 +126,7 @@ export async function upsertIdentityProvider(input: {
       clientSecret: sealSecret(input.clientSecret.trim()),
       enabled: input.enabled,
       allowDomainsJson: input.allowDomains,
+      allowGroupsJson: input.allowGroups,
       jitMembership: input.jitMembership,
       defaultRole: "member",
     })
@@ -133,6 +137,7 @@ export async function upsertIdentityProvider(input: {
         clientSecret: sealSecret(input.clientSecret.trim()),
         enabled: input.enabled,
         allowDomainsJson: input.allowDomains,
+        allowGroupsJson: input.allowGroups,
         jitMembership: input.jitMembership,
         updatedAt: new Date(),
       },
@@ -177,7 +182,7 @@ export async function startOidcLogin(organisationId: string, redirectTo: string)
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", provider.clientId);
   url.searchParams.set("redirect_uri", callbackUrl());
-  url.searchParams.set("scope", "openid email profile");
+  url.searchParams.set("scope", "openid email profile groups");
   url.searchParams.set("state", state);
   url.searchParams.set("nonce", nonce);
   url.searchParams.set("code_challenge", challenge);
@@ -292,6 +297,11 @@ export async function completeOidcLogin(input: {
   }
   if (!subjectAllowed(claims.sub, provider.allowSubjectsJson)) {
     throw new OidcError("That identity is not on the organisation allow-list.");
+  }
+  if (!groupsAllowed(claims, provider.allowGroupsJson)) {
+    throw new OidcError(
+      "That identity is not in an allowed organisation group.",
+    );
   }
   const sql = rawSqlClient();
   const outcome = await sql.begin("isolation level serializable", async (transaction) => {

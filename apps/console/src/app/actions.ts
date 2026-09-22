@@ -679,6 +679,10 @@ export async function upsertOidcProviderAction(
       .split(",")
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean);
+    const allowGroups = String(formData.get("allowGroups") ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
     await upsertIdentityProvider({
       organisationId: ctx.organisationId,
       issuer: String(formData.get("issuer") ?? ""),
@@ -686,6 +690,7 @@ export async function upsertOidcProviderAction(
       clientSecret: String(formData.get("clientSecret") ?? ""),
       enabled: formData.get("enabled") === "true",
       allowDomains,
+      allowGroups,
       jitMembership: formData.get("jitMembership") === "true",
       actorUserId: ctx.userId,
       actorEmail: ctx.email,

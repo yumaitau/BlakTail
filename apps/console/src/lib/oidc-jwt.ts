@@ -13,6 +13,7 @@ export type IdTokenClaims = {
   email?: string;
   email_verified?: boolean;
   name?: string;
+  groups?: string[];
 };
 
 export type JsonWebKey = {
@@ -140,6 +141,19 @@ export function emailDomainAllowed(
 export function subjectAllowed(subject: string, allowSubjects: string[]): boolean {
   if (allowSubjects.length === 0) return true;
   return allowSubjects.includes(subject);
+}
+
+export function groupsFromClaims(claims: IdTokenClaims): string[] {
+  const raw = claims.groups;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((group): group is string => typeof group === "string" && group.length > 0);
+}
+
+/** Empty allow-list means group membership is not required. */
+export function groupsAllowed(claims: IdTokenClaims, allowGroups: string[]): boolean {
+  if (allowGroups.length === 0) return true;
+  const present = new Set(groupsFromClaims(claims));
+  return allowGroups.some((group) => present.has(group));
 }
 
 export function requireVerifiedEmail(
