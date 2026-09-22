@@ -1,6 +1,6 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
 use blaktaild::{
-    apply_peer_map, configure_system_dns, disable_share, dns_domain, enable_share,
+    apply_peer_map, configure_system_dns, disable_share, dns_domain, enable_share, put_share_file,
     ensure_private_key, load_shares, organisation_dns_managed, organisation_resolver_suffixes,
     overlay_ipv4, peer_key_hex, published_resolver_suffixes, read_state, remove_system_dns,
     restore_peers, sync_once, validate_advertised_routes, validate_interface, write_state,
@@ -98,12 +98,22 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ShareCommand {
-    /// Serve an absolute directory over the tailnet as read-only HTTP and WebDAV.
+    /// Serve an absolute directory over the tailnet as HTTP and WebDAV.
     Enable {
         #[arg(long)]
         path: PathBuf,
         #[arg(long)]
         name: Option<String>,
+        /// Accept PUT of a single file. Omitted shares stay read-only.
+        #[arg(long)]
+        writable: bool,
+    },
+    /// Send one file to a peer share that was enabled with --writable.
+    Send {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        file: PathBuf,
     },
     /// Stop serving a named share, or every share on this node.
     Disable {
@@ -1293,8 +1303,12 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             let state = read_state(state_dir)?;
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             match action {
-                ShareCommand::Enable { path, name } => {
-                    let share = enable_share(state_dir, &path, name.as_deref())?;
+                ShareCommand::Enable {
+                    path,
+                    name,
+                    writable,
+                } => {
+                    let share = enable_share(state_dir, &path, name.as_deref(), !writable)?;
                     let shares = load_shares(state_dir)?;
                     coordinator.publish_shares(&state, &shares).await?;
                     println!("share enabled {}", share.url(&state.dns_name));
@@ -1303,6 +1317,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                     let shares = disable_share(state_dir, name.as_deref())?;
                     coordinator.publish_shares(&state, &shares).await?;
                     println!("share disabled");
+                }
+                ShareCommand::Send { url, file } => {
+                    let bytes = std::fs::read(&file)?;
+                    let status = put_share_file(&url, &bytes).await?;
+                    println!("sent {} ({status})", file.display());
                 }
                 ShareCommand::List => {
                     for share in load_shares(state_dir)? {

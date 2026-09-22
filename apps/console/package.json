@@ -13,6 +13,7 @@
     "test": "bun test scripts/*.test.mjs",
     "test:auth-e2e": "bun scripts/http-auth-e2e.mjs",
     "test:ui": "bun scripts/lightpanda-ui.mjs",
+    "test:journey": "bun scripts/user-journey-e2e.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "db:generate": "bun --bun drizzle-kit generate",

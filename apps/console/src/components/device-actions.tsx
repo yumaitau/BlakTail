@@ -167,7 +167,6 @@ export function DeviceActions({
                 const rowId = `${node.organisation_id}:${node.id}`;
                 const open = openId === rowId;
                 const state = nodeState(node);
-                const address = node.allowed_ips[0] || node.dns_name || "—";
                 return (
                   <DeviceRow
                     key={rowId}
@@ -176,7 +175,6 @@ export function DeviceActions({
                     open={open}
                     pending={pending}
                     state={state}
-                    address={address}
                     onToggle={() => setOpenId(open ? null : rowId)}
                     onMessage={setMessage}
                     onRefresh={() => router.refresh()}
@@ -219,6 +217,14 @@ export function DeviceActions({
             <div className="actions">
               <button
                 type="button"
+                className="secondary"
+                autoFocus
+                onClick={() => setConfirm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
                 className="danger"
                 disabled={pending}
                 onClick={() => {
@@ -238,8 +244,8 @@ export function DeviceActions({
                     setMessage({
                       text: result.ok
                         ? kind === "revoke"
-                          ? `${label} revoked.`
-                          : `${label} deleted from inventory.`
+                          ? `${label} revoked. It can no longer use this network.`
+                          : `${label} removed from inventory. The audit tombstone remains.`
                         : result.error,
                       error: !result.ok,
                     });
@@ -248,13 +254,6 @@ export function DeviceActions({
                 }}
               >
                 {confirm.kind === "revoke" ? "Revoke device" : "Delete device"}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setConfirm(null)}
-              >
-                Cancel
               </button>
             </div>
           </div>
@@ -270,7 +269,6 @@ function DeviceRow({
   open,
   pending,
   state,
-  address,
   onToggle,
   onMessage,
   onRefresh,
@@ -282,7 +280,6 @@ function DeviceRow({
   open: boolean;
   pending: boolean;
   state: { label: string; className: string };
-  address: string;
   onToggle: () => void;
   onMessage: (message: { text: string; error: boolean } | null) => void;
   onRefresh: () => void;
@@ -306,7 +303,17 @@ function DeviceRow({
           <span className="badge network">{node.network_account_name}</span>
           <div className="device-sub">{ownerLabel(node, people)}</div>
         </td>
-        <td className="mono">{address}</td>
+        <td className="device-address">
+          {node.allowed_ips.length > 0 ? (
+            node.allowed_ips.slice(0, 2).map((ip) => (
+              <div key={ip} className="mono">
+                {ip}
+              </div>
+            ))
+          ) : (
+            <span className="mono">{node.dns_name || "—"}</span>
+          )}
+        </td>
         <td>
           <span className={`badge ${state.className}`}>{state.label}</span>
         </td>
@@ -439,6 +446,7 @@ function DeviceRow({
                           <span className="mono">
                             http://{node.dns_name}:{share.port}/{share.label}/
                           </span>
+                          {share.read_only ? " · read-only" : " · accepts file send"}
                           {share.path ? ` · ${share.path}` : ""}
                         </li>
                       ))}
@@ -454,7 +462,7 @@ function DeviceRow({
                 <p className="muted">
                   No shared folders. On the device run{" "}
                   <span className="mono">
-                    blaktaild share enable --path /absolute/dir
+                    blaktaild share enable --path /absolute/dir --writable
                   </span>
                   .
                 </p>
@@ -514,23 +522,31 @@ function DeviceRow({
               )}
 
               {canEdit ? (
-                <div className="actions">
-                  <button
-                    type="button"
-                    className="danger"
-                    disabled={pending}
-                    onClick={() => onConfirm({ kind: "revoke", node })}
-                  >
-                    Revoke
-                  </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    disabled={pending}
-                    onClick={() => onConfirm({ kind: "delete", node })}
-                  >
-                    Delete
-                  </button>
+                <div className="danger-zone">
+                  <p className="eyebrow">Consequences</p>
+                  <p className="muted">
+                    Revoke cuts this device off the network immediately. Delete
+                    only removes it from the inventory and keeps an audit
+                    tombstone. Neither action can be undone from this page.
+                  </p>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={pending}
+                      onClick={() => onConfirm({ kind: "revoke", node })}
+                    >
+                      Revoke access
+                    </button>
+                    <button
+                      type="button"
+                      className="quiet-danger"
+                      disabled={pending}
+                      onClick={() => onConfirm({ kind: "delete", node })}
+                    >
+                      Delete from inventory
+                    </button>
+                  </div>
                 </div>
               ) : null}
             </div>

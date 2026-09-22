@@ -72,11 +72,6 @@ pub fn canonicalise(shares: Vec<NodeShare>) -> Result<Vec<NodeShare>, ApiError> 
                 "share port must be between 1024 and 65535".into(),
             ));
         }
-        if !share.read_only {
-            return Err(ApiError::BadRequest(
-                "writable shares are not supported in this release".into(),
-            ));
-        }
         let path = share.path.trim();
         if path.is_empty()
             || path.len() > MAX_PATH_LEN
@@ -93,7 +88,7 @@ pub fn canonicalise(shares: Vec<NodeShare>) -> Result<Vec<NodeShare>, ApiError> 
             label,
             path: path.to_owned(),
             port: share.port,
-            read_only: true,
+            read_only: share.read_only,
             enabled: share.enabled,
         });
     }
@@ -114,7 +109,7 @@ pub fn published(node_id: Uuid, dns_name: &str, shares: &[NodeShare]) -> Vec<Pub
             dns_name: dns_name.to_owned(),
             label: share.label.clone(),
             port: share.port,
-            read_only: true,
+            read_only: share.read_only,
         })
         .collect()
 }
@@ -228,13 +223,14 @@ mod tests {
             enabled: true,
         }])
         .is_err());
-        assert!(canonicalise(vec![NodeShare {
+        let writable = canonicalise(vec![NodeShare {
             label: "files".into(),
             path: "/srv/shared".into(),
             port: DEFAULT_SHARE_PORT,
             read_only: false,
             enabled: true,
         }])
-        .is_err());
+        .unwrap();
+        assert!(!writable[0].read_only);
     }
 }

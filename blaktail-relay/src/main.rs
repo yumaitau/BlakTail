@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         idle_secs: config.idle_seconds,
         rate_per_sec: config.rate_per_second,
         rate_burst: config.rate_burst,
+        region: config.region.clone(),
     };
     let socket = UdpSocket::bind(bind).await?;
     info!(

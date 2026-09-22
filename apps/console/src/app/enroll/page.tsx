@@ -79,7 +79,7 @@ export default async function EnrollPage({
         <PageHeader
           eyebrow="Enrolment"
           title="Approve device"
-          description="Confirm that this is the device waiting in your terminal."
+          description="Match the name and WireGuard fingerprint with the terminal before you approve. Approval lets this device onto the organisation network."
         />
         <ol className="ceremony" aria-label="Enrolment path">
           <li>Device</li>
@@ -100,7 +100,14 @@ export default async function EnrollPage({
             </div>
             <div>
               <dt>Expires</dt>
-              <dd>{new Date(request.expires_at * 1000).toISOString()}</dd>
+              <dd>
+                <time dateTime={new Date(request.expires_at * 1000).toISOString()}>
+                  {new Date(request.expires_at * 1000).toLocaleString("en-AU", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  })}
+                </time>
+              </dd>
             </div>
             <div>
               <dt>Organisation</dt>

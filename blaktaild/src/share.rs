@@ -22,6 +22,7 @@ const MAX_LABEL_LEN: usize = 32;
 const MAX_PATH_LEN: usize = 512;
 const MAX_LISTING: usize = 200;
 const MAX_HEADER: usize = 8_192;
+const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,8 +170,9 @@ pub fn enable_share(
     state_dir: &Path,
     path: &Path,
     label: Option<&str>,
+    read_only: bool,
 ) -> Result<LocalShare, Error> {
-    let share = validate_local_share(path, label, DEFAULT_SHARE_PORT)?;
+    let share = validate_local_share_mode(path, label, DEFAULT_SHARE_PORT, read_only)?;
     let mut shares = load_shares(state_dir)?;
     if let Some(existing) = shares
         .iter_mut()
@@ -224,6 +226,15 @@ pub fn validate_local_share(
     label: Option<&str>,
     port: u16,
 ) -> Result<LocalShare, Error> {
+    validate_local_share_mode(path, label, port, true)
+}
+
+pub fn validate_local_share_mode(
+    path: &Path,
+    label: Option<&str>,
+    port: u16,
+    read_only: bool,
+) -> Result<LocalShare, Error> {
     if !(1024..=65535).contains(&port) {
         return Err(Error::Message(
             "share port must be between 1024 and 65535".into(),
@@ -250,7 +261,7 @@ pub fn validate_local_share(
         label,
         path: canonical.to_string_lossy().into_owned(),
         port,
-        read_only: true,
+        read_only,
         enabled: true,
     })
 }
@@ -281,7 +292,7 @@ fn canonical_shares(shares: Vec<LocalShare>) -> Result<Vec<LocalShare>, Error> {
             label,
             path: share.path,
             port: share.port,
-            read_only: true,
+            read_only: share.read_only,
             enabled: share.enabled,
         });
     }
@@ -341,15 +352,42 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
     if length == 0 {
         return Ok(());
     }
-    let request = std::str::from_utf8(&buffer[..length])
+    let Some(header_end) = buffer[..length]
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+    else {
+        write_plain(&mut stream, 400, "Bad Request", "bad request\n", true).await?;
+        return Ok(());
+    };
+    let separator = 4;
+    let header = std::str::from_utf8(&buffer[..header_end])
         .map_err(|_| Error::Message("share request is not UTF-8".into()))?;
-    let parsed = match parse_request(request) {
+    let mut parsed = match parse_request(header) {
         Some(parsed) => parsed,
         None => {
             write_plain(&mut stream, 400, "Bad Request", "bad request\n", true).await?;
             return Ok(());
         }
     };
+    let body_start = header_end + separator;
+    parsed.body = buffer[body_start..length].to_vec();
+    if let Some(needed) = parsed.content_length {
+        if needed > MAX_PUT_BYTES {
+            write_plain(&mut stream, 413, "Payload Too Large", "file is too large\n", true).await?;
+            return Ok(());
+        }
+        while parsed.body.len() < needed {
+            let mut chunk = [0u8; 8192];
+            let read = tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .map_err(|_| Error::Message("share request timed out".into()))??;
+            if read == 0 {
+                break;
+            }
+            parsed.body.extend_from_slice(&chunk[..read]);
+        }
+        parsed.body.truncate(needed);
+    }
     match parsed.method.as_str() {
         "OPTIONS" => {
             write_response(
@@ -373,7 +411,10 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
         "PROPFIND" => {
             serve_propfind(&mut stream, shares, &parsed.path, parsed.depth.as_deref()).await?;
         }
-        "PUT" | "POST" | "DELETE" | "MKCOL" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK" => {
+        "PUT" => {
+            serve_put(&mut stream, shares, &parsed.path, &parsed.body).await?;
+        }
+        "POST" | "DELETE" | "MKCOL" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK" => {
             write_response(
                 &mut stream,
                 403,
@@ -403,12 +444,14 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
     Ok(())
 }
 
-const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PROPFIND";
+const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PROPFIND, PUT";
 
 struct ParsedRequest {
     method: String,
     path: String,
     depth: Option<String>,
+    content_length: Option<usize>,
+    body: Vec<u8>,
 }
 
 fn parse_request(raw: &str) -> Option<ParsedRequest> {
@@ -423,6 +466,7 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
     let target = parts.next().unwrap_or("/");
     let path = percent_decode(target.split('?').next().unwrap_or("/"))?;
     let mut depth = None;
+    let mut content_length = None;
     for line in lines {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
@@ -433,13 +477,124 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
         };
         if name.eq_ignore_ascii_case("depth") {
             depth = Some(value.trim().to_ascii_lowercase());
+        } else if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.trim().parse().ok();
         }
     }
     Some(ParsedRequest {
         method,
         path,
         depth,
+        content_length,
+        body: Vec::new(),
     })
+}
+
+fn share_for_path<'a>(shares: &'a [LocalShare], path: &str) -> Option<&'a LocalShare> {
+    shares.iter().filter(|share| share.enabled).find(|share| {
+        path == format!("/{}", share.label)
+            || path.starts_with(&format!("/{}/", share.label))
+    })
+}
+
+fn resolve_put_path(share: &LocalShare, url_path: &str) -> Result<PathBuf, Error> {
+    let prefix = format!("/{}", share.label);
+    let rest = url_path
+        .strip_prefix(&prefix)
+        .unwrap_or("")
+        .trim_start_matches('/');
+    if rest.is_empty()
+        || rest.ends_with('/')
+        || rest.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(Error::Message("share file path is not acceptable".into()));
+    }
+    let root = fs::canonicalize(&share.path)?;
+    let target = root.join(rest);
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::Message("share file path is not acceptable".into()))?;
+    let parent = fs::canonicalize(parent)?;
+    if !parent.starts_with(&root) {
+        return Err(Error::Message("share file path escapes the folder".into()));
+    }
+    if target.exists() {
+        let existing = fs::canonicalize(&target)?;
+        if !existing.starts_with(&root) {
+            return Err(Error::Message("share file path escapes the folder".into()));
+        }
+    }
+    Ok(target)
+}
+
+async fn serve_put(
+    stream: &mut TcpStream,
+    shares: &[LocalShare],
+    path: &str,
+    body: &[u8],
+) -> Result<(), Error> {
+    let Some(share) = share_for_path(shares, path) else {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    };
+    if share.read_only {
+        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
+        return Ok(());
+    }
+    if body.len() > MAX_PUT_BYTES {
+        write_plain(stream, 413, "Payload Too Large", "file is too large\n", true).await?;
+        return Ok(());
+    }
+    let target = match resolve_put_path(share, path) {
+        Ok(target) => target,
+        Err(_) => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+            return Ok(());
+        }
+    };
+    let temporary = target.with_extension("blaktail-partial");
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+    }
+    fs::rename(&temporary, &target)?;
+    write_plain(stream, 201, "Created", "created\n", true).await
+}
+
+/// Send one file to a writable peer share. `url` is the file URL, not the folder.
+pub async fn put_share_file(url: &str, bytes: &[u8]) -> Result<u16, Error> {
+    if bytes.len() > MAX_PUT_BYTES {
+        return Err(Error::Message("file is too large to send".into()));
+    }
+    let url = url
+        .strip_prefix("http://")
+        .ok_or_else(|| Error::Message("share send only uses overlay HTTP".into()))?;
+    let (host, path) = url
+        .split_once('/')
+        .ok_or_else(|| Error::Message("share URL needs a file path".into()))?;
+    let address: SocketAddr = host
+        .parse()
+        .map_err(|_| Error::Message("share URL host must be host:port".into()))?;
+    let mut stream = TcpStream::connect(address).await?;
+    let request = format!(
+        "PUT /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        bytes.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(bytes).await?;
+    let mut response = [0u8; 64];
+    let read = stream.read(&mut response).await?;
+    let text = String::from_utf8_lossy(&response[..read]);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    if status != 201 && status != 204 {
+        return Err(Error::Message(format!("share send failed ({status})")));
+    }
+    Ok(status)
 }
 
 async fn serve_get(
@@ -1048,10 +1203,10 @@ mod tests {
     fn rejects_relative_and_duplicate_labels() {
         let root = temp_dir();
         assert!(validate_local_share(Path::new("relative"), None, DEFAULT_SHARE_PORT).is_err());
-        let share = enable_share(&root, &root, Some("Files")).unwrap();
+        let share = enable_share(&root, &root, Some("Files"), true).unwrap();
         assert_eq!(share.label, "files");
         assert!(share.enabled);
-        let again = enable_share(&root, &root, Some("files")).unwrap();
+        let again = enable_share(&root, &root, Some("files"), true).unwrap();
         assert_eq!(again.label, "files");
         assert_eq!(load_shares(&root).unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
@@ -1114,7 +1269,7 @@ mod tests {
         assert!(options.starts_with("HTTP/1.1 200"), "{options}");
         assert!(options.contains("DAV: 1"), "{options}");
         assert!(
-            options.contains("Allow: OPTIONS, GET, HEAD, PROPFIND"),
+            options.contains("Allow: OPTIONS, GET, HEAD, PROPFIND, PUT"),
             "{options}"
         );
 
@@ -1143,6 +1298,27 @@ mod tests {
         assert!(put.starts_with("HTTP/1.1 403"), "{put}");
         assert!(put.contains("read-only"), "{put}");
 
+        let write_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let write_port = write_probe.local_addr().unwrap().port();
+        drop(write_probe);
+        let mut writable =
+            validate_local_share_mode(&root, Some("drop"), write_port, false).unwrap();
+        writable.port = write_port;
+        let writable_server = ShareServer::spawn(IpAddr::V4(Ipv4Addr::LOCALHOST), &[writable])
+            .await
+            .unwrap();
+        let write_addr = writable_server.listen_addr();
+        let sent = put_share_file(
+            &format!("http://{write_addr}/drop/arrived.txt"),
+            b"from-peer",
+        )
+        .await;
+        assert_eq!(sent.unwrap(), 201);
+        assert_eq!(fs::read(root.join("arrived.txt")).unwrap(), b"from-peer");
+        let escaped = http_exchange(write_addr, "PUT", "/drop/../arrived.txt", &[]).await;
+        assert!(escaped.starts_with("HTTP/1.1 403"), "{escaped}");
+
+        writable_server.stop();
         server.stop();
         fs::remove_dir_all(root).unwrap();
     }

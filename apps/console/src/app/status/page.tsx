@@ -22,11 +22,25 @@ export default async function StatusPage() {
           description="Health of the onshore coordinator that holds your tailnet state."
         />
         <div className="panel stack">
-          {error ? <p className="error">{error}</p> : null}
+          {error ? (
+            <>
+              <p>
+                <span className="badge revoked">Unreachable</span>
+              </p>
+              <p className="error" role="alert">
+                {error}
+              </p>
+              <p className="muted">
+                Check that the coordinator container is running and its TLS
+                certificate is the one this console trusts, then reload this
+                page. Devices keep their last approved configuration until the
+                coordinator answers again.
+              </p>
+            </>
+          ) : null}
           {health ? (
             <>
               <p>
-                <strong>Status:</strong>{" "}
                 <span className="badge online">{health.status}</span>
               </p>
               <p className="region-mark">
@@ -35,9 +49,9 @@ export default async function StatusPage() {
                 <span>Sydney, Australia · AU · ap-southeast-2</span>
               </p>
               <p className="muted">
-                Public readiness returns only availability. Region and component
-                diagnostics stay in the protected operator configuration and
-                support bundle.
+                This page only reports whether the coordinator is available.
+                Device reachability stays on Devices. Region and component
+                diagnostics stay in the protected operator configuration.
               </p>
             </>
           ) : null}

@@ -25,7 +25,8 @@ pub use dns::{
 };
 pub use relay_client::RelayMesh;
 pub use share::{
-    disable_share, enable_share, load_shares, overlay_ipv4, save_shares, LocalShare,
+    disable_share, enable_share, load_shares, overlay_ipv4, put_share_file, save_shares,
+    LocalShare,
     PublishedShare, ShareServer, DEFAULT_SHARE_PORT,
 };
 

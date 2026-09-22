@@ -66,6 +66,8 @@ pub struct RelayConfig {
     pub rate_per_sec: u32,
     /// Token bucket depth per source IP.
     pub rate_burst: u32,
+    /// Cloud region. The relay refuses to start outside Australia.
+    pub region: String,
 }
 
 impl Default for RelayConfig {
@@ -75,6 +77,7 @@ impl Default for RelayConfig {
             idle_secs: DEFAULT_IDLE_SECS,
             rate_per_sec: DEFAULT_RATE_PER_SEC,
             rate_burst: DEFAULT_RATE_BURST,
+            region: "ap-southeast-2".into(),
         }
     }
 }
@@ -306,6 +309,11 @@ pub async fn serve(socket: UdpSocket, config: RelayConfig) -> io::Result<()> {
             "refusing to run an unauthenticated relay; set BLAKTAIL_RELAY_AUTH_SECRET",
         ));
     }
+    if !is_australian_region(&config.region) {
+        return Err(io::Error::other(
+            "refusing to run the relay outside Australia; set BLAKTAIL_REGION to ap-southeast-2",
+        ));
+    }
     let metrics = std::sync::Arc::new(Metrics::default());
     serve_with_metrics(socket, config, metrics).await
 }
@@ -318,6 +326,11 @@ pub async fn serve_with_metrics(
     if config.auth_secret.is_empty() {
         return Err(io::Error::other(
             "refusing to run an unauthenticated relay; set BLAKTAIL_RELAY_AUTH_SECRET",
+        ));
+    }
+    if !is_australian_region(&config.region) {
+        return Err(io::Error::other(
+            "refusing to run the relay outside Australia; set BLAKTAIL_REGION to ap-southeast-2",
         ));
     }
     use std::sync::atomic::Ordering::*;
@@ -553,6 +566,25 @@ mod tests {
         for region in ["", "us-east-1", "ap-southeast-1", "europe-west1"] {
             assert!(!is_australian_region(region));
         }
+    }
+
+    #[tokio::test]
+    async fn refuses_relay_outside_australia() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let error = serve(
+            socket,
+            RelayConfig {
+                auth_secret: b"test-relay-secret".to_vec(),
+                region: "us-east-1".into(),
+                ..RelayConfig::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("outside Australia"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

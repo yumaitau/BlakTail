@@ -18,8 +18,31 @@ require_command() {
 SCRIPT_DIR=${SCRIPT_DIR:-$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)}
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 AWS_REGION=${AWS_REGION:-ap-southeast-2}
-DOCKER_CONTEXT=${DOCKER_CONTEXT:-m3-max}
+DOCKER_CONTEXT=${DOCKER_CONTEXT:-homelab}
 TF_DIR=${TF_DIR:-deploy/aws/e2e}
+
+require_remote_docker_context() {
+  case "$DOCKER_CONTEXT" in
+    m3-max | homelab) ;;
+    *) die "DOCKER_CONTEXT must be a remote SSH builder (m3-max or homelab)" ;;
+  esac
+}
+
+require_arm64_builder() {
+  docker_arch=$(docker --context "$DOCKER_CONTEXT" info --format '{{.Architecture}}')
+  case "$docker_arch" in
+    aarch64 | arm64) return 0 ;;
+    x86_64 | amd64)
+      platforms=$(
+        docker --context "$DOCKER_CONTEXT" buildx inspect --bootstrap 2>/dev/null \
+          | awk -F': ' '/^Platforms:/ { print $2 }'
+      )
+      printf '%s' "$platforms" | grep -q 'linux/arm64' && return 0
+      die "Docker context $DOCKER_CONTEXT cannot build linux/arm64"
+      ;;
+    *) die "Docker context $DOCKER_CONTEXT is unavailable or not a builder: $docker_arch" ;;
+  esac
+}
 
 validate_base_inputs() {
   case ${EXPECTED_AWS_ACCOUNT:-} in
@@ -33,7 +56,7 @@ validate_base_inputs() {
   [ "${#RUN_ID}" -ge 6 ] && [ "${#RUN_ID}" -le 20 ] || \
     die "RUN_ID must be 6 to 20 characters"
   [ "$TF_DIR" = deploy/aws/e2e ] || die "TF_DIR must be deploy/aws/e2e"
-  [ "$DOCKER_CONTEXT" = m3-max ] || die "DOCKER_CONTEXT must be m3-max"
+  require_remote_docker_context
 
   WORK_DIR=${WORK_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/blaktail-e2e-$RUN_ID}
   case "$WORK_DIR" in

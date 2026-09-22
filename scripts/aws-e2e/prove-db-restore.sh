@@ -236,7 +236,7 @@ restore_values=$(printf '%s' "$restore_logs" | jq -e \
    console_users:last_number($users), console_memberships:last_number($memberships)}
 ') || die "restore validation log evidence missing"
 printf '%s' "$restore_values" | jq -e '
-  .coord_schema_version == 4 and .coord_nodes == 2 and
+  .coord_schema_version == 5 and .coord_nodes == 2 and
   .console_users == 1 and .console_memberships == 1
 ' >/dev/null || die "restored database row and schema checks failed"
 
@@ -261,4 +261,4 @@ printf '%s' "$restore_values" | jq \
   >"$proof_tmp"
 mv "$proof_tmp" "$WORK_DIR/db-restore.ok"
 chmod 0600 "$WORK_DIR/db-restore.ok"
-printf 'database snapshot restore complete: schema 4, two nodes, identity data, temporary restore deleted\n'
+printf 'database snapshot restore complete: schema 5, two nodes, identity data, temporary restore deleted\n'

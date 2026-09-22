@@ -34,5 +34,19 @@ openssl x509 -req -in "$DIR/coord.csr" \
   -extfile <(printf "subjectAltName=${SAN}\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth")
 
 rm -f "$DIR/coord.csr"
-chmod 600 "$DIR/coord.key" "$DIR/ca.key"
-echo "dev certificates written to $DIR (coord.crt, coord.key, ca.crt)"
+
+console_san="DNS:console,DNS:localhost,IP:127.0.0.1"
+if [ -n "${BLAKTAIL_TLS_EXTRA_SAN:-}" ]; then
+  console_san="${console_san},${BLAKTAIL_TLS_EXTRA_SAN}"
+fi
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout "$DIR/console.key" -out "$DIR/console.csr" \
+  -subj "/CN=console" \
+  -addext "subjectAltName=${console_san}"
+openssl x509 -req -in "$DIR/console.csr" \
+  -CA "$DIR/ca.crt" -CAkey "$DIR/ca.key" -CAcreateserial \
+  -out "$DIR/console.crt" -days 825 \
+  -extfile <(printf "subjectAltName=${console_san}\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth")
+rm -f "$DIR/console.csr"
+chmod 600 "$DIR/coord.key" "$DIR/ca.key" "$DIR/console.key"
+echo "dev certificates written to $DIR (coord.crt, coord.key, console.crt, console.key, ca.crt)"

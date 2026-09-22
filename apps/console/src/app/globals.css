@@ -569,6 +569,66 @@ h3,
   min-width: 44rem;
 }
 
+.device-address .mono {
+  word-break: normal;
+  white-space: nowrap;
+}
+
+.danger-zone {
+  display: grid;
+  gap: 0.45rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(200, 90, 75, 0.28);
+}
+
+button.quiet-danger,
+.button.quiet-danger {
+  background: transparent;
+  border-color: rgba(200, 90, 75, 0.45);
+  color: var(--destructive);
+}
+
+button.quiet-danger:hover:not(:disabled),
+.button.quiet-danger:hover {
+  background: rgba(200, 90, 75, 0.12);
+  border-color: var(--destructive);
+}
+
+.section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+}
+
+.section-nav a {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.section-nav a:hover {
+  color: var(--foreground);
+}
+
+.sso-disclosure {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+
+.sso-disclosure summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.sso-disclosure form {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .device-primary {
   font-weight: 650;
 }
@@ -1207,6 +1267,54 @@ h3,
 
   .auth-brand-col {
     display: none;
+  }
+
+  .device-table {
+    min-width: 0;
+  }
+
+  .device-table thead {
+    display: none;
+  }
+
+  .device-table tr.device-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.35rem 0.75rem;
+    padding: 0.9rem 0.15rem;
+    border-bottom: 1px solid rgba(250, 232, 200, 0.05);
+  }
+
+  .device-table tr.device-row td {
+    display: block;
+    border: 0;
+    padding: 0;
+  }
+
+  .device-table tr.device-row td:nth-child(1) {
+    grid-column: 1;
+  }
+
+  .device-table tr.device-row td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .device-table tr.device-row td:nth-child(2),
+  .device-table tr.device-row td:nth-child(3),
+  .device-table tr.device-row td:nth-child(5) {
+    grid-column: 1 / -1;
+  }
+
+  .device-table tr.device-details-row,
+  .device-table tr.device-details-row td {
+    display: block;
+    width: 100%;
+  }
+
+  .device-address .mono {
+    white-space: normal;
   }
 
   .region-mark {

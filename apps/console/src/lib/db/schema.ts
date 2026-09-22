@@ -213,6 +213,23 @@ export const identityProvider = pgTable(
   ],
 );
 
+export const scimToken = pgTable(
+  "scim_token",
+  {
+    id: text("id").primaryKey(),
+    organisationId: text("organisation_id")
+      .notNull()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    label: text("label").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [index("scim_token_org_idx").on(table.organisationId)],
+);
+
 export const oidcLoginState = pgTable(
   "oidc_login_state",
   {

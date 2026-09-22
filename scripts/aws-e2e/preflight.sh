@@ -11,11 +11,7 @@ done
 [ -d "$TF_DIR_ABS" ] || die "Terraform directory missing: $TF_DIR_ABS"
 assert_aws_identity
 
-docker_arch=$(docker --context "$DOCKER_CONTEXT" info --format '{{.Architecture}}')
-case "$docker_arch" in
-  aarch64 | arm64) ;;
-  *) die "Docker context $DOCKER_CONTEXT is unavailable or not ARM64: $docker_arch" ;;
-esac
+require_arm64_builder
 
 terraform_exec version >/dev/null
 printf 'preflight ok: account=%s region=%s run_id=%s docker=%s\n' \

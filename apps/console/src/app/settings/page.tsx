@@ -4,6 +4,7 @@ import { ApiClientManager } from "@/components/api-client-manager";
 import { InvitationManager } from "@/components/invitation-manager";
 import { MembershipManager } from "@/components/membership-manager";
 import { OidcProviderManager } from "@/components/oidc-provider-manager";
+import { ScimManager } from "@/components/scim-manager";
 import { PageHeader } from "@/components/page-header";
 import { DnsSettings } from "@/components/dns-settings";
 import { WebhookManager } from "@/components/webhook-manager";
@@ -43,7 +44,18 @@ export default async function SettingsPage() {
           title="Settings"
           description="One person, every explicitly linked network account, and independent ways to sign in."
         />
-        <div className="panel stack">
+        <nav className="section-nav" aria-label="Settings sections">
+          <a href="#account">Account</a>
+          <a href="#identities">Identities</a>
+          {ctx.role === "owner" ? <a href="#sso">Single sign-on</a> : null}
+          {ctx.role === "owner" ? <a href="#scim">Directory</a> : null}
+          {ctx.role === "owner" ? <a href="#members">Members</a> : null}
+          <a href="#dns">DNS</a>
+          {canMutateTailnet(ctx.role) ? <a href="#webhooks">Webhooks</a> : null}
+          {ctx.role === "owner" ? <a href="#automation">Automation</a> : null}
+          {ctx.role === "owner" ? <a href="#invitations">Invitations</a> : null}
+        </nav>
+        <div className="panel stack" id="account">
           <p>
             <strong>Signed in as:</strong> {ctx.name} ({ctx.email})
           </p>
@@ -74,21 +86,32 @@ export default async function SettingsPage() {
             one.
           </p>
         </div>
-        <IdentitySettings
-          identities={identitySettings.identities}
-          networkAccounts={identitySettings.networkAccounts}
-          conflicts={identitySettings.conflicts}
-        />
+        <div id="identities">
+          <IdentitySettings
+            identities={identitySettings.identities}
+            networkAccounts={identitySettings.networkAccounts}
+            conflicts={identitySettings.conflicts}
+          />
+        </div>
         {ctx.role === "owner" ? (
-          <OidcProviderManager providers={providers} />
+          <div id="sso" className="stack">
+            <OidcProviderManager providers={providers} />
+            <div id="scim">
+              <ScimManager />
+            </div>
+          </div>
         ) : null}
         {ctx.role === "owner" ? (
-          <MembershipManager memberships={memberships} />
+          <div id="members">
+            <MembershipManager memberships={memberships} />
+          </div>
         ) : null}
         {dns ? (
-          <DnsSettings initial={dns} readOnly={ctx.role === "member"} />
+          <div id="dns">
+            <DnsSettings initial={dns} readOnly={ctx.role === "member"} />
+          </div>
         ) : (
-          <div className="panel stack">
+          <div className="panel stack" id="dns">
             <h2>Organisation DNS</h2>
             <p className="muted">
               Coordinator DNS settings are unavailable in this environment.
@@ -96,20 +119,26 @@ export default async function SettingsPage() {
           </div>
         )}
         {canMutateTailnet(ctx.role) ? (
-          <WebhookManager destinations={webhooks} />
+          <div id="webhooks">
+            <WebhookManager destinations={webhooks} />
+          </div>
         ) : null}
         {ctx.role === "owner" ? (
-          <ApiClientManager clients={apiClients} />
+          <div id="automation">
+            <ApiClientManager clients={apiClients} />
+          </div>
         ) : null}
         {ctx.role === "owner" ? (
-          <InvitationManager
-            invitations={invitations.map((invitation) => ({
-              id: invitation.id,
-              email: invitation.email,
-              role: invitation.role,
-              expiresAt: invitation.expiresAt.toISOString(),
-            }))}
-          />
+          <div id="invitations">
+            <InvitationManager
+              invitations={invitations.map((invitation) => ({
+                id: invitation.id,
+                email: invitation.email,
+                role: invitation.role,
+                expiresAt: invitation.expiresAt.toISOString(),
+              }))}
+            />
+          </div>
         ) : null}
       </div>
     </ConsoleShell>

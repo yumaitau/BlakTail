@@ -38,6 +38,9 @@ fi
 if (valid_environment; DOCKER_CONTEXT=default; validate_base_inputs) 2>/dev/null; then
   die "wrong Docker context did not fail closed"
 fi
+if ! (valid_environment; DOCKER_CONTEXT=homelab; validate_base_inputs); then
+  die "homelab Docker context must be accepted"
+fi
 if (valid_environment; TF_DIR=deploy/aws; validate_base_inputs) 2>/dev/null; then
   die "wrong Terraform directory did not fail closed"
 fi

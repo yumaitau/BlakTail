@@ -20,6 +20,20 @@ export function SignInForm({
   const router = useRouter();
   const [error, setError] = useState<string | null>(errorMessage ?? null);
   const [pending, startTransition] = useTransition();
+  const [ssoOrganisation, setSsoOrganisation] = useState<string | null>(
+    organisationId ?? null,
+  );
+
+  async function lookUpSso(email: string) {
+    if (!email.includes("@")) {
+      setSsoOrganisation(organisationId ?? null);
+      return;
+    }
+    const response = await fetch(`/api/oidc/discover?email=${encodeURIComponent(email)}`);
+    if (!response.ok) return;
+    const body = (await response.json()) as { organisationId?: string | null };
+    setSsoOrganisation(body.organisationId ?? organisationId ?? null);
+  }
 
   return (
     <div className="auth-screen">
@@ -62,6 +76,9 @@ export function SignInForm({
                   type="email"
                   autoComplete="username"
                   required
+                  onBlur={(event) => {
+                    void lookUpSso(event.currentTarget.value);
+                  }}
                 />
               </label>
               <label>
@@ -79,25 +96,31 @@ export function SignInForm({
                 {pending ? "Signing in…" : "Sign in"}
               </button>
             </form>
-            <form action="/api/oidc/start" method="get">
-              <input type="hidden" name="redirect" value={nextPath} />
-              <label>
-                Organisation ID for SSO
-                <input
-                  name="organisation"
-                  defaultValue={organisationId ?? ""}
-                  placeholder="Workspace UUID"
-                />
-              </label>
-              <button type="submit" className="secondary">
-                Continue with organisation SSO
-              </button>
-            </form>
-            <p className="muted">
-              Password accounts remain the break-glass path. Organisation SSO uses
-              Authorization Code + PKCE against an owner-configured HTTPS issuer.
-              Sessions stay in onshore Postgres.
-            </p>
+            <details
+              className="sso-disclosure"
+              {...(ssoOrganisation ? { open: true } : {})}
+            >
+              <summary>Use organisation single sign-on</summary>
+              <form action="/api/oidc/start" method="get">
+                <input type="hidden" name="redirect" value={nextPath} />
+                <input type="hidden" name="organisation" value={ssoOrganisation ?? ""} />
+                {ssoOrganisation ? (
+                  <p className="muted">
+                    This email domain uses your organisation&apos;s identity
+                    provider. Single sign-on is the usual path. Password remains
+                    the break-glass path.
+                  </p>
+                ) : (
+                  <p className="muted">
+                    Enter your work email above. If that domain is configured,
+                    single sign-on is offered here.
+                  </p>
+                )}
+                <button type="submit" className="secondary" disabled={!ssoOrganisation}>
+                  Continue with organisation SSO
+                </button>
+              </form>
+            </details>
             <p className="muted">
               <Link href="/privacy">Privacy and data handling</Link>
             </p>

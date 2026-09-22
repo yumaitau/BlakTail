@@ -14,11 +14,7 @@ case "$(cat "$STAGE_FILE" 2>/dev/null || true)" in
   *) die "bootstrap, prepare, or activate stage required" ;;
 esac
 
-docker_arch=$(docker --context "$DOCKER_CONTEXT" info --format '{{.Architecture}}')
-case "$docker_arch" in
-  aarch64 | arm64) ;;
-  *) die "Docker context $DOCKER_CONTEXT is unavailable or not ARM64" ;;
-esac
+require_arm64_builder
 
 repositories=$(tf_output_json ecr_repository_urls)
 registry=$(printf '%s' "$repositories" | jq -er '.console | split("/")[0]')
