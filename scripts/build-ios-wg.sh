@@ -28,8 +28,13 @@ for arch in ${ARCHS}; do
     iphonesimulator:x86_64) rust_target="x86_64-apple-ios" ;;
     *) fail "unsupported platform/arch ${PLATFORM_NAME}/${arch}" ;;
   esac
-  rustup target add "${rust_target}" >/dev/null
-  cargo build --manifest-path "${ROOT}/Cargo.toml" -p blaktail-ios-wg --release --target "${rust_target}"
+  # Xcode exports SDKROOT as the iPhone SDK. Rust then looks for std inside that SDK.
+  (
+    unset SDKROOT
+    unset IPHONEOS_DEPLOYMENT_TARGET
+    rustup target add "${rust_target}" >/dev/null
+    cargo build --manifest-path "${ROOT}/Cargo.toml" -p blaktail-ios-wg --release --target "${rust_target}"
+  )
   libs+=("${ROOT}/target/${rust_target}/release/libblaktail_ios_wg.a")
 done
 

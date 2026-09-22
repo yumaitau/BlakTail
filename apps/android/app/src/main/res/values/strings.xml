@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_title">BlakTail</string>
+    <string name="widget_description">Shows whether this phone is on the organisation network.</string>
+    <string name="widget_connect">Connect</string>
+    <string name="widget_disconnect">Disconnect</string>
+    <string name="widget_off">Off</string>
+    <string name="widget_connected">Connected</string>
+    <string name="widget_join">Join in the app</string>
+</resources>

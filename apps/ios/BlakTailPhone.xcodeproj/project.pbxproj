@@ -10,6 +10,9 @@
 		A11APP0000000000000001 /* BlakTailPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11APP0000000000000011 /* BlakTailPhoneApp.swift */; };
 		A11APP0000000000000002 /* BlakTailPhone in Frameworks */ = {isa = PBXBuildFile; productRef = A11APP0000000000000021 /* BlakTailPhone */; };
 		A11APP0000000000000003 /* BlakTailTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A11TUN0000000000000010 /* BlakTailTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A11APP0000000000000004 /* BlakTailWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A11WDG0000000000000010 /* BlakTailWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A11WDG0000000000000001 /* BlakTailWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11WDG0000000000000011 /* BlakTailWidgets.swift */; };
+		A11WDG0000000000000002 /* BlakTailPhone in Frameworks */ = {isa = PBXBuildFile; productRef = A11WDG0000000000000021 /* BlakTailPhone */; };
 		A11TUN0000000000000001 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11TUN0000000000000011 /* PacketTunnelProvider.swift */; };
 		A11TUN0000000000000002 /* TunnelSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11TUN0000000000000012 /* TunnelSession.swift */; };
 		A11TUN0000000000000003 /* WireGuardEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11TUN0000000000000013 /* WireGuardEngine.swift */; };
@@ -25,6 +28,13 @@
 			remoteGlobalIDString = A11TUN0000000000000050;
 			remoteInfo = BlakTailTunnel;
 		};
+		A11WDG0000000000000090 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A11APP0000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A11WDG0000000000000050;
+			remoteInfo = BlakTailWidget;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -35,6 +45,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				A11APP0000000000000003 /* BlakTailTunnel.appex in Embed Foundation Extensions */,
+				A11APP0000000000000004 /* BlakTailWidget.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -54,6 +65,10 @@
 		A11TUN0000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A11TUN0000000000000016 /* BlakTailTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlakTailTunnel.entitlements; sourceTree = "<group>"; };
 		A11TUN0000000000000017 /* BlakTailTunnel-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "BlakTailTunnel-Bridging-Header.h"; sourceTree = "<group>"; };
+		A11WDG0000000000000010 /* BlakTailWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BlakTailWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A11WDG0000000000000011 /* BlakTailWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlakTailWidgets.swift; sourceTree = "<group>"; };
+		A11WDG0000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A11WDG0000000000000013 /* BlakTailWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlakTailWidget.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +88,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A11WDG0000000000000030 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11WDG0000000000000002 /* BlakTailPhone in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -82,6 +105,7 @@
 				A11APP0000000000000041 /* App */,
 				A11APP0000000000000042 /* Resources */,
 				A11TUN0000000000000044 /* Tunnel */,
+				A11WDG0000000000000044 /* Widget */,
 				A11APP0000000000000043 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -117,11 +141,22 @@
 			path = Tunnel;
 			sourceTree = "<group>";
 		};
+		A11WDG0000000000000044 /* Widget */ = {
+			isa = PBXGroup;
+			children = (
+				A11WDG0000000000000011 /* BlakTailWidgets.swift */,
+				A11WDG0000000000000012 /* Info.plist */,
+				A11WDG0000000000000013 /* BlakTailWidget.entitlements */,
+			);
+			path = Widget;
+			sourceTree = "<group>";
+		};
 		A11APP0000000000000043 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				A11APP0000000000000010 /* BlakTail.app */,
 				A11TUN0000000000000010 /* BlakTailTunnel.appex */,
+				A11WDG0000000000000010 /* BlakTailWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -142,6 +177,7 @@
 			);
 			dependencies = (
 				A11TUN0000000000000091 /* PBXTargetDependency */,
+				A11WDG0000000000000091 /* PBXTargetDependency */,
 			);
 			name = BlakTailPhone;
 			packageProductDependencies = (
@@ -172,6 +208,26 @@
 			productReference = A11TUN0000000000000010 /* BlakTailTunnel.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A11WDG0000000000000050 /* BlakTailWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A11WDG0000000000000070 /* Build configuration list for PBXNativeTarget "BlakTailWidget" */;
+			buildPhases = (
+				A11WDG0000000000000060 /* Sources */,
+				A11WDG0000000000000030 /* Frameworks */,
+				A11WDG0000000000000061 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BlakTailWidget;
+			packageProductDependencies = (
+				A11WDG0000000000000021 /* BlakTailPhone */,
+			);
+			productName = BlakTailWidget;
+			productReference = A11WDG0000000000000010 /* BlakTailWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -186,6 +242,9 @@
 						CreatedOnToolsVersion = 16.0;
 					};
 					A11TUN0000000000000050 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					A11WDG0000000000000050 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -210,6 +269,7 @@
 			targets = (
 				A11APP0000000000000050 /* BlakTailPhone */,
 				A11TUN0000000000000050 /* BlakTailTunnel */,
+				A11WDG0000000000000050 /* BlakTailWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -223,6 +283,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A11TUN0000000000000061 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A11WDG0000000000000061 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -274,6 +341,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A11WDG0000000000000060 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11WDG0000000000000001 /* BlakTailWidgets.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -281,6 +356,11 @@
 			isa = PBXTargetDependency;
 			target = A11TUN0000000000000050 /* BlakTailTunnel */;
 			targetProxy = A11TUN0000000000000090 /* PBXContainerItemProxy */;
+		};
+		A11WDG0000000000000091 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A11WDG0000000000000050 /* BlakTailWidget */;
+			targetProxy = A11WDG0000000000000090 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -430,6 +510,56 @@
 			};
 			name = Release;
 		};
+		A11WDG0000000000000093 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Widget/BlakTailWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Widget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = au.org.blaktail.ios.widget;
+				PRODUCT_NAME = BlakTailWidget;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A11WDG0000000000000094 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Widget/BlakTailWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Widget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = au.org.blaktail.ios.widget;
+				PRODUCT_NAME = BlakTailWidget;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -447,6 +577,15 @@
 			buildConfigurations = (
 				A11TUN0000000000000093 /* Debug */,
 				A11TUN0000000000000094 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A11WDG0000000000000070 /* Build configuration list for PBXNativeTarget "BlakTailWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11WDG0000000000000093 /* Debug */,
+				A11WDG0000000000000094 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -483,6 +622,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A11MAC0000000000000020 /* XCLocalSwiftPackageReference "../macos" */;
 			productName = BlakTailCore;
+		};
+		A11WDG0000000000000021 /* BlakTailPhone */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A11APP0000000000000020 /* XCLocalSwiftPackageReference "." */;
+			productName = BlakTailPhone;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

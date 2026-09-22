@@ -2,6 +2,7 @@ import BlakTailCore
 
 extension PhoneModel {
     public func connect() async {
+        defer { publishWidget() }
         if enrollment != nil {
             isBusy = true
             connectionState = .connecting
@@ -87,6 +88,7 @@ extension PhoneModel {
     }
 
     public func disconnect() async {
+        defer { publishWidget() }
         isBusy = true
         connectionState = .disconnecting
         lastError = nil
@@ -103,6 +105,7 @@ extension PhoneModel {
     }
 
     public func leaveNetwork() async {
+        defer { publishWidget() }
         isBusy = true
         lastError = nil
         feedbackMessage = nil
@@ -135,6 +138,7 @@ extension PhoneModel {
             if connectionState == .connected {
                 connectionState = .disconnected
             }
+            publishWidget()
             return
         }
         if await tunnel.isRunning() {
@@ -142,5 +146,18 @@ extension PhoneModel {
         } else if connectionState == .connected {
             connectionState = .disconnected
         }
+        publishWidget()
+    }
+
+    func publishWidget() {
+        PhoneWidgetStore.save(
+            PhoneWidgetSnapshot(
+                label: enrollment == nil ? "Join in the app" : connectionState.label,
+                organisation: enrollment?.organisationName ?? selectedOrganisation?.name ?? "",
+                address: enrollment?.assignedIP ?? "",
+                connected: connectionState == .connected,
+                enrolled: enrollment != nil
+            )
+        )
     }
 }

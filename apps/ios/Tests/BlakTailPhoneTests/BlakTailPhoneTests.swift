@@ -3,6 +3,19 @@ import BlakTailCore
 import XCTest
 
 final class BlakTailPhoneTests: XCTestCase {
+    func testWidgetSnapshotRoundTrip() {
+        let suite = "au.org.blaktail.ios.widget-test.\(UUID().uuidString)"
+        let snapshot = PhoneWidgetSnapshot(
+            label: "Connected",
+            organisation: "Community services",
+            address: "100.64.0.8/32",
+            connected: true,
+            enrolled: true
+        )
+        PhoneWidgetStore.save(snapshot, suite: suite)
+        XCTAssertEqual(PhoneWidgetStore.load(suite: suite), snapshot)
+    }
+
     func testSharedProjectMission() {
         XCTAssertEqual(
             Tagline.text,

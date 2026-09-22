@@ -101,15 +101,19 @@ struct MagicDNSResponder {
         let host = cidr.split(separator: "/").first.map(String.init) ?? cidr
         if let v4 = IPv4Address(host) {
             var bytes = [UInt8](repeating: 0, count: 4)
-            _ = withUnsafeBytes(of: v4.rawValue) { raw in
-                raw.prefix(4).copyBytes(to: &bytes)
+            withUnsafeBytes(of: v4.rawValue) { raw in
+                for (index, byte) in raw.prefix(4).enumerated() {
+                    bytes[index] = byte
+                }
             }
             return .v4(Data(bytes))
         }
         if let v6 = IPv6Address(host) {
             var bytes = [UInt8](repeating: 0, count: 16)
-            _ = withUnsafeBytes(of: v6.rawValue) { raw in
-                raw.prefix(16).copyBytes(to: &bytes)
+            withUnsafeBytes(of: v6.rawValue) { raw in
+                for (index, byte) in raw.prefix(16).enumerated() {
+                    bytes[index] = byte
+                }
             }
             return .v6(Data(bytes))
         }

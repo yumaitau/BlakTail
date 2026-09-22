@@ -106,11 +106,13 @@ class TunnelService : VpnService() {
                 }
             }
         }.also(Thread::start)
+        BlakTailWidget.publish(this, true)
         return START_STICKY
     }
 
     override fun onDestroy() {
         running.set(false)
+        BlakTailWidget.publish(this, false)
         socket?.close()
         tun?.close()
         workers.forEach { it.join(500) }

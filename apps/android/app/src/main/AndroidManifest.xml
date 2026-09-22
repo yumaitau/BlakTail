@@ -23,6 +23,17 @@
                 <data android:scheme="blaktail" android:host="auth" android:path="/callback" />
             </intent-filter>
         </activity>
+        <receiver
+            android:name=".BlakTailWidget"
+            android:exported="true"
+            android:label="@string/widget_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/blaktail_widget_info" />
+        </receiver>
         <service
             android:name=".TunnelService"
             android:exported="false"

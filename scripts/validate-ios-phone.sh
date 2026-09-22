@@ -34,6 +34,14 @@ grep -Fq "NEPacketTunnelProvider" apps/ios/Tunnel/PacketTunnelProvider.swift \
   || fail "tunnel must be a Network Extension packet tunnel"
 grep -Fq "group.au.org.blaktail.ios" apps/ios/App/BlakTailPhone.entitlements \
   || fail "app must declare the iPhone app group"
+grep -Fq "group.au.org.blaktail.ios" apps/ios/Widget/BlakTailWidget.entitlements \
+  || fail "widget must share the iPhone app group"
+grep -Fq "com.apple.widgetkit-extension" apps/ios/Widget/Info.plist \
+  || fail "widget must be a WidgetKit extension"
+grep -Fq "SetTunnelIntent" apps/ios/Widget/BlakTailWidgets.swift \
+  || fail "widget must toggle the existing packet tunnel"
+grep -Fq "BlakTailWidget" apps/android/app/src/main/AndroidManifest.xml \
+  || fail "Android home-screen widget must be registered"
 grep -Fq "au.org.blaktail.ios.tunnel" apps/ios/Tunnel/Info.plist \
   || fail "tunnel bundle identifier must be au.org.blaktail.ios.tunnel"
 grep -Fq "TabView" apps/ios/Sources/BlakTailPhone/Views/RootView.swift \

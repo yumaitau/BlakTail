@@ -67,6 +67,7 @@ class MainActivity : AppCompatActivity() {
                             .apply()
                         runOnUiThread {
                             status.text = "Joined as ${joined.address}. Connect to start the tunnel."
+                            BlakTailWidget.refresh(this@MainActivity)
                         }
                     }.onFailure { error ->
                         runOnUiThread { status.text = error.message ?: "Enrolment failed" }
@@ -152,6 +153,7 @@ class MainActivity : AppCompatActivity() {
         if (prepare == null) {
             startForegroundService(tunnelIntent)
             status.text = "Tunnel started"
+            BlakTailWidget.refresh(this)
         } else {
             vpnReady.launch(prepare)
         }
