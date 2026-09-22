@@ -1,8 +1,9 @@
 # Windows node agent plan (issue #11)
 
-No Windows agent ships yet. This document records the intended plan so a
-future slice can implement it without re-deciding the shape. Nothing here
-is built, tested, or released.
+The windowed Windows client is not built. The tool that is built is
+`blaktail-windows` (same sign-in callback as the Mac and iPhone apps) plus
+`packaging/windows/install-blaktail-service.ps1` for `blaktaild run`.
+The userspace tunnel backend is still the open cut below.
 
 ## Direction
 

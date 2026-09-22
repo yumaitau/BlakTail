@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   emailDomainAllowed,
   groupsAllowed,
+  mergeGroups,
   requireVerifiedEmail,
   subjectAllowed,
   syntheticOidcEmail,
@@ -83,6 +84,10 @@ describe("OIDC ID token verification", () => {
     expect(groupsAllowed({ ...valid, groups: ["rangers"] }, ["staff", "rangers"])).toBe(true);
     expect(groupsAllowed({ ...valid, groups: ["visitors"] }, ["staff"])).toBe(false);
     expect(groupsAllowed(valid, ["staff"])).toBe(false);
+    expect(mergeGroups({ ...valid, groups: ["staff"] }, { groups: ["other"] }).groups).toEqual([
+      "staff",
+    ]);
+    expect(mergeGroups(valid, { groups: ["rangers", 1, ""] }).groups).toEqual(["rangers"]);
     expect(() =>
       requireVerifiedEmail(
         { ...valid, email_verified: false },

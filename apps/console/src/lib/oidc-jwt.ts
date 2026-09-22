@@ -156,6 +156,18 @@ export function groupsAllowed(claims: IdTokenClaims, allowGroups: string[]): boo
   return allowGroups.some((group) => present.has(group));
 }
 
+/** Keep ID-token groups. If the token has none, take the userinfo `groups` claim. */
+export function mergeGroups(claims: IdTokenClaims, userInfo: unknown): IdTokenClaims {
+  if (groupsFromClaims(claims).length > 0) return claims;
+  if (!userInfo || typeof userInfo !== "object") return claims;
+  const groups = (userInfo as { groups?: unknown }).groups;
+  if (!Array.isArray(groups)) return claims;
+  return {
+    ...claims,
+    groups: groups.filter((group): group is string => typeof group === "string" && group.length > 0),
+  };
+}
+
 export function requireVerifiedEmail(
   claims: IdTokenClaims,
   allowDomains: string[],

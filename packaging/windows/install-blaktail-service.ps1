@@ -26,4 +26,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 sc.exe description $ServiceName "Organisation private network agent. Enrolment stays in the local state directory."
 Start-Service -Name $ServiceName
-Write-Output "BlakTail service started. Send a file with: blaktaild share send --url http://host:5647/label/file.txt --file .\file.txt"
+Write-Output "BlakTail service started."
+Write-Output "Sign in: blaktail-windows sign-in --console https://console.example"
+Write-Output "Send a file: blaktaild share send --url http://host:5647/label/file.txt --file .\file.txt"

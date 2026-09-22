@@ -14,6 +14,8 @@ import {
   emailDomainAllowed,
   findJwk,
   groupsAllowed,
+  groupsFromClaims,
+  mergeGroups,
   requireVerifiedEmail,
   signBetterAuthCookie,
   subjectAllowed,
@@ -195,6 +197,7 @@ type OidcMetadata = {
   token_endpoint: string;
   jwks_uri: string;
   issuer: string;
+  userinfo_endpoint?: string;
 };
 
 async function fetchOidcMetadata(issuer: string): Promise<OidcMetadata> {
@@ -272,7 +275,10 @@ export async function completeOidcLogin(input: {
   if (!tokenResponse.ok) {
     throw new OidcError("The identity provider rejected the authorization code.");
   }
-  const tokens = (await tokenResponse.json()) as { id_token?: string };
+  const tokens = (await tokenResponse.json()) as {
+    id_token?: string;
+    access_token?: string;
+  };
   if (!tokens.id_token) {
     throw new OidcError("The identity provider did not return an ID token.");
   }
@@ -290,6 +296,20 @@ export async function completeOidcLogin(input: {
     throw new OidcError(
       error instanceof OidcTokenError ? error.message : "ID token was rejected.",
     );
+  }
+  if (
+    provider.allowGroupsJson.length > 0 &&
+    groupsFromClaims(claims).length === 0 &&
+    tokens.access_token &&
+    metadata.userinfo_endpoint?.startsWith("https://")
+  ) {
+    const info = await fetch(metadata.userinfo_endpoint, {
+      redirect: "error",
+      headers: { authorization: `Bearer ${tokens.access_token}` },
+    });
+    if (info.ok) {
+      claims = mergeGroups(claims, await info.json());
+    }
   }
   requireVerifiedEmail(claims, provider.allowDomainsJson);
   if (!emailDomainAllowed(claims.email, provider.allowDomainsJson)) {
