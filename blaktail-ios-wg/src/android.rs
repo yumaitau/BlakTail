@@ -76,7 +76,10 @@ pub extern "system" fn Java_au_org_blaktail_NativeTunnel_addPeer<'local>(
         return -1;
     }
     let mut key = [0u8; 32];
-    if env.get_byte_array_region(public_key, 0, bytemut(&mut key)).is_err() {
+    if env
+        .get_byte_array_region(public_key, 0, bytemut(&mut key))
+        .is_err()
+    {
         return -1;
     }
     let Ok(allowed_bytes) = env.convert_byte_array(allowed) else {

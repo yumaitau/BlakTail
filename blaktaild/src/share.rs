@@ -373,7 +373,14 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
     parsed.body = buffer[body_start..length].to_vec();
     if let Some(needed) = parsed.content_length {
         if needed > MAX_PUT_BYTES {
-            write_plain(&mut stream, 413, "Payload Too Large", "file is too large\n", true).await?;
+            write_plain(
+                &mut stream,
+                413,
+                "Payload Too Large",
+                "file is too large\n",
+                true,
+            )
+            .await?;
             return Ok(());
         }
         while parsed.body.len() < needed {
@@ -492,8 +499,7 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
 
 fn share_for_path<'a>(shares: &'a [LocalShare], path: &str) -> Option<&'a LocalShare> {
     shares.iter().filter(|share| share.enabled).find(|share| {
-        path == format!("/{}", share.label)
-            || path.starts_with(&format!("/{}/", share.label))
+        path == format!("/{}", share.label) || path.starts_with(&format!("/{}/", share.label))
     })
 }
 
@@ -505,7 +511,9 @@ fn resolve_put_path(share: &LocalShare, url_path: &str) -> Result<PathBuf, Error
         .trim_start_matches('/');
     if rest.is_empty()
         || rest.ends_with('/')
-        || rest.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return Err(Error::Message("share file path is not acceptable".into()));
     }
@@ -542,7 +550,14 @@ async fn serve_put(
         return Ok(());
     }
     if body.len() > MAX_PUT_BYTES {
-        write_plain(stream, 413, "Payload Too Large", "file is too large\n", true).await?;
+        write_plain(
+            stream,
+            413,
+            "Payload Too Large",
+            "file is too large\n",
+            true,
+        )
+        .await?;
         return Ok(());
     }
     let target = match resolve_put_path(share, path) {

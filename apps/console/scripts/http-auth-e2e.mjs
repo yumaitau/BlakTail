@@ -37,14 +37,10 @@ const linkedIdentity = {
   password: "blue-identity-test-password",
   organisation: "Blue Network",
 };
-const migrations = [
-  "0000_init.sql",
-  "0001_auth_membership_constraints.sql",
-  "0002_account_issuer.sql",
-  "0003_secure_bootstrap.sql",
-  "0004_linked_identities.sql",
-  "0005_oidc_and_membership_lifecycle.sql",
-];
+const migrationJournal = JSON.parse(
+  await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"),
+);
+const migrations = migrationJournal.entries.map(({ tag }) => `${tag}.sql`);
 
 async function listen(server) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

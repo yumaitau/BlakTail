@@ -581,10 +581,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            error.to_string().contains("outside Australia"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("outside Australia"), "{error}");
     }
 
     #[tokio::test]
