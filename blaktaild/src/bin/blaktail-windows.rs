@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "blaktail-windows", about = "BlakTail tool for Windows desktops")]
+#[command(
+    name = "blaktail-windows",
+    about = "BlakTail tool for Windows desktops"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -81,7 +84,9 @@ async fn run(command: Command) -> Result<(), String> {
 
 fn sign_in_url(console: &str) -> Result<String, String> {
     let base = trim(console);
-    if !(base.starts_with("https://") || base.starts_with("http://127.0.0.1") || base.starts_with("http://localhost"))
+    if !(base.starts_with("https://")
+        || base.starts_with("http://127.0.0.1")
+        || base.starts_with("http://localhost"))
     {
         return Err("console URL must be HTTPS".into());
     }
@@ -163,12 +168,20 @@ fn put_share(url: &str, bytes: &[u8]) -> Result<u16, String> {
         "PUT /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         bytes.len()
     );
-    stream.write_all(request.as_bytes()).map_err(|error| error.to_string())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| error.to_string())?;
     stream.write_all(bytes).map_err(|error| error.to_string())?;
     let mut response = [0u8; 64];
-    let read = stream.read(&mut response).map_err(|error| error.to_string())?;
+    let read = stream
+        .read(&mut response)
+        .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&response[..read]);
-    let status = text.split_whitespace().nth(1).and_then(|value| value.parse().ok()).unwrap_or(0);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     if status != 201 && status != 204 {
         return Err(format!("share send failed ({status})"));
     }

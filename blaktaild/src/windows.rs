@@ -120,15 +120,19 @@ impl Network for WindowsNetwork {
         }
         let raw = unsafe { blaktail_tunnel_create(private.as_ptr()) };
         if raw.is_null() {
-            return Err(Error::Message("could not create the Windows WireGuard engine".into()));
+            return Err(Error::Message(
+                "could not create the Windows WireGuard engine".into(),
+            ));
         }
         *self
             .tunnel
             .lock()
-            .map_err(|_| Error::Message("windows tunnel lock poisoned".into()))? = Some(TunnelHandle { raw });
+            .map_err(|_| Error::Message("windows tunnel lock poisoned".into()))? =
+            Some(TunnelHandle { raw });
 
-        let udp = UdpSocket::bind("0.0.0.0:0")
-            .map_err(|error| Error::Message(format!("could not bind Windows UDP socket: {error}")))?;
+        let udp = UdpSocket::bind("0.0.0.0:0").map_err(|error| {
+            Error::Message(format!("could not bind Windows UDP socket: {error}"))
+        })?;
         udp.set_nonblocking(true).ok();
         if let Ok(bound) = udp.local_addr() {
             // Relay injection matches the loopback source kernel and userspace
@@ -138,16 +142,17 @@ impl Network for WindowsNetwork {
                 bound.port(),
             )));
         }
-        let library = unsafe { wintun::load() }
-            .map_err(|error| Error::Message(format!("wintun.dll is required beside blaktaild: {error}")))?;
-        let adapter = wintun::Adapter::create(&library, "BlakTail", "BlakTail", None)
-            .map_err(|error| Error::Message(format!("could not create the WinTun adapter: {error}")))?;
+        let library = unsafe { wintun::load() }.map_err(|error| {
+            Error::Message(format!("wintun.dll is required beside blaktaild: {error}"))
+        })?;
+        let adapter =
+            wintun::Adapter::create(&library, "BlakTail", "BlakTail", None).map_err(|error| {
+                Error::Message(format!("could not create the WinTun adapter: {error}"))
+            })?;
         assign_addresses(&addresses)?;
-        let session = Arc::new(
-            adapter
-                .start_session(0x20_0000)
-                .map_err(|error| Error::Message(format!("could not start the WinTun session: {error}")))?,
-        );
+        let session = Arc::new(adapter.start_session(0x20_0000).map_err(|error| {
+            Error::Message(format!("could not start the WinTun session: {error}"))
+        })?);
         self.stop.store(false, Ordering::Relaxed);
         let stop = self.stop.clone();
         let endpoints = self.endpoints.clone();
@@ -186,7 +191,13 @@ impl Network for WindowsNetwork {
             }
         }
         let _ = std::process::Command::new("netsh")
-            .args(["interface", "set", "interface", "name=BlakTail", "admin=disabled"])
+            .args([
+                "interface",
+                "set",
+                "interface",
+                "name=BlakTail",
+                "admin=disabled",
+            ])
             .status();
         Ok(())
     }
@@ -226,7 +237,9 @@ impl Network for WindowsNetwork {
         for key in endpoints.keys() {
             let stamp = unsafe { blaktail_tunnel_last_handshake(raw, key.as_ptr()) };
             if stamp > 0 {
-                if let Some(hex) = peer_key_hex(&base64::engine::general_purpose::STANDARD.encode(key)) {
+                if let Some(hex) =
+                    peer_key_hex(&base64::engine::general_purpose::STANDARD.encode(key))
+                {
                     out.insert(hex, stamp);
                 }
             }
@@ -258,9 +271,7 @@ fn add_peer(raw: *mut c_void, peer: &Peer) -> Result<(), Error> {
     }
     let allowed = std::ffi::CString::new(peer.allowed_ips.join(","))
         .map_err(|_| Error::Message("peer allowed IPs contain a null".into()))?;
-    let code = unsafe {
-        blaktail_tunnel_add_peer(raw, public.as_ptr(), allowed.as_ptr(), 25)
-    };
+    let code = unsafe { blaktail_tunnel_add_peer(raw, public.as_ptr(), allowed.as_ptr(), 25) };
     if code < 0 {
         return Err(Error::Message(format!(
             "could not add Windows peer {}",
@@ -310,7 +321,11 @@ fn prefix_mask(prefix: &str) -> Result<String, Error> {
     if bits > 32 {
         return Err(Error::Message(format!("prefix {prefix} is invalid")));
     }
-    let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+    let mask = if bits == 0 {
+        0
+    } else {
+        u32::MAX << (32 - bits)
+    };
     Ok(std::net::Ipv4Addr::from(mask).to_string())
 }
 
@@ -343,7 +358,11 @@ fn pump(
                 )
             };
             if code == WRITE_NETWORK {
-                if let Some(endpoint) = endpoints.lock().ok().and_then(|map| map.get(&peer).copied()) {
+                if let Some(endpoint) = endpoints
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(&peer).copied())
+                {
                     let _ = udp.send_to(&cipher[..dst_len], endpoint);
                 }
             }
@@ -372,7 +391,11 @@ fn pump(
             )
         };
         if code == WRITE_NETWORK {
-            if let Some(endpoint) = endpoints.lock().ok().and_then(|map| map.get(&peer).copied()) {
+            if let Some(endpoint) = endpoints
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&peer).copied())
+            {
                 let _ = udp.send_to(&cipher[..dst_len], endpoint);
             }
         }
