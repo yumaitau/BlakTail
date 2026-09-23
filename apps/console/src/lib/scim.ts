@@ -104,7 +104,7 @@ export async function provisionScimUser(organisationId: string, input: ScimUserI
     const [existing] = await transaction`
       SELECT id FROM "user" WHERE lower(email) = ${input.userName} LIMIT 1
     `;
-    let id = existing ? String(existing.id) : crypto.randomUUID();
+    const id = existing ? String(existing.id) : crypto.randomUUID();
     if (!existing) {
       await transaction`
         INSERT INTO "user" (id, name, email, email_verified)
