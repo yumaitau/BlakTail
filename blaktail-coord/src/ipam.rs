@@ -301,8 +301,8 @@ pub fn allocate_from_pools(
             }
             IpAddr::V6(n) => {
                 let base = u128::from(n);
-                let mut offset: u128 = 1; // skip subnet-router anycast (all-zero)
-                for _ in 0..MAX_ALLOC_PROBES {
+                // Skip subnet-router anycast (all-zero).
+                for offset in 1..=u128::from(MAX_ALLOC_PROBES) {
                     let cand = base.checked_add(offset)?;
                     if !cidr_contains(net, prefix, IpAddr::V6(Ipv6Addr::from(cand))) {
                         break;
@@ -314,7 +314,6 @@ pub fn allocate_from_pools(
                     {
                         return Some(ip.to_string());
                     }
-                    offset += 1;
                 }
             }
         }

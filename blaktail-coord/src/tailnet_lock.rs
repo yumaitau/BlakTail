@@ -74,7 +74,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>, AdmissionError> {
-    if text.len() % 2 != 0 || text.is_empty() {
+    if !text.len().is_multiple_of(2) || text.is_empty() {
         return Err(AdmissionError::BadSignatureEncoding);
     }
     let mut out = Vec::with_capacity(text.len() / 2);
@@ -85,7 +85,7 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, AdmissionError> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(AdmissionError::BadSignatureEncoding),
     };
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         out.push((nybble(pair[0])? << 4) | nybble(pair[1])?);
     }
     Ok(out)
