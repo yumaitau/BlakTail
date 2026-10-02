@@ -28,6 +28,17 @@ scopes; the access token still carries the registered set. Revoking the
 client rejects later access tokens. Webhook destinations are minted separately
 and their signing secrets are not OAuth credentials.
 
+Clients are service users: they cannot sign in to the console, and their writes
+are audited as `api:<client id>` with actor role `api_client`. Owners can rotate
+a client (`POST /v1/orgs/{org}/api-clients/{id}/rotate`, optional
+`{"expires_in_seconds": n}`), which returns a new shown-once secret and
+invalidates the old secret and all its access tokens at once, or suspend and
+resume it (`…/suspend`, `…/resume`). Suspension blocks token minting and
+rejects already-issued access tokens on their next request. These are console
+routes authorised by the signed console assertion, not `/api/v1` operations.
+Human console sessions calling `/api/v1` need the role permission matching
+each write scope ([roles.md](roles.md)).
+
 ## Writes
 
 - Policy PUT requires the current `etag`. `{"rollback": true}` restores the
