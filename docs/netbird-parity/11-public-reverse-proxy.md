@@ -17,3 +17,9 @@ NetBird Reverse Proxy exposes private services through HTTPS and other protocols
 Security ADR and threat model signed off before implementation. Public endpoint off by default, cannot be created by member, denies wrong host/origin and survives certificate rotation safely. Live Internet smoke verifies intended service only; private peer addresses/keys do not leak in response headers/logs. Disable removes external access within specified bound.
 
 **Evidence:** closed #47, `README.md` (self-hosted), `docs/threat-model.md`; https://docs.netbird.io/manage/reverse-proxy, https://docs.netbird.io/manage/reverse-proxy/custom-domains.
+
+## Status (2 October 2026)
+
+**Done:** decision record drafted at [`docs/adr/0007-public-ingress.md`](../adr/0007-public-ingress.md) with gates, constraints and a recommendation: defer until private services (draft 10) are field-proven and a named organisation needs public access.
+**Proven by tests:** not applicable — decision only; no code or navigation added.
+**Still needs live/field proof or a decision:** product-owner sign-off on the ADR (status stays *proposed* until then) and independent security review.

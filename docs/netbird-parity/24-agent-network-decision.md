@@ -17,3 +17,9 @@ As of research snapshot, NetBird has a distinct Agent Network section for AI pro
 Written decision with owner, user evidence, architecture, sovereignty review and go/no-go criteria. If deferred/rejected, close with rationale; do not create empty Agent Network nav. If adopted, follow-up technical issues specify source and retention of every sensitive data field before any inference traffic.
 
 **Evidence:** `PRODUCT.md`, `README.md`; https://docs.netbird.io/agent-network, https://github.com/netbirdio/dashboard/tree/main/src/app/%28dashboard%29/agent-network.
+
+## Status (2 October 2026)
+
+**Done:** decision record drafted at [`docs/adr/0008-agent-network.md`](../adr/0008-agent-network.md) with gates, constraints and a recommendation: reject an AI gateway inside BlakTail; document running a self-hosted model as a private service governed by existing policy.
+**Proven by tests:** not applicable — decision only; no code or navigation added.
+**Still needs live/field proof or a decision:** product-owner sign-off on the ADR (status stays *proposed* until then).

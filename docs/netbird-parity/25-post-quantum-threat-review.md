@@ -17,3 +17,9 @@ NetBird documents an optional post-quantum mode; its source includes Rosenpass i
 Security ADR compares deferral versus hybrid option; if implemented, interop and downgrade tests cover mixed versions, relay failover, compromised coordinator, lost local key and mobile battery. Console shows actual negotiated protection per peer, not account-wide aspirational badge.
 
 **Evidence:** `README.md` technical overview, `blaktaild/src/lib.rs`; https://docs.netbird.io/client/post-quantum-cryptography, https://github.com/netbirdio/netbird/tree/main/client/internal/rosenpass.
+
+## Status (2 October 2026)
+
+**Done:** decision record drafted at [`docs/adr/0009-post-quantum.md`](../adr/0009-post-quantum.md) with gates, constraints and a recommendation: defer; never a custom KEM; any prototype must be opt-in, per-peer negotiated and independently reviewed.
+**Proven by tests:** not applicable — decision only; no code or navigation added.
+**Still needs live/field proof or a decision:** product-owner sign-off on the ADR (status stays *proposed* until then) and independent security review.
