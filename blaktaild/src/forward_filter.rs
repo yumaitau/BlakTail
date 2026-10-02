@@ -41,6 +41,16 @@ pub struct ForwardRule {
     pub icmp: bool,
 }
 
+/// Takes the coordinator's filter when a response carries one. Once a filter
+/// is in force, a response without `forward_filter` (an older or degraded
+/// coordinator, a truncated body) keeps it: forwarding never silently
+/// reverts to accept-all.
+pub fn adopt(current: &mut Option<ForwardFilter>, incoming: Option<ForwardFilter>) {
+    if incoming.is_some() {
+        *current = incoming;
+    }
+}
+
 /// Rule bodies (without `-A <chain>`) per address family.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ForwardPlan {
@@ -347,6 +357,25 @@ mod tests {
         assert!(!rules.iter().any(|rule| rule.contains("not-a-prefix")));
         assert!(!rules.iter().any(|rule| rule.contains("--dport 0")));
         assert!(rules.contains(&"-s 100.64.0.5 -d 10.3.0.0/24 -p icmp -j ACCEPT".to_string()));
+    }
+
+    #[test]
+    fn missing_filter_keeps_the_current_one() {
+        let installed = ForwardFilter {
+            allow: vec![ForwardRule {
+                tcp: vec!["443".into()],
+                ..entry("10.20.1.0/24")
+            }],
+            ..ForwardFilter::default()
+        };
+        let mut current = None;
+        adopt(&mut current, None);
+        assert_eq!(current, None);
+        adopt(&mut current, Some(installed.clone()));
+        adopt(&mut current, None);
+        assert_eq!(current, Some(installed));
+        adopt(&mut current, Some(ForwardFilter::default()));
+        assert_eq!(current, Some(ForwardFilter::default()));
     }
 
     #[test]

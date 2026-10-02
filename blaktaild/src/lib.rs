@@ -724,7 +724,7 @@ impl Coordinator {
         state.relay_expires_at = body.relay_expires_at;
         apply_org_dns_snapshot(state, body.dns);
         state.published_shares = body.shares;
-        state.forward_filter = body.forward_filter;
+        forward_filter::adopt(&mut state.forward_filter, body.forward_filter);
         Ok(peers)
     }
 
@@ -1798,21 +1798,18 @@ impl Network for LinuxNetwork {
         interface: &str,
         filter: Option<&forward_filter::ForwardFilter>,
     ) -> Result<(), Error> {
-        let was_filtered = self.forward_filter.is_some();
-        self.forward_filter = filter.cloned();
-        if self.router_routes.is_empty() {
-            // Stored for the next `configure_router`; nothing forwards yet.
+        // Fail closed: once a filter is in force, `None` keeps it rather than
+        // reverting to the legacy accept-all rules.
+        forward_filter::adopt(&mut self.forward_filter, filter.cloned());
+        if self.router_routes.is_empty() || self.forward_filter.is_none() {
+            // Stored for the next `configure_router`; nothing forwards yet,
+            // or no filter was ever received (legacy accepts stay).
             return Ok(());
         }
-        if self.forward_filter.is_some() {
-            // The jump goes in at FORWARD 1 before legacy accepts leave, so
-            // no packet is forwarded unfiltered during the switch.
-            self.install_forward_filter(interface)?;
-            Self::remove_route_accepts(interface, &self.router_routes);
-        } else if was_filtered {
-            Self::install_route_accepts(interface, &self.router_routes)?;
-            Self::clear_forward_filter(interface);
-        }
+        // The jump goes in at FORWARD 1 before legacy accepts leave, so no
+        // packet is forwarded unfiltered during the switch.
+        self.install_forward_filter(interface)?;
+        Self::remove_route_accepts(interface, &self.router_routes);
         Ok(())
     }
 }
@@ -2572,6 +2569,26 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn linux_forward_filter_survives_a_response_without_one() {
+        let filter = forward_filter::ForwardFilter {
+            deny: vec![],
+            allow: vec![forward_filter::ForwardRule {
+                sources: vec!["100.64.0.5/32".into()],
+                destination: "10.20.1.0/24".into(),
+                tcp: vec!["443".into()],
+                ..forward_filter::ForwardRule::default()
+            }],
+        };
+        // No router routes yet, so nothing touches iptables.
+        let mut network = LinuxNetwork::default();
+        network
+            .apply_forward_filter("blaktail0", Some(&filter))
+            .unwrap();
+        network.apply_forward_filter("blaktail0", None).unwrap();
+        assert_eq!(network.forward_filter, Some(filter));
     }
 
     #[cfg(target_os = "macos")]
