@@ -6,14 +6,36 @@ import { OrganisationSwitcher } from "./organisation-switcher";
 import { PathMotif } from "./path-motif";
 import { Wordmark } from "./wordmark";
 
-const links = [
-  { href: "/devices", label: "Devices" },
-  { href: "/join-keys", label: "Join keys" },
-  { href: "/acls", label: "Access" },
-  { href: "/audit", label: "Audit log" },
-  { href: "/status", label: "Status" },
-  { href: "/settings", label: "Settings" },
-] as const;
+// Task-based homes. Each link must be backed by a real page and API; add a
+// link here only when its page ships.
+const groups: { label: string; links: { href: string; label: string }[] }[] = [
+  {
+    label: "Devices",
+    links: [
+      { href: "/devices", label: "Devices" },
+      { href: "/join-keys", label: "Join keys" },
+    ],
+  },
+  {
+    label: "Access",
+    links: [{ href: "/acls", label: "Access policy" }],
+  },
+  {
+    label: "Events",
+    links: [{ href: "/audit", label: "Audit log" }],
+  },
+  {
+    label: "Settings",
+    links: [
+      { href: "/status", label: "Status" },
+      { href: "/settings", label: "Settings" },
+    ],
+  },
+];
+
+function isCurrent(current: string, href: string) {
+  return current === href || current.startsWith(`${href}/`);
+}
 
 export function ConsoleShell({
   ctx,
@@ -21,7 +43,7 @@ export function ConsoleShell({
   children,
 }: {
   ctx: ConsoleContext | PersonSessionContext;
-  current: (typeof links)[number]["href"];
+  current: string;
   children: ReactNode;
 }) {
   const selectedId =
@@ -54,16 +76,23 @@ export function ConsoleShell({
               }
             />
             <nav aria-label="Console">
-              {links.map((link) => (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  data-testid={`nav-${link.href.slice(1)}`}
-                  aria-current={current === link.href ? "page" : undefined}
-                >
-                  {link.label}
-                </Link>
-              ))}
+              {groups
+                .filter((group) => group.links.length > 0)
+                .map((group) => (
+                  <div className="nav-group" key={group.label}>
+                    <p className="nav-group-label">{group.label}</p>
+                    {group.links.map((link) => (
+                      <Link
+                        key={link.href}
+                        href={link.href}
+                        data-testid={`nav-${link.href.slice(1)}`}
+                        aria-current={isCurrent(current, link.href) ? "page" : undefined}
+                      >
+                        {link.label}
+                      </Link>
+                    ))}
+                  </div>
+                ))}
             </nav>
             <div className="account-block">
               <div>

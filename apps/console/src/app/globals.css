@@ -307,7 +307,21 @@ label:has(> input[type="checkbox"]) input {
 
 .nav nav {
   display: grid;
+  gap: 0.8rem;
+}
+
+.nav-group {
+  display: grid;
   gap: 0.2rem;
+}
+
+.nav-group-label {
+  margin: 0;
+  padding: 0 0.7rem;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .nav a {

@@ -6,6 +6,7 @@ pub mod https_services;
 pub mod ipam;
 mod metrics;
 mod org_dns;
+mod permissions;
 mod shares;
 pub mod tailnet_lock;
 mod webhooks;
@@ -71,7 +72,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 18;
+pub const CURRENT_SCHEMA_VERSION: i64 = 28;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -127,6 +128,8 @@ struct Migration {
     version: i64,
     name: &'static str,
     postgres_sql: &'static str,
+    /// SQLite DDL for migrations that do not need a hand-written Rust step.
+    sqlite_sql: Option<&'static str>,
 }
 
 const MIGRATIONS: &[Migration] = &[
@@ -134,91 +137,177 @@ const MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "consolidated baseline",
         postgres_sql: include_str!("../migrations/postgres/0001_baseline.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 2,
         name: "friendly device names",
         postgres_sql: include_str!("../migrations/postgres/0002_friendly_device_names.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 3,
         name: "console assertion replay protection",
         postgres_sql: include_str!("../migrations/postgres/0003_console_assertion_nonces.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 4,
         name: "bootstrap reservations and device poll throttling",
         postgres_sql: include_str!("../migrations/postgres/0004_bootstrap_and_poll_throttling.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 5,
         name: "device inventory, audit retention, and automation clients",
         postgres_sql: include_str!("../migrations/postgres/0005_inventory_admin_api.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 6,
         name: "organisation DNS settings",
         postgres_sql: include_str!("../migrations/postgres/0006_org_dns.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 7,
         name: "wireguard-only peers",
         postgres_sql: include_str!("../migrations/postgres/0007_wireguard_only_peers.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 8,
         name: "organisation control revision",
         postgres_sql: include_str!("../migrations/postgres/0008_control_revision.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 9,
         name: "oauth access tokens",
         postgres_sql: include_str!("../migrations/postgres/0009_oauth_access_tokens.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 10,
         name: "policy revision and previous document",
         postgres_sql: include_str!("../migrations/postgres/0010_acl_revision.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 11,
         name: "organisation webhook destinations and outbox",
         postgres_sql: include_str!("../migrations/postgres/0011_webhooks.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 12,
         name: "wireguard-only public-key overlap rotation",
         postgres_sql: include_str!("../migrations/postgres/0012_wg_only_overlap.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 13,
         name: "node shares and applied DNS revision",
         postgres_sql: include_str!("../migrations/postgres/0013_shares_and_dns_applied.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 14,
         name: "organisation IPAM pools and reservations",
         postgres_sql: include_str!("../migrations/postgres/0014_ipam.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 15,
         name: "opt-in flow visibility settings and records",
         postgres_sql: include_str!("../migrations/postgres/0015_flows.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 16,
         name: "domain application connectors",
         postgres_sql: include_str!("../migrations/postgres/0016_connectors.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 17,
         name: "private HTTPS services and CSRs",
         postgres_sql: include_str!("../migrations/postgres/0017_https_services.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 18,
         name: "tailnet lock admission roots",
         postgres_sql: include_str!("../migrations/postgres/0018_tailnet_lock.sql"),
+        sqlite_sql: None,
+    },
+    Migration {
+        version: 19,
+        name: "network resources and routes",
+        postgres_sql: include_str!("../migrations/postgres/0019_network_resources.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0019_network_resources.sql"
+        )),
+    },
+    Migration {
+        version: 20,
+        name: "IPAM reservations and connector leases",
+        postgres_sql: include_str!("../migrations/postgres/0020_ipam_connectors.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0020_ipam_connectors.sql"
+        )),
+    },
+    Migration {
+        version: 21,
+        name: "policy enforcement and posture",
+        postgres_sql: include_str!("../migrations/postgres/0021_policy_posture.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0021_policy_posture.sql")),
+    },
+    Migration {
+        version: 22,
+        name: "change drafts and topology",
+        postgres_sql: include_str!("../migrations/postgres/0022_change_drafts.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0022_change_drafts.sql")),
+    },
+    Migration {
+        version: 23,
+        name: "DNS zones and nameserver groups",
+        postgres_sql: include_str!("../migrations/postgres/0023_dns_zones.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0023_dns_zones.sql")),
+    },
+    Migration {
+        version: 24,
+        name: "private service lifecycle",
+        postgres_sql: include_str!("../migrations/postgres/0024_private_services.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0024_private_services.sql"
+        )),
+    },
+    Migration {
+        version: 25,
+        name: "peer lifecycle and enrolment",
+        postgres_sql: include_str!("../migrations/postgres/0025_peer_lifecycle.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0025_peer_lifecycle.sql")),
+    },
+    Migration {
+        version: 26,
+        name: "roles, service users and sign-in policy",
+        postgres_sql: include_str!("../migrations/postgres/0026_roles_identity.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0026_roles_identity.sql")),
+    },
+    Migration {
+        version: 27,
+        name: "audit, traffic and notifications",
+        postgres_sql: include_str!("../migrations/postgres/0027_events_notifications.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0027_events_notifications.sql"
+        )),
+    },
+    Migration {
+        version: 28,
+        name: "operator health and releases",
+        postgres_sql: include_str!("../migrations/postgres/0028_operations.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0028_operations.sql")),
     },
 ];
 
@@ -423,6 +512,15 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             16 => migrate_sqlite_to_v16(&mut tx).await?,
             17 => migrate_sqlite_to_v17(&mut tx).await?,
             18 => migrate_sqlite_to_v18(&mut tx).await?,
+            19..=28 => {
+                let sql = migration
+                    .sqlite_sql
+                    .ok_or(StoreError::InvalidMigrationPlan {
+                        expected,
+                        found: migration.version,
+                    })?;
+                sqlx::raw_sql(sql).execute(&mut *tx).await?;
+            }
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -446,6 +544,16 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             16 => "PRAGMA user_version=16",
             17 => "PRAGMA user_version=17",
             18 => "PRAGMA user_version=18",
+            19 => "PRAGMA user_version=19",
+            20 => "PRAGMA user_version=20",
+            21 => "PRAGMA user_version=21",
+            22 => "PRAGMA user_version=22",
+            23 => "PRAGMA user_version=23",
+            24 => "PRAGMA user_version=24",
+            25 => "PRAGMA user_version=25",
+            26 => "PRAGMA user_version=26",
+            27 => "PRAGMA user_version=27",
+            28 => "PRAGMA user_version=28",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -4276,7 +4384,8 @@ async fn list_audit_events(
     headers: HeaderMap,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEvent>>, ApiError> {
-    console_session(&s, &headers, org_id).await?;
+    let session = console_session(&s, &headers, org_id).await?;
+    permissions::require(&session, permissions::Permission::ViewAudit)?;
     purge_expired_audit(&s.store, org_id).await?;
     Ok(Json(load_audit_events(&s.store, org_id, &query).await?))
 }
@@ -9344,8 +9453,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 18);
-        sqlx::raw_sql("PRAGMA user_version=19")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+        sqlx::raw_sql("PRAGMA user_version=29")
             .execute(&pool)
             .await
             .unwrap();
