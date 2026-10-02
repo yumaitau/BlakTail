@@ -1,8 +1,8 @@
-import type { OrgRole } from "./roles";
+import { ORG_ROLES, type OrgRole } from "./roles";
 
 export type AclTag = "office" | "ranger" | "store";
 
-export const ACL_ROLES: OrgRole[] = ["owner", "admin", "member"];
+export const ACL_ROLES: OrgRole[] = [...ORG_ROLES];
 export const ACL_TAGS: AclTag[] = ["office", "ranger", "store"];
 
 export type AclPerson = {

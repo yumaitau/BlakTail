@@ -2,20 +2,17 @@
 
 import { useState, useTransition } from "react";
 import { mintJoinKeyAction } from "@/app/actions";
-import { canMutateTailnet, type OrgRole } from "@/lib/roles";
+import { can, permissionReason, type OrgRole } from "@/lib/roles";
 
 export function JoinKeyForm({ role }: { role: OrgRole }) {
   const [message, setMessage] = useState<string | null>(null);
   const [mintedKey, setMintedKey] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  const canMutate = canMutateTailnet(role);
+  const canMutate = can(role, "manage_join_keys");
 
   if (!canMutate) {
     return (
-      <p className="muted">
-        Your role is member, so you can look around but you cannot mint join
-        keys.
-      </p>
+      <p className="muted">{permissionReason(role, "manage_join_keys")}</p>
     );
   }
 

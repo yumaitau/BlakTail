@@ -142,3 +142,6 @@ jobs:
 
       - name: Auth and invitation HTTP E2E
         run: bun --filter @blaktail/console test:auth-e2e
+
+      - name: Roles, step-up and TOTP HTTP E2E
+        run: bun --filter @blaktail/console test:roles-e2e

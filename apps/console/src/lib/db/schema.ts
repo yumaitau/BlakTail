@@ -11,6 +11,9 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import type { OrgRole } from "../roles";
+
+const ROLE_SQL = "'owner', 'admin', 'network_admin', 'auditor', 'member'";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -18,9 +21,32 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  twoFactorEnabled: boolean("two_factor_enabled").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+/** Better Auth twoFactor plugin store. Secret and backup codes are encrypted. */
+export const twoFactor = pgTable(
+  "two_factor",
+  {
+    id: text("id").primaryKey(),
+    secret: text("secret").notNull(),
+    backupCodes: text("backup_codes").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    verified: boolean("verified").notNull().default(true),
+    failedVerificationCount: integer("failed_verification_count")
+      .notNull()
+      .default(0),
+    lockedUntil: timestamp("locked_until"),
+  },
+  (table) => [
+    index("two_factor_user_idx").on(table.userId),
+    index("two_factor_secret_idx").on(table.secret),
+  ],
+);
 
 export const session = pgTable("session", {
   id: text("id").primaryKey(),
@@ -147,7 +173,7 @@ export const membership = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    role: text("role").notNull().$type<"owner" | "admin" | "member">(),
+    role: text("role").notNull().$type<OrgRole>(),
     status: text("status")
       .notNull()
       .$type<"invited" | "active" | "suspended" | "removed">()
@@ -161,7 +187,7 @@ export const membership = pgTable(
     ),
     check(
       "membership_role_check",
-      sql.raw("\"role\" in ('owner', 'admin', 'member')"),
+      sql.raw(`"role" in (${ROLE_SQL})`),
     ),
     check(
       "membership_status_check",
@@ -196,7 +222,7 @@ export const identityProvider = pgTable(
     jitMembership: boolean("jit_membership").notNull().default(false),
     defaultRole: text("default_role")
       .notNull()
-      .$type<"admin" | "member">()
+      .$type<Exclude<OrgRole, "owner">>()
       .default("member"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -212,7 +238,9 @@ export const identityProvider = pgTable(
     ),
     check(
       "identity_provider_role_check",
-      sql.raw("\"default_role\" in ('admin', 'member')"),
+      sql.raw(
+        "\"default_role\" in ('admin', 'network_admin', 'auditor', 'member')",
+      ),
     ),
   ],
 );
@@ -382,11 +410,11 @@ export const identityLinkConflict = pgTable(
       .references(() => organisation.id, { onDelete: "cascade" }),
     requesterRole: text("requester_role")
       .notNull()
-      .$type<"owner" | "admin" | "member">(),
+      .$type<OrgRole>(),
     targetRole: text("target_role")
       .notNull()
-      .$type<"owner" | "admin" | "member">(),
-    resolvedRole: text("resolved_role").$type<"owner" | "admin" | "member">(),
+      .$type<OrgRole>(),
+    resolvedRole: text("resolved_role").$type<OrgRole>(),
     resolvedByUserId: text("resolved_by_user_id").references(() => user.id, {
       onDelete: "set null",
     }),
@@ -403,7 +431,7 @@ export const identityLinkConflict = pgTable(
     check(
       "identity_link_conflict_roles_check",
       sql.raw(
-        "\"requester_role\" in ('owner', 'admin', 'member') AND \"target_role\" in ('owner', 'admin', 'member') AND (\"resolved_role\" IS NULL OR \"resolved_role\" in ('owner', 'admin', 'member'))",
+        `"requester_role" in (${ROLE_SQL}) AND "target_role" in (${ROLE_SQL}) AND ("resolved_role" IS NULL OR "resolved_role" in (${ROLE_SQL}))`,
       ),
     ),
   ],
@@ -422,7 +450,7 @@ export const membershipRoleResolution = pgTable(
       .references(() => organisation.id, { onDelete: "cascade" }),
     effectiveRole: text("effective_role")
       .notNull()
-      .$type<"owner" | "admin" | "member">(),
+      .$type<OrgRole>(),
     membershipSignature: text("membership_signature").notNull(),
     resolvedByUserId: text("resolved_by_user_id").references(() => user.id, {
       onDelete: "set null",
@@ -438,7 +466,7 @@ export const membershipRoleResolution = pgTable(
     ),
     check(
       "membership_role_resolution_role_check",
-      sql.raw("\"effective_role\" in ('owner', 'admin', 'member')"),
+      sql.raw(`"effective_role" in (${ROLE_SQL})`),
     ),
   ],
 );
@@ -485,7 +513,7 @@ export const invitation = pgTable(
       .notNull()
       .references(() => organisation.id, { onDelete: "cascade" }),
     email: text("email").notNull(),
-    role: text("role").notNull().$type<"admin" | "member">(),
+    role: text("role").notNull().$type<Exclude<OrgRole, "owner">>(),
     tokenHash: text("token_hash").notNull().unique(),
     inviterUserId: text("inviter_user_id")
       .notNull()
@@ -505,7 +533,10 @@ export const invitation = pgTable(
     uniqueIndex("invitation_pending_org_email_unique")
       .on(table.organisationId, table.email)
       .where(sql.raw("\"status\" = 'pending'")),
-    check("invitation_role_check", sql.raw("\"role\" in ('admin', 'member')")),
+    check(
+      "invitation_role_check",
+      sql.raw("\"role\" in ('admin', 'network_admin', 'auditor', 'member')"),
+    ),
     check(
       "invitation_status_check",
       sql.raw("\"status\" in ('pending', 'accepted', 'revoked')"),
@@ -531,6 +562,64 @@ export const consoleAuditEvent = pgTable("console_audit_event", {
     .notNull()
     .defaultNow(),
 });
+
+/** Per-organisation sign-in assurance. No row means no extra requirement. */
+export const organisationSignInPolicy = pgTable(
+  "organisation_sign_in_policy",
+  {
+    organisationId: text("organisation_id")
+      .primaryKey()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    stepUpMaxAgeMinutes: integer("step_up_max_age_minutes"),
+    requireMfaForPrivileged: boolean("require_mfa_for_privileged")
+      .notNull()
+      .default(false),
+    updatedByUserId: text("updated_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  () => [
+    check(
+      "organisation_sign_in_policy_step_up_check",
+      sql.raw(
+        "\"step_up_max_age_minutes\" IS NULL OR \"step_up_max_age_minutes\" BETWEEN 5 AND 1440",
+      ),
+    ),
+  ],
+);
+
+/** A sign-in domain proven by DNS TXT. One organisation per verified domain. */
+export const organisationDomain = pgTable(
+  "organisation_domain",
+  {
+    id: text("id").primaryKey(),
+    organisationId: text("organisation_id")
+      .notNull()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    verificationToken: text("verification_token").notNull(),
+    createdByUserId: text("created_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("organisation_domain_org_domain_unique").on(
+      table.organisationId,
+      table.domain,
+    ),
+    uniqueIndex("organisation_domain_verified_unique")
+      .on(table.domain)
+      .where(sql.raw("\"verified_at\" IS NOT NULL")),
+  ],
+);
 
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),

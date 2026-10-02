@@ -6,11 +6,14 @@ import {
   createInvitationAction,
   revokeInvitationAction,
 } from "@/app/actions";
+import { ORG_ROLES, roleImpact, roleLabel, type OrgRole } from "@/lib/roles";
+
+const INVITABLE_ROLES = ORG_ROLES.filter((role) => role !== "owner");
 
 type PendingInvitation = {
   id: string;
   email: string;
-  role: "admin" | "member";
+  role: Exclude<OrgRole, "owner">;
   expiresAt: string;
 };
 
@@ -23,6 +26,7 @@ export function InvitationManager({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [invitationUrl, setInvitationUrl] = useState<string | null>(null);
+  const [role, setRole] = useState<Exclude<OrgRole, "owner">>("member");
 
   return (
     <div className="panel stack">
@@ -56,11 +60,24 @@ export function InvitationManager({
         </label>
         <label>
           Role
-          <select name="role" defaultValue="member">
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
+          <select
+            name="role"
+            value={role}
+            onChange={(event) =>
+              setRole(event.currentTarget.value as Exclude<OrgRole, "owner">)
+            }
+            aria-describedby="invitation-role-impact"
+          >
+            {INVITABLE_ROLES.map((option) => (
+              <option key={option} value={option}>
+                {roleLabel(option)}
+              </option>
+            ))}
           </select>
         </label>
+        <p className="muted" id="invitation-role-impact">
+          {roleImpact(role)}
+        </p>
         <button type="submit" disabled={pending}>
           {pending ? "Creating…" : "Create invitation"}
         </button>
@@ -87,7 +104,7 @@ export function InvitationManager({
               {invitations.map((invitation) => (
                 <tr key={invitation.id}>
                   <td>{invitation.email}</td>
-                  <td>{invitation.role}</td>
+                  <td>{roleLabel(invitation.role)}</td>
                   <td className="mono">{invitation.expiresAt}</td>
                   <td>
                     <button

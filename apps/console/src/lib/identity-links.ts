@@ -470,6 +470,19 @@ export async function completeIdentityLink(
       await rejectChallenge(transaction, challenge, "reauthentication_failed");
       return new IdentityLinkError(GENERIC_LINK_ERROR, "reauthentication_required");
     }
+    // A password alone must not pull a TOTP-protected identity (and its
+    // organisation roles) into another person's session.
+    const [targetFactor] = await transaction`
+      SELECT coalesce(two_factor_enabled, false) AS enabled
+      FROM "user" WHERE id = ${target.id}
+    `;
+    if (targetFactor?.enabled === true) {
+      await rejectChallenge(transaction, challenge, "two_factor_required");
+      return new IdentityLinkError(
+        "That sign-in uses two-step verification, so it cannot be linked with its password alone. Turn two-step verification off for it first, or keep it separate.",
+        "reauthentication_required",
+      );
+    }
 
     await lockPeople(transaction, ctx.personId, target.person_id);
     const [targetGraph] = await transaction`

@@ -8,7 +8,8 @@ import {
   requireConsoleContextFromSession,
   sessionFromBearer,
 } from "@/lib/desktop-auth";
-import { canMutateTailnet, OrganisationAccessError } from "@/lib/session";
+import { can, permissionReason } from "@/lib/roles";
+import { OrganisationAccessError } from "@/lib/session";
 
 type RouteContext = {
   params: Promise<{ nodeId: string }>;
@@ -50,9 +51,9 @@ export async function PATCH(
     if (!ctx) {
       return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     }
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return NextResponse.json(
-        { error: "Only owners and admins can change devices." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }
@@ -120,9 +121,9 @@ export async function DELETE(
     if (!ctx) {
       return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     }
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return NextResponse.json(
-        { error: "Only owners and admins can revoke devices." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }

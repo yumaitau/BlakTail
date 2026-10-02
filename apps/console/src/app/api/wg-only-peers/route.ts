@@ -5,7 +5,7 @@ import {
   revokeWgOnlyPeer,
   type DeviceTag,
 } from "@/lib/coord";
-import { canMutateTailnet } from "@/lib/roles";
+import { can, permissionReason } from "@/lib/roles";
 import {
   assertSameOrigin,
   RequestSecurityError,
@@ -68,9 +68,9 @@ export async function POST(request: Request): Promise<Response> {
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const ctx = organisationContext(person, organisationId);
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return Response.json(
-        { error: "Only owners and admins can add unmanaged WireGuard peers." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }
@@ -124,9 +124,9 @@ export async function PATCH(request: Request): Promise<Response> {
     const overlapSeconds =
       typeof body.overlapSeconds === "number" ? body.overlapSeconds : 300;
     const ctx = organisationContext(person, organisationId);
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return Response.json(
-        { error: "Only owners and admins can rotate unmanaged WireGuard peers." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }
@@ -162,9 +162,9 @@ export async function DELETE(request: Request): Promise<Response> {
       typeof body.organisationId === "string" ? body.organisationId : "";
     const peerId = typeof body.peerId === "string" ? body.peerId : "";
     const ctx = organisationContext(person, organisationId);
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return Response.json(
-        { error: "Only owners and admins can revoke unmanaged WireGuard peers." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }

@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { db } from "./db/client";
 import * as schema from "./db/schema";
 
@@ -21,6 +22,7 @@ export const auth = betterAuth({
       account: schema.account,
       verification: schema.verification,
       rateLimit: schema.rateLimit,
+      twoFactor: schema.twoFactor,
     },
   }),
   emailAndPassword: {
@@ -36,6 +38,7 @@ export const auth = betterAuth({
     customRules: {
       "/sign-in/email": { window: 60, max: 10 },
       "/sign-up/email": { window: 60, max: 3 },
+      "/two-factor/*": { window: 60, max: 10 },
     },
   },
   session: {
@@ -50,7 +53,17 @@ export const auth = betterAuth({
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
-  plugins: [nextCookies()],
+  plugins: [
+    // TOTP with encrypted secret and backup codes for password sign-ins.
+    // No email/SMS OTP and no "trust this device": every password sign-in
+    // of an enrolled identity asks for a code.
+    twoFactor({
+      issuer: "BlakTail",
+      backupCodeOptions: { amount: 10, length: 10, storeBackupCodes: "encrypted" },
+      accountLockout: { enabled: true, maxFailedAttempts: 10, durationSeconds: 900 },
+    }),
+    nextCookies(),
+  ],
 });
 
 export type Session = typeof auth.$Infer.Session;

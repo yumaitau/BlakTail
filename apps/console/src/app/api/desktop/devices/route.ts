@@ -4,7 +4,8 @@ import {
   requireConsoleContextFromSession,
   sessionFromBearer,
 } from "@/lib/desktop-auth";
-import { canMutateTailnet, contextForOrganisation } from "@/lib/session";
+import { can } from "@/lib/roles";
+import { contextForOrganisation } from "@/lib/session";
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -27,7 +28,7 @@ export async function GET(request: Request): Promise<Response> {
               ...device,
               organisation_id: organisation.organisationId,
               organisation_name: organisation.organisationName,
-              can_mutate: canMutateTailnet(organisation.role),
+              can_mutate: can(organisation.role, "manage_peers"),
             })),
             error: null,
           };

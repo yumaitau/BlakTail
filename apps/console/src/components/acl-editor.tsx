@@ -22,7 +22,7 @@ import {
   type AclRuleDraft,
   type AclSshDraft,
 } from "@/lib/acl";
-import { canMutateTailnet, roleLabel, type OrgRole } from "@/lib/roles";
+import { can, roleLabel, type OrgRole } from "@/lib/roles";
 
 function toggleValue<T extends string>(values: T[], value: T): T[] {
   return values.includes(value)
@@ -77,7 +77,7 @@ export function AclEditor({
   people: AclPerson[];
 }) {
   const router = useRouter();
-  const canMutate = canMutateTailnet(role);
+  const canMutate = can(role, "manage_policy");
   const parsedInitial = useMemo(() => {
     try {
       return parseAclPolicy(JSON.parse(initialAcl) as unknown);
