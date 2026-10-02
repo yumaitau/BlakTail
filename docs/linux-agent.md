@@ -59,7 +59,9 @@ sudo blaktaild up --coord https://coord.example.org \
 
 Or advertise a full IPv4 exit path with `--advertise-exit-node`. The request is
 inert until an owner or admin opens **Devices** in the console and explicitly
-checks each route. Removing an advertisement also removes any approval for it.
+checks each route, or creates a named resource on **Networks** that uses this
+router as a routing peer ([network-resources.md](network-resources.md)).
+Removing an advertisement also removes any approval for it.
 Public, loopback, link-local, multicast, tailnet-overlapping, and ambiguous subnet
 advertisements are rejected. Overlapping approved subnets on different active
 routers are rejected.

@@ -159,6 +159,16 @@ pub(crate) fn api_routes() -> Router<AppState> {
             "/api/v1/webhooks/deliveries/:delivery_id/replay",
             post(crate::webhooks::replay_delivery),
         )
+        .route(
+            "/api/v1/network-resources",
+            get(crate::resources::api_list).post(crate::resources::api_create),
+        )
+        .route(
+            "/api/v1/network-resources/:resource_id",
+            get(crate::resources::api_get)
+                .put(crate::resources::api_update)
+                .delete(crate::resources::api_delete),
+        )
         .layer(DefaultBodyLimit::max(ADMIN_API_MAX_BODY_BYTES))
 }
 
@@ -983,7 +993,7 @@ struct MintedKey {
     single_use: bool,
 }
 
-fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+pub(crate) fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     let Some(value) = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -1127,6 +1137,7 @@ async fn api_approve_routes(
             )));
         }
     }
+    crate::resources::ensure_routes_free(&mut tx, org_id, &body.approved_routes).await?;
     sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2 AND org_id=$3")
         .bind(serde_json::to_string(&body.approved_routes).unwrap())
         .bind(node_id.to_string())

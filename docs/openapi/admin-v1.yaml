@@ -280,6 +280,83 @@ paths:
           schema: { type: string, description: "created_at:id cursor" }
       responses:
         "200": { description: Envelope of events }
+  /api/v1/network-resources:
+    get:
+      summary: List network resources with routing-peer health and effective distribution
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      responses:
+        "200": { description: Envelope of network resources }
+        "403": { description: Missing devices:read }
+    post:
+      summary: Create a named network resource (approval of its prefix for selected clients)
+      description: |
+        Exactly one of `cidr` (IPv4 or IPv6) or `dns_target` is required.
+        Default and public prefixes need `confirm_public_route: true` from an
+        organisation owner; automation clients act as admins and cannot
+        confirm them. `dry_run: true` validates and returns the evaluated
+        resource without saving. Honours `Idempotency-Key`.
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - in: header
+          name: Idempotency-Key
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetworkResourceInput" }
+      responses:
+        "200": { description: Dry run result (not saved) }
+        "201": { description: Created resource }
+        "400": { description: Invalid target, ports, access or routing peers; public route without confirmation }
+        "403": { description: Missing routes:write, or public route confirmed by a non-owner }
+        "409": { description: Overlaps the overlay pool, another resource or a device-approved route; name exists; Idempotency-Key reused }
+  /api/v1/network-resources/{resource_id}:
+    get:
+      summary: Get one network resource
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200": { description: Resource with status }
+        "404": { description: Not found in this organisation }
+    put:
+      summary: Replace a network resource (edit, enable or disable)
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/NetworkResourceInput"
+                - type: object
+                  required: [etag]
+                  properties:
+                    etag: { type: string }
+      responses:
+        "200": { description: Updated resource }
+        "400": { description: Missing etag or invalid resource }
+        "403": { description: Missing routes:write }
+        "404": { description: Not found }
+        "409": { description: Overlap or name conflict }
+        "412": { description: Stale etag }
+    delete:
+      summary: Delete a network resource and withdraw its routes
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - $ref: "#/components/parameters/ResourceId"
+        - in: header
+          name: If-Match
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted }
+        "403": { description: Missing routes:write }
+        "404": { description: Not found }
+        "412": { description: Stale If-Match etag }
 components:
   securitySchemes:
     bearerAuth:
@@ -306,3 +383,40 @@ components:
       name: peer_id
       required: true
       schema: { type: string, format: uuid }
+    ResourceId:
+      in: path
+      name: resource_id
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    NetworkResourceInput:
+      type: object
+      required: [name, access]
+      properties:
+        name: { type: string, maxLength: 64 }
+        description: { type: string, maxLength: 256 }
+        cidr: { type: string, description: "IPv4 or IPv6 network address, e.g. 10.20.1.0/24 or fd12:3456::/48" }
+        dns_target: { type: string, description: "Exact host name; modelled only, resolution is not implemented yet" }
+        ports: { type: array, maxItems: 16, items: { type: string }, description: "Recorded, not yet enforced on the routing peer" }
+        protocols: { type: array, items: { type: string, enum: [tcp, udp, icmp] } }
+        routing_peers:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            required: [node_id]
+            properties:
+              node_id: { type: string, format: uuid }
+              metric: { type: integer, minimum: 1, maximum: 9999, default: 100 }
+        access:
+          type: object
+          description: Clients matching any role, tag or policy group receive the prefix.
+          properties:
+            roles: { type: array, items: { type: string, enum: [owner, admin, member] } }
+            tags: { type: array, items: { type: string, enum: [office, ranger, store] } }
+            groups: { type: array, items: { type: string } }
+        enabled: { type: boolean, default: true }
+        allow_nested_overlap: { type: boolean, default: false }
+        confirm_public_route: { type: boolean, default: false }
+        masquerade: { type: boolean, description: "Only true is accepted; Linux routing peers always masquerade" }
+        dry_run: { type: boolean, default: false }
