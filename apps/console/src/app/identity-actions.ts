@@ -10,7 +10,7 @@ import {
   suspendIdentity,
   unlinkIdentity,
 } from "@/lib/identity-links";
-import type { OrgRole } from "@/lib/roles";
+import { isOrgRole, type OrgRole } from "@/lib/roles";
 import { requirePersonSessionContext } from "@/lib/session";
 
 type IdentityActionResult<T = void> =
@@ -140,9 +140,7 @@ export async function recoverIdentityAction(
 }
 
 function role(value: FormDataEntryValue | null): OrgRole | null {
-  return value === "owner" || value === "admin" || value === "member"
-    ? value
-    : null;
+  return isOrgRole(value) ? value : null;
 }
 
 export async function resolveIdentityRoleConflictAction(

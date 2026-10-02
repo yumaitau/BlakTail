@@ -1,0 +1,57 @@
+{
+  "comment": "Organisation role permission matrix. blaktail-coord/src/permissions.rs and apps/console/src/lib/roles.ts must both match this file exactly; a Rust test and a bun test check it.",
+  "permissions": [
+    "view_network",
+    "manage_peers",
+    "manage_join_keys",
+    "manage_networks",
+    "manage_policy",
+    "manage_dns",
+    "manage_services",
+    "view_audit",
+    "export_audit",
+    "manage_integrations",
+    "manage_api_clients",
+    "manage_security"
+  ],
+  "roles": {
+    "owner": [
+      "view_network",
+      "manage_peers",
+      "manage_join_keys",
+      "manage_networks",
+      "manage_policy",
+      "manage_dns",
+      "manage_services",
+      "view_audit",
+      "export_audit",
+      "manage_integrations",
+      "manage_api_clients",
+      "manage_security"
+    ],
+    "admin": [
+      "view_network",
+      "manage_peers",
+      "manage_join_keys",
+      "manage_networks",
+      "manage_policy",
+      "manage_dns",
+      "manage_services",
+      "view_audit",
+      "export_audit",
+      "manage_integrations"
+    ],
+    "network_admin": [
+      "view_network",
+      "manage_peers",
+      "manage_join_keys",
+      "manage_networks",
+      "manage_policy",
+      "manage_dns",
+      "manage_services",
+      "view_audit"
+    ],
+    "auditor": ["view_network", "view_audit", "export_audit"],
+    "member": ["view_network", "view_audit"]
+  }
+}

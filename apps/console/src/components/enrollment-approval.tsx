@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { approveDeviceAuthorizationAction } from "@/app/actions";
-import { canMutateTailnet, type OrgRole } from "@/lib/roles";
+import { can, type OrgRole } from "@/lib/roles";
 
 export function EnrollmentApproval({
   code,
@@ -16,7 +16,7 @@ export function EnrollmentApproval({
   const [approved, setApproved] = useState(alreadyApproved);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  const canAssignTags = canMutateTailnet(role);
+  const canAssignTags = can(role, "manage_peers");
 
   if (approved) {
     return (

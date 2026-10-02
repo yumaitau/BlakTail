@@ -176,12 +176,17 @@ performs a fresh membership/role lookup before a coordinator assertion is signed
 4. Rust verifies every claim and consumes each nonce once. Missing, replayed,
    expired, cross-org, wrong-audience, wrong-issuer, or forged assertions receive
    `401`; valid actors without the required role receive `403`.
+   Unknown role strings are rejected with `401`. Roles and the permission each
+   action needs are in [roles.md](roles.md).
+5. Organisations can require a recent sign-in for security changes and
+   two-step verification for password owners and admins. Password sign-ins of
+   identities with TOTP enabled show a code step after the password.
 
 For headless Linux enrollment, `blaktaild up` prints `/enroll?code=...`. The
 page preserves that destination through sign-in, displays the requested node name
 and WireGuard-key fingerprint, and requires an explicit approval. Any signed-in
-organisation member can enroll their own untagged device; only owners and admins
-can attach privileged device tags. The browser code is not the join secret.
+organisation member can enroll their own untagged device; only roles that can
+manage devices (owner, admin, network admin) can attach privileged device tags. The browser code is not the join secret.
 
 The Devices page also shows each node's requested subnet and exit routes. Owners
 and admins approve routes individually; members can see them but cannot change

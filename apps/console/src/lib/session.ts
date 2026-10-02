@@ -3,10 +3,10 @@ import { redirect } from "next/navigation";
 import { auth, type Session } from "./auth";
 import { requireBootstrapLocked } from "./bootstrap-state";
 import { rawSqlClient } from "./db/client";
-import type { OrgRole } from "./roles";
+import { resolveOrganisationRole, type OrgRole } from "./roles";
 
 export type { OrgRole } from "./roles";
-export { canMutateTailnet, roleLabel } from "./roles";
+export { can, roleLabel } from "./roles";
 
 export const ACTIVE_ORGANISATION_COOKIE = "blaktail.active_organisation";
 export const ORGANISATION_COOKIE = ACTIVE_ORGANISATION_COOKIE;
@@ -46,6 +46,8 @@ export type PersonSessionContext = {
   name: string;
   identityName: string;
   sessionExpiresAt: Date;
+  /** When this session was created by a sign-in. Drives step-up checks. */
+  sessionCreatedAt: Date;
   organisations: OrganisationAccess[];
   blockedOrganisations: BlockedOrganisation[];
 };
@@ -70,13 +72,6 @@ type AccessRow = {
 };
 
 export class OrganisationAccessError extends Error {}
-
-function membershipSignature(rows: AccessRow[]): string {
-  return rows
-    .map((row) => `${row.membership_id}:${row.role}`)
-    .sort()
-    .join("|");
-}
 
 /** Resolve the live linked-identity and membership graph on every request. */
 export async function resolveSessionContext(
@@ -141,23 +136,23 @@ export async function resolveSessionContext(
   const blockedOrganisations: BlockedOrganisation[] = [];
   for (const group of grouped.values()) {
     const first = group[0]!;
-    const distinctRoles = new Set(group.map((row) => row.role));
-    let role = first.role;
-    if (distinctRoles.size > 1) {
-      const signature = membershipSignature(group);
-      if (
-        !first.effective_role ||
-        first.membership_signature !== signature ||
-        !distinctRoles.has(first.effective_role)
-      ) {
-        blockedOrganisations.push({
-          organisationId: first.organisation_id,
-          organisationName: first.organisation_name,
-          reason: "role_conflict",
-        });
-        continue;
-      }
-      role = first.effective_role;
+    const role = resolveOrganisationRole(
+      group.map((row) => ({
+        organisationId: row.organisation_id,
+        membershipId: row.membership_id,
+        role: row.role,
+        effectiveRole: row.effective_role,
+        membershipSignature: row.membership_signature,
+      })),
+      first.organisation_id,
+    );
+    if (role === null || role === "blocked") {
+      blockedOrganisations.push({
+        organisationId: first.organisation_id,
+        organisationName: first.organisation_name,
+        reason: "role_conflict",
+      });
+      continue;
     }
     organisations.push({
       organisationId: first.organisation_id,
@@ -185,6 +180,7 @@ export async function resolveSessionContext(
     name: identity.display_name,
     identityName: session.user.name,
     sessionExpiresAt,
+    sessionCreatedAt: new Date(session.session.createdAt),
     organisations,
     blockedOrganisations,
   };

@@ -6,6 +6,7 @@ import { useState, useTransition } from "react";
 import { authClient } from "@/lib/auth-client";
 import { TAGLINE } from "@/lib/tagline";
 import { PathMotif } from "./path-motif";
+import { TwoFactorChallenge } from "./two-factor-challenge";
 import { Wordmark } from "./wordmark";
 
 export function SignInForm({
@@ -23,6 +24,7 @@ export function SignInForm({
   const [ssoOrganisation, setSsoOrganisation] = useState<string | null>(
     organisationId ?? null,
   );
+  const [secondStep, setSecondStep] = useState(false);
 
   async function lookUpSso(email: string) {
     if (!email.includes("@")) {
@@ -45,6 +47,15 @@ export function SignInForm({
               <h1>Sign in</h1>
               <p className="tagline">{TAGLINE}</p>
             </div>
+            {secondStep ? (
+              <TwoFactorChallenge
+                onVerified={() => {
+                  router.replace(nextPath);
+                  router.refresh();
+                }}
+                onCancel={() => setSecondStep(false)}
+              />
+            ) : (
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -62,6 +73,13 @@ export function SignInForm({
                       result.error.message ??
                         "Sign-in failed. Check your email and password.",
                     );
+                    return;
+                  }
+                  if (
+                    (result.data as { twoFactorRedirect?: boolean } | null)
+                      ?.twoFactorRedirect
+                  ) {
+                    setSecondStep(true);
                     return;
                   }
                   router.replace(nextPath);
@@ -96,6 +114,7 @@ export function SignInForm({
                 {pending ? "Signing in…" : "Sign in"}
               </button>
             </form>
+            )}
             <details
               className="sso-disclosure"
               {...(ssoOrganisation ? { open: true } : {})}

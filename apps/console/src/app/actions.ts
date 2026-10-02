@@ -24,8 +24,9 @@ import {
   type DeviceTag,
   type WebhookDelivery,
 } from "@/lib/coord";
+import { requireSecurityAssurance } from "@/lib/auth-policy";
+import { can, isOrgRole, permissionReason } from "@/lib/roles";
 import {
-  canMutateTailnet,
   ORGANISATION_COOKIE,
   requireConsoleContext,
   requireOrganisationContext,
@@ -34,6 +35,7 @@ import {
 import {
   createInvitation,
   InvitationError,
+  isInvitationRole,
   revokeInvitation,
   type InvitationRole,
 } from "@/lib/invitations";
@@ -64,7 +66,7 @@ export async function approveDeviceAuthorizationAction(
     if (!code) {
       return { ok: false, error: "Device code is required." };
     }
-    const tags = canMutateTailnet(ctx.role)
+    const tags = can(ctx.role, "manage_peers")
       ? formData.getAll("tags").map(String).filter(isDeviceTag)
       : [];
     const result = await approveDeviceAuthorization(ctx, code, tags);
@@ -88,8 +90,9 @@ export async function revokeDeviceAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can revoke devices." };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const nodeId = String(formData.get("nodeId") ?? "");
     if (!nodeId) {
@@ -113,8 +116,9 @@ export async function tombstoneDeviceAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can delete devices." };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const nodeId = String(formData.get("nodeId") ?? "");
     if (!nodeId) {
@@ -136,9 +140,11 @@ export async function createApiClientAction(
 ): Promise<ActionResult<{ token: string; prefix: string }>> {
   try {
     const ctx = await requireConsoleContext();
-    if (ctx.role !== "owner") {
-      return { ok: false, error: "Only owners can create automation credentials." };
+    const denied = permissionReason(ctx.role, "manage_api_clients");
+    if (denied) {
+      return { ok: false, error: denied };
     }
+    await requireSecurityAssurance(ctx);
     const name = String(formData.get("name") ?? "").trim();
     const scopes = formData
       .getAll("scopes")
@@ -169,9 +175,11 @@ export async function revokeApiClientAction(
 ): Promise<ActionResult> {
   try {
     const ctx = await requireConsoleContext();
-    if (ctx.role !== "owner") {
-      return { ok: false, error: "Only owners can revoke automation credentials." };
+    const denied = permissionReason(ctx.role, "manage_api_clients");
+    if (denied) {
+      return { ok: false, error: denied };
     }
+    await requireSecurityAssurance(ctx);
     const clientId = String(formData.get("clientId") ?? "");
     if (!clientId) {
       return { ok: false, error: "Choose a credential to revoke." };
@@ -195,11 +203,9 @@ export async function createWebhookAction(
 ): Promise<ActionResult<{ secret: string; prefix: string }>> {
   try {
     const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can create webhook destinations.",
-      };
+    const denied = permissionReason(ctx.role, "manage_integrations");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const name = String(formData.get("name") ?? "").trim();
     const url = String(formData.get("url") ?? "").trim();
@@ -234,11 +240,9 @@ export async function disableWebhookAction(
 ): Promise<ActionResult> {
   try {
     const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can disable webhook destinations.",
-      };
+    const denied = permissionReason(ctx.role, "manage_integrations");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const destinationId = String(formData.get("destinationId") ?? "");
     if (!destinationId) {
@@ -263,11 +267,9 @@ export async function listWebhookDeliveriesAction(
 ): Promise<ActionResult<{ deliveries: WebhookDelivery[] }>> {
   try {
     const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can list webhook deliveries.",
-      };
+    const denied = permissionReason(ctx.role, "manage_integrations");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     if (!destinationId) {
       return { ok: false, error: "Choose a webhook destination." };
@@ -290,11 +292,9 @@ export async function replayWebhookDeliveryAction(
 ): Promise<ActionResult> {
   try {
     const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can replay webhook deliveries.",
-      };
+    const denied = permissionReason(ctx.role, "manage_integrations");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const deliveryId = String(formData.get("deliveryId") ?? "");
     if (!deliveryId) {
@@ -321,11 +321,9 @@ export async function createWgOnlyPeerAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can add unmanaged WireGuard peers.",
-      };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const name = String(formData.get("name") ?? "").trim();
     const wgPublicKey = String(formData.get("wgPublicKey") ?? "").trim();
@@ -368,11 +366,9 @@ export async function rotateWgOnlyPeerAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can rotate unmanaged WireGuard peers.",
-      };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const peerId = String(formData.get("peerId") ?? "").trim();
     const wgPublicKey = String(formData.get("wgPublicKey") ?? "").trim();
@@ -404,11 +400,9 @@ export async function revokeWgOnlyPeerAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can revoke unmanaged WireGuard peers.",
-      };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const peerId = String(formData.get("peerId") ?? "").trim();
     if (!peerId) {
@@ -435,8 +429,9 @@ export async function updateDeviceFriendlyNameAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can rename devices." };
+    const denied = permissionReason(ctx.role, "manage_peers");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const nodeId = String(formData.get("nodeId") ?? "");
     if (!nodeId) {
@@ -470,11 +465,9 @@ export async function approveNodeRoutesAction(
     const ctx = await requireOrganisationContext(
       owningOrganisation(formData),
     );
-    if (!canMutateTailnet(ctx.role)) {
-      return {
-        ok: false,
-        error: "Only owners and admins can approve subnet or exit-node routes.",
-      };
+    const denied = permissionReason(ctx.role, "manage_networks");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const nodeId = String(formData.get("nodeId") ?? "");
     if (!nodeId) {
@@ -499,8 +492,9 @@ export async function approveNodeRoutesAction(
 export async function saveAclAction(formData: FormData): Promise<ActionResult> {
   try {
     const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can edit access policy." };
+    const denied = permissionReason(ctx.role, "manage_policy");
+    if (denied) {
+      return { ok: false, error: denied };
     }
     const etag = String(formData.get("etag") ?? "");
     if (formData.get("rollback") === "true") {
@@ -545,8 +539,11 @@ export async function createInvitationAction(
     const ctx = await requireConsoleContext();
     const email = String(formData.get("email") ?? "");
     const requestedRole = String(formData.get("role") ?? "member");
-    if (requestedRole !== "admin" && requestedRole !== "member") {
-      return { ok: false, error: "Invitation role must be admin or member." };
+    if (!isInvitationRole(requestedRole)) {
+      return { ok: false, error: "Choose one of the listed invitation roles." };
+    }
+    if (can(ctx.role, "manage_security")) {
+      await requireSecurityAssurance(ctx);
     }
     const result = await createInvitation(
       ctx,
@@ -608,9 +605,11 @@ export async function upsertOidcProviderAction(
 ): Promise<ActionResult> {
   try {
     const ctx = await requireConsoleContext();
-    if (ctx.role !== "owner") {
-      return { ok: false, error: "Only owners can configure the identity provider." };
+    const denied = permissionReason(ctx.role, "manage_security");
+    if (denied) {
+      return { ok: false, error: denied };
     }
+    await requireSecurityAssurance(ctx);
     const allowDomains = String(formData.get("allowDomains") ?? "")
       .split(",")
       .map((value) => value.trim().toLowerCase())
@@ -657,15 +656,24 @@ export async function changeMembershipAction(
       | "suspended"
       | "removed"
       | "";
-    const role = String(formData.get("role") ?? "") as "admin" | "member" | "";
+    const requestedRole = String(formData.get("role") ?? "");
+    const role = isOrgRole(requestedRole) ? requestedRole : undefined;
     if (!membershipId) {
       return { ok: false, error: "Choose a membership." };
     }
+    if (requestedRole && !role) {
+      return { ok: false, error: "Choose one of the listed roles." };
+    }
+    const denied = permissionReason(ctx.role, "manage_security");
+    if (denied) {
+      return { ok: false, error: denied };
+    }
+    await requireSecurityAssurance(ctx);
     const next = await changeMembership({
       organisationId: ctx.organisationId,
       membershipId,
       status: status || undefined,
-      role: role || undefined,
+      role,
       actorUserId: ctx.userId,
       actorEmail: ctx.email,
       actorRole: ctx.role,

@@ -3,11 +3,16 @@ import "server-only";
 import type { SQL, TransactionSQL } from "bun";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hashPassword } from "better-auth/crypto";
+import { can, isOrgRole, type OrgRole } from "./roles";
 import type { ConsoleContext } from "./session";
 import { rawSqlClient } from "./db/client";
 import { consumeRateLimit } from "./request-security";
 
-export type InvitationRole = "admin" | "member";
+export type InvitationRole = Exclude<OrgRole, "owner">;
+
+export function isInvitationRole(value: unknown): value is InvitationRole {
+  return isOrgRole(value) && value !== "owner";
+}
 
 export class InvitationError extends Error {
   constructor(
@@ -91,10 +96,10 @@ export async function createInvitation(
 ): Promise<{ invitation: PendingInvitation; url: string }> {
   const sql = rawSqlClient();
   const email = normaliseEmail(emailValue);
-  if (role !== "admin" && role !== "member") {
-    throw new InvitationError("Invitation role must be admin or member.");
+  if (!isInvitationRole(role)) {
+    throw new InvitationError("Choose one of the listed invitation roles.");
   }
-  if (ctx.role !== "owner") {
+  if (!can(ctx.role, "manage_security")) {
     await appendAudit(sql, {
       organisationId: ctx.organisationId,
       actorUserId: ctx.userId,
@@ -176,7 +181,7 @@ export async function createInvitation(
 export async function listPendingInvitations(
   ctx: ConsoleContext,
 ): Promise<PendingInvitation[]> {
-  if (ctx.role !== "owner") return [];
+  if (!can(ctx.role, "manage_security")) return [];
   const sql = rawSqlClient();
   const rows = await sql<PendingInvitationRow[]>`
     SELECT id, email, role, expires_at, created_at
@@ -199,7 +204,7 @@ export async function revokeInvitation(
   invitationId: string,
 ): Promise<void> {
   const sql = rawSqlClient();
-  if (ctx.role !== "owner") {
+  if (!can(ctx.role, "manage_security")) {
     await appendAudit(sql, {
       organisationId: ctx.organisationId,
       actorUserId: ctx.userId,

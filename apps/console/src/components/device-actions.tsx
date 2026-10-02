@@ -11,7 +11,7 @@ import {
 } from "@/app/actions";
 import type { AclPerson } from "@/lib/acl";
 import type { NetworkNode } from "@/lib/coord";
-import { canMutateTailnet } from "@/lib/roles";
+import { can } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
 
 type StatusFilter = "all" | "online" | "offline" | "attention";
@@ -289,7 +289,9 @@ function DeviceRow({
   onConfirm: (confirm: { kind: "revoke" | "delete"; node: NetworkNode }) => void;
   startTransition: (action: () => void) => void;
 }) {
-  const canEdit = canMutateTailnet(node.effective_role) && !node.revoked && !node.deleted;
+  const canEdit = can(node.effective_role, "manage_peers") && !node.revoked && !node.deleted;
+  const canApproveRoutes =
+    can(node.effective_role, "manage_networks") && !node.revoked && !node.deleted;
   const detailsId = `device-${node.id}`;
 
   return (
@@ -512,7 +514,7 @@ function DeviceRow({
                         value={route}
                         defaultChecked={node.approved_routes.includes(route)}
                         disabled={
-                          !canEdit ||
+                          !canApproveRoutes ||
                           pending ||
                           (node.expired && !node.approved_routes.includes(route))
                         }
@@ -520,7 +522,7 @@ function DeviceRow({
                       {route === "0.0.0.0/0" ? "Exit node" : route}
                     </label>
                   ))}
-                  {canEdit && (!node.expired || node.approved_routes.length > 0) ? (
+                  {canApproveRoutes && (!node.expired || node.approved_routes.length > 0) ? (
                     <button type="submit" className="secondary" disabled={pending}>
                       Save routes
                     </button>

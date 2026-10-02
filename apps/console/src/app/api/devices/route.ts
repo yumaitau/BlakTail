@@ -5,7 +5,7 @@ import {
   revokeNode,
   updateNodeFriendlyName,
 } from "@/lib/coord";
-import { canMutateTailnet } from "@/lib/roles";
+import { can, permissionReason } from "@/lib/roles";
 import {
   assertSameOrigin,
   RequestSecurityError,
@@ -61,9 +61,9 @@ export async function PATCH(request: Request): Promise<Response> {
     const nodeId = typeof body.nodeId === "string" ? body.nodeId : "";
     const operation = typeof body.operation === "string" ? body.operation : "";
     const ctx = organisationContext(person, organisationId);
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return Response.json(
-        { error: "Only owners and admins can change devices." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }
@@ -78,6 +78,10 @@ export async function PATCH(request: Request): Promise<Response> {
       }
       await updateNodeFriendlyName(ctx, nodeId, friendlyName);
     } else if (operation === "approve-routes") {
+      const routesDenied = permissionReason(ctx.role, "manage_networks");
+      if (routesDenied) {
+        return Response.json({ error: routesDenied }, { status: 403 });
+      }
       const routes = Array.isArray(body.approvedRoutes)
         ? body.approvedRoutes.filter(
             (route): route is string => typeof route === "string",
@@ -105,9 +109,9 @@ export async function DELETE(request: Request): Promise<Response> {
       typeof body.organisationId === "string" ? body.organisationId : "";
     const nodeId = typeof body.nodeId === "string" ? body.nodeId : "";
     const ctx = organisationContext(person, organisationId);
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_peers")) {
       return Response.json(
-        { error: "Only owners and admins can revoke devices." },
+        { error: permissionReason(ctx.role, "manage_peers") },
         { status: 403 },
       );
     }
