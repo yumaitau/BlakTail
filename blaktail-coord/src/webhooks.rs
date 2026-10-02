@@ -1,4 +1,5 @@
-use crate::{hash, now, secret, ApiError, AppState, Role, Session};
+use crate::permissions::{require, Permission};
+use crate::{hash, now, secret, ApiError, AppState, Session};
 use axum::{
     extract::{Path as UrlPath, State},
     http::{HeaderMap, StatusCode},
@@ -402,9 +403,7 @@ pub(crate) async fn list_destinations_console(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WebhookDestination>>, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     Ok(Json(load_destinations(&s, org_id).await?))
 }
 
@@ -451,9 +450,7 @@ pub(crate) async fn enqueue_console_event(
     Json(input): Json<ConsoleWebhookEvent>,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageSecurity)?;
     if !ALLOWED_CONSOLE_EVENTS.contains(&input.event_type.as_str()) {
         return Err(ApiError::BadRequest("event type is not allowed".into()));
     }
@@ -496,9 +493,7 @@ pub(crate) async fn create_destination_console(
     Json(input): Json<CreateWebhook>,
 ) -> Result<(StatusCode, Json<WebhookDestination>), ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     insert_destination(&s, org_id, &session, input).await
 }
 
@@ -594,9 +589,7 @@ pub(crate) async fn delete_destination_console(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     disable_destination(&s, org_id, &session, destination_id).await
 }
 
@@ -651,9 +644,7 @@ pub(crate) async fn list_deliveries_console(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WebhookDelivery>>, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     Ok(Json(load_deliveries(&s, org_id, destination_id).await?))
 }
 
@@ -714,9 +705,7 @@ pub(crate) async fn replay_delivery_console(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     reset_delivery(&s, org_id, &session, delivery_id).await
 }
 

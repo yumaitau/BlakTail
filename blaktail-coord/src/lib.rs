@@ -7,6 +7,7 @@ pub mod ipam;
 mod metrics;
 mod org_dns;
 mod permissions;
+mod service_users;
 mod shares;
 pub mod tailnet_lock;
 mod webhooks;
@@ -14,6 +15,7 @@ mod wg_only;
 
 pub use metrics::CoordMetrics;
 pub use org_dns::{check_dns_document, DnsCheckReport};
+use permissions::{require, Permission};
 
 #[derive(Debug, Serialize)]
 pub struct PolicyCheckReport {
@@ -291,7 +293,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 26,
-        name: "roles, service users and sign-in policy",
+        name: "roles and service users",
         postgres_sql: include_str!("../migrations/postgres/0026_roles_identity.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0026_roles_identity.sql")),
     },
@@ -1408,6 +1410,7 @@ pub fn app_with_relays_console_and_metrics(
             "/v1/orgs/:org_id/webhooks/deliveries/:delivery_id/replay",
             post(webhooks::replay_delivery_console),
         )
+        .merge(service_users::routes())
         .merge(admin::api_routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
@@ -1862,10 +1865,12 @@ async fn approve_device_authorization(
     let session = console_session(&s, &headers, org_id).await?;
     let code = normalise_user_code(&user_code)
         .ok_or_else(|| ApiError::BadRequest("device code must contain eight characters".into()))?;
-    let tags = if session.role == Role::Member {
-        Vec::new()
-    } else {
+    // Anyone in the organisation may approve their own device; only peer
+    // managers may tag it.
+    let tags = if session.role.can(Permission::ManagePeers) {
         canonical_tags(input.tags)
+    } else {
+        Vec::new()
     };
     let acl = load_org_acl(&s.store, org_id).await?;
     authorize_tag_assignment(&acl, &session, &tags)?;
@@ -2353,9 +2358,7 @@ async fn mint_join_key(
     Json(input): Json<MintJoinKey>,
 ) -> Result<(StatusCode, Json<JoinKeyResponse>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageJoinKeys)?;
     if !(1..=2_592_000).contains(&input.expires_in_seconds) {
         return Err(ApiError::BadRequest(
             "expires_in_seconds must be between 1 and 2592000".into(),
@@ -2451,11 +2454,13 @@ struct RegistrationGrant {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Owner,
     Admin,
     Member,
+    NetworkAdmin,
+    Auditor,
 }
 impl Role {
     pub(crate) fn as_str(self) -> &'static str {
@@ -2463,6 +2468,8 @@ impl Role {
             Self::Owner => "owner",
             Self::Admin => "admin",
             Self::Member => "member",
+            Self::NetworkAdmin => "network_admin",
+            Self::Auditor => "auditor",
         }
     }
 }
@@ -2473,6 +2480,8 @@ impl std::str::FromStr for Role {
             "owner" => Ok(Self::Owner),
             "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
+            "network_admin" => Ok(Self::NetworkAdmin),
+            "auditor" => Ok(Self::Auditor),
             _ => Err(()),
         }
     }
@@ -2768,9 +2777,7 @@ async fn approve_node_routes(
     Json(input): Json<ApprovedRoutesUpdate>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageNetworks)?;
     let approved = validate_advertised_routes(input.approved_routes)?;
     let approval_time = now();
     let mut tx = s.store.pool.begin().await?;
@@ -3845,9 +3852,7 @@ async fn update_node_friendly_name(
     Json(input): Json<FriendlyNameUpdate>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     let friendly_name = normalise_friendly_name(&input.friendly_name)?;
     let mut tx = s.store.pool.begin().await?;
     let current = sqlx::query(
@@ -3909,9 +3914,7 @@ async fn admin_revoke_node(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     let mut tx = s.store.pool.begin().await?;
     let changed = sqlx::query(
         "UPDATE nodes SET revoked_at=$1 WHERE id=$2 AND org_id=$3 AND revoked_at IS NULL AND deleted_at IS NULL",
@@ -3954,9 +3957,7 @@ async fn admin_tombstone_node(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     tombstone_node(&s.store, org_id, node_id, &session).await
 }
 
@@ -4064,9 +4065,7 @@ async fn put_acl(
     Json(value): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePolicy)?;
     let mut tx = s.store.pool.begin().await?;
     let current = load_acl_row_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
@@ -4146,9 +4145,7 @@ async fn put_dns(
     Json(value): Json<serde_json::Value>,
 ) -> Result<Json<org_dns::OrgDnsResponse>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageDns)?;
     let mut tx = s.store.pool.begin().await?;
     let current = load_org_dns_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
@@ -4321,9 +4318,7 @@ async fn put_security_policy(
     Json(policy): Json<SecurityPolicy>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     validate_node_key_ttl(policy.node_key_ttl_seconds)?;
     let mut tx = s.store.pool.begin().await?;
     let previous: Option<i64> =
@@ -4500,7 +4495,13 @@ pub(crate) async fn append_audit(
     .bind(&session.user_id)
     .bind(&session.name)
     .bind(&session.email)
-    .bind(session.role.as_str())
+    // Service users act with a scope-limited admin session; never let their
+    // audit rows read as a human admin.
+    .bind(if session.user_id.starts_with("api:") {
+        "api_client"
+    } else {
+        session.role.as_str()
+    })
     .bind(action)
     .bind(target_type)
     .bind(target_id)
@@ -11604,5 +11605,542 @@ mod tests {
     #[tokio::test]
     async fn control_update_baseline_ten_thousand() {
         measure_control_update_baseline("10k", 10_000, 60_000, 15_000).await;
+    }
+
+    async fn api_request(
+        r: &Router,
+        method: Method,
+        path: &str,
+        token: &str,
+        org_id: Uuid,
+        body: serde_json::Value,
+    ) -> Response {
+        r.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-blaktail-organisation", org_id.to_string())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn oauth_grant(r: &Router, client_id: Uuid, secret: &str) -> Response {
+        r.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=client_credentials&client_id={client_id}&client_secret={secret}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn console_permission_matrix_is_enforced_per_role() {
+        use crate::permissions::tests::ALL_ROLES;
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "matrix-org").await;
+        let missing = Uuid::new_v4();
+        let o = org.id;
+        // One representative coordinator route per permission. A permitted
+        // role may still get 400/404 (the body or target is deliberately
+        // inert); only 403 proves the permission check.
+        let cases: Vec<(Permission, Method, String, serde_json::Value)> = vec![
+            (
+                Permission::ViewNetwork,
+                Method::GET,
+                format!("/v1/orgs/{o}/nodes"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManagePeers,
+                Method::PUT,
+                format!("/v1/orgs/{o}/nodes/{missing}/friendly-name"),
+                serde_json::json!({"friendly_name": "x"}),
+            ),
+            (
+                Permission::ManagePeers,
+                Method::DELETE,
+                format!("/v1/orgs/{o}/nodes/{missing}"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManagePeers,
+                Method::PUT,
+                format!("/v1/orgs/{o}/security"),
+                serde_json::json!({"node_key_ttl_seconds": 0}),
+            ),
+            (
+                Permission::ManageJoinKeys,
+                Method::POST,
+                format!("/v1/orgs/{o}/join-keys"),
+                serde_json::json!({"expires_in_seconds": 60}),
+            ),
+            (
+                Permission::ManageNetworks,
+                Method::PUT,
+                format!("/v1/orgs/{o}/nodes/{missing}/routes"),
+                serde_json::json!({"approved_routes": []}),
+            ),
+            (
+                Permission::ManagePolicy,
+                Method::PUT,
+                format!("/v1/orgs/{o}/acl"),
+                serde_json::json!({"version": 0}),
+            ),
+            (
+                Permission::ManageDns,
+                Method::PUT,
+                format!("/v1/orgs/{o}/dns"),
+                serde_json::json!({"bogus": true}),
+            ),
+            (
+                Permission::ViewAudit,
+                Method::GET,
+                format!("/v1/orgs/{o}/audit"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageIntegrations,
+                Method::GET,
+                format!("/v1/orgs/{o}/webhooks"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::GET,
+                format!("/v1/orgs/{o}/api-clients"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::POST,
+                format!("/v1/orgs/{o}/api-clients/{missing}/rotate"),
+                serde_json::json!({}),
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::POST,
+                format!("/v1/orgs/{o}/api-clients/{missing}/suspend"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageSecurity,
+                Method::POST,
+                format!("/v1/orgs/{o}/webhooks/events"),
+                serde_json::json!({"event_type": "not.allowed", "payload": {}}),
+            ),
+        ];
+        for role in ALL_ROLES {
+            let session = signed_session(o, &format!("{}-1", role.as_str()), role, now() + 60);
+            for (permission, method, path, payload) in &cases {
+                let status = call(&r, method.clone(), path, payload.clone(), Some(&session))
+                    .await
+                    .status();
+                assert_eq!(
+                    status == StatusCode::FORBIDDEN,
+                    !role.can(*permission),
+                    "{} {method} {path} ({permission:?}) returned {status}",
+                    role.as_str()
+                );
+                assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn role_assertions_fail_closed_and_stay_in_their_organisation() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "role-scope-a").await;
+        let other = create_test_org(&r, "role-scope-b").await;
+        for role in ["superuser", "OWNER", "network-admin", "service", ""] {
+            let exp = now() + 60;
+            let template = assertion_template(AssertionClaims {
+                user_id: "x".into(),
+                org_id: org.id,
+                role: role.into(),
+                name: "x".into(),
+                email: "x@example.com".into(),
+                iss: CONSOLE_ASSERTION_ISSUER.into(),
+                aud: CONSOLE_ASSERTION_AUDIENCE.into(),
+                iat: exp - MAX_CONSOLE_ASSERTION_LIFETIME_SECS,
+                exp,
+                jti: String::new(),
+                action: None,
+            });
+            assert_eq!(
+                call(
+                    &r,
+                    Method::GET,
+                    &format!("/v1/orgs/{}/nodes", org.id),
+                    serde_json::Value::Null,
+                    Some(&template),
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED,
+                "role {role:?} must be rejected"
+            );
+        }
+        // One person: network admin in A, auditor in B. Each assertion only
+        // carries the role for its own organisation and cannot be replayed
+        // against the other.
+        let in_a = signed_session(org.id, "linked-person", Role::NetworkAdmin, now() + 60);
+        let in_b = signed_session(other.id, "linked-person", Role::Auditor, now() + 60);
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", org.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_a),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", other.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_b),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", other.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_a),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Audit records the narrower role string, not a human admin.
+        let audit: Vec<AuditEvent> = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/audit", org.id),
+                serde_json::Value::Null,
+                Some(&in_a),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit
+            .iter()
+            .any(|e| e.action == "join_key.minted" && e.actor_role == "network_admin"));
+    }
+
+    #[tokio::test]
+    async fn api_client_scope_matrix_and_no_console_login() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "scope-matrix").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let missing = Uuid::new_v4();
+        let cases: Vec<(&str, Method, String, serde_json::Value)> = vec![
+            (
+                "status:read",
+                Method::GET,
+                "/api/v1/status".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "devices:read",
+                Method::GET,
+                "/api/v1/devices".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "devices:write",
+                Method::PUT,
+                format!("/api/v1/devices/{missing}/friendly-name"),
+                serde_json::json!({"friendly_name": "x"}),
+            ),
+            (
+                "keys:write",
+                Method::POST,
+                "/api/v1/keys".into(),
+                serde_json::json!({"expires_in_seconds": 60}),
+            ),
+            (
+                "routes:write",
+                Method::PUT,
+                format!("/api/v1/devices/{missing}/routes"),
+                serde_json::json!({"approved_routes": []}),
+            ),
+            (
+                "policy:write",
+                Method::PUT,
+                "/api/v1/policy".into(),
+                serde_json::json!({"version": 0}),
+            ),
+            (
+                "dns:write",
+                Method::PUT,
+                "/api/v1/dns".into(),
+                serde_json::json!({"bogus": true}),
+            ),
+            (
+                "audit:read",
+                Method::GET,
+                "/api/v1/audit".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "webhooks:read",
+                Method::GET,
+                "/api/v1/webhooks".into(),
+                serde_json::Value::Null,
+            ),
+        ];
+        for (scope, _, _, _) in &cases {
+            let created: crate::admin::ApiClientCreated = body(
+                call(
+                    &r,
+                    Method::POST,
+                    &format!("/v1/orgs/{}/api-clients", org.id),
+                    serde_json::json!({"name": format!("only-{scope}"), "scopes": [scope]}),
+                    Some(&owner),
+                )
+                .await,
+            )
+            .await;
+            for (needed, method, path, payload) in &cases {
+                let status = api_request(
+                    &r,
+                    method.clone(),
+                    path,
+                    &created.token,
+                    org.id,
+                    payload.clone(),
+                )
+                .await
+                .status();
+                let implied = *scope == "devices:write" && *needed == "devices:read";
+                assert_eq!(
+                    status == StatusCode::FORBIDDEN,
+                    scope != needed && !implied,
+                    "client with {scope} calling {method} {path} returned {status}"
+                );
+            }
+            // A service-user secret is never a console session.
+            assert_eq!(
+                call(
+                    &r,
+                    Method::GET,
+                    &format!("/v1/orgs/{}/nodes", org.id),
+                    serde_json::Value::Null,
+                    Some(&created.token),
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn service_users_rotate_suspend_and_attribute_audit() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "service-users").await;
+        let other = create_test_org(&r, "service-users-other").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let admin = signed_session(org.id, "admin-1", Role::Admin, now() + 60);
+        let other_owner = signed_session(other.id, "owner-2", Role::Owner, now() + 60);
+        let created: crate::admin::ApiClientCreated = body(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients", org.id),
+                serde_json::json!({"name": "ci", "scopes": ["status:read", "keys:write"]}),
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let granted = oauth_grant(&r, created.id, &created.token).await;
+        assert_eq!(granted.status(), StatusCode::OK);
+        let access: serde_json::Value = body(granted).await;
+        let access = access["access_token"].as_str().unwrap().to_owned();
+        let status_ok = |token: String| {
+            let r = r.clone();
+            async move {
+                api_request(
+                    &r,
+                    Method::GET,
+                    "/api/v1/status",
+                    &token,
+                    org.id,
+                    serde_json::Value::Null,
+                )
+                .await
+                .status()
+            }
+        };
+        assert_eq!(status_ok(access.clone()).await, StatusCode::OK);
+
+        // Admins cannot manage service users; other organisations cannot see them.
+        let suspend_path = format!("/v1/orgs/{}/api-clients/{}/suspend", org.id, created.id);
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &suspend_path,
+                serde_json::Value::Null,
+                Some(&admin)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/suspend", other.id, created.id),
+                serde_json::Value::Null,
+                Some(&other_owner),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Suspension: no new tokens, and already-issued access tokens stop on
+        // their next request (declared bound: immediate, checked per call).
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &suspend_path,
+                serde_json::Value::Null,
+                Some(&owner)
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            oauth_grant(&r, created.id, &created.token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(status_ok(access.clone()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_ok(created.token.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/resume", org.id, created.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(status_ok(created.token.clone()).await, StatusCode::OK);
+
+        // Rotation: old secret and its access tokens die; the new one works.
+        let rotated: crate::admin::ApiClientCreated = body(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/rotate", org.id, created.id),
+                serde_json::json!({"expires_in_seconds": 3600}),
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        assert_ne!(rotated.token, created.token);
+        assert_eq!(
+            status_ok(created.token.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(status_ok(access).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status_ok(rotated.token.clone()).await, StatusCode::OK);
+        assert_eq!(
+            oauth_grant(&r, created.id, &created.token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Writes by the service user are attributed to it, not to an admin.
+        assert_eq!(
+            api_request(
+                &r,
+                Method::POST,
+                "/api/v1/keys",
+                &rotated.token,
+                org.id,
+                serde_json::json!({"expires_in_seconds": 60}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        let audit: Vec<AuditEvent> = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/audit", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let minted = audit
+            .iter()
+            .find(|e| e.action == "join_key.minted")
+            .expect("service user mint audited");
+        assert_eq!(minted.actor_user_id, format!("api:{}", created.id));
+        assert_eq!(minted.actor_role, "api_client");
+        for action in [
+            "api_client.suspended",
+            "api_client.resumed",
+            "api_client.rotated",
+        ] {
+            assert!(audit.iter().any(|e| e.action == action), "{action}");
+        }
+        let clients: serde_json::Value = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/api-clients", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(clients[0]["suspended"], false);
+        assert!(clients[0]["rotated_at"].is_i64());
     }
 }

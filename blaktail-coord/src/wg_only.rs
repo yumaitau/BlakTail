@@ -1,6 +1,6 @@
 use crate::{
     append_audit, bump_control_revision, canonical_ipv4_route, conflict, console_session,
-    ipv4_route_is_within, ipv4_routes_overlap, now, ApiError, AppState, DeviceTag, Role, Session,
+    ipv4_route_is_within, ipv4_routes_overlap, now, ApiError, AppState, DeviceTag, Session,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -158,10 +158,7 @@ pub(crate) async fn rotate_for_org(
 }
 
 fn require_writer(session: &Session) -> Result<(), ApiError> {
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
-    Ok(())
+    crate::permissions::require(session, crate::permissions::Permission::ManagePeers)
 }
 
 async fn insert_peer(

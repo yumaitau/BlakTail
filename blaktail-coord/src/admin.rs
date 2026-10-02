@@ -1,3 +1,4 @@
+use crate::permissions::{require, Permission};
 use crate::{
     append_audit, bearer_value, bump_control_revision, conflict, console_session, hash,
     load_audit_events, load_nodes, load_org_dns, load_org_dns_tx, load_previous_dns_tx, now,
@@ -16,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-const API_PREFIX: &str = "bta";
+pub(crate) const API_PREFIX: &str = "bta";
 const ACCESS_PREFIX: &str = "bto";
 const ACCESS_TOKEN_TTL_SECS: i64 = 3600;
-const DEFAULT_TOKEN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
-const MAX_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
+pub(crate) const DEFAULT_TOKEN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
+pub(crate) const MAX_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +102,8 @@ pub(crate) struct ApiClientRecord {
     last_used_at: Option<i64>,
     expires_at: Option<i64>,
     revoked: bool,
+    suspended: bool,
+    rotated_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -164,10 +167,7 @@ pub(crate) fn api_routes() -> Router<AppState> {
 
 pub(crate) fn require_scope(caller: &ApiCaller, scope: Scope) -> Result<(), ApiError> {
     if caller.client_id.is_none() {
-        if scope_is_write(scope) && caller.session.role == Role::Member {
-            return Err(ApiError::Forbidden);
-        }
-        return Ok(());
+        return require(&caller.session, scope_permission(scope));
     }
     if caller.scopes.contains(&scope)
         || (scope == Scope::DevicesRead && caller.scopes.contains(&Scope::DevicesWrite))
@@ -178,16 +178,19 @@ pub(crate) fn require_scope(caller: &ApiCaller, scope: Scope) -> Result<(), ApiE
     Err(ApiError::Forbidden)
 }
 
-fn scope_is_write(scope: Scope) -> bool {
-    matches!(
-        scope,
-        Scope::DevicesWrite
-            | Scope::KeysWrite
-            | Scope::RoutesWrite
-            | Scope::PolicyWrite
-            | Scope::DnsWrite
-            | Scope::WebhooksWrite
-    )
+/// The organisation permission a human console session needs for a scope.
+/// Read scopes stay open to every role, as they were before roles split.
+fn scope_permission(scope: Scope) -> Permission {
+    match scope {
+        Scope::DevicesRead | Scope::StatusRead | Scope::WebhooksRead => Permission::ViewNetwork,
+        Scope::AuditRead => Permission::ViewAudit,
+        Scope::DevicesWrite => Permission::ManagePeers,
+        Scope::KeysWrite => Permission::ManageJoinKeys,
+        Scope::RoutesWrite => Permission::ManageNetworks,
+        Scope::PolicyWrite => Permission::ManagePolicy,
+        Scope::DnsWrite => Permission::ManageDns,
+        Scope::WebhooksWrite => Permission::ManageIntegrations,
+    }
 }
 
 async fn authenticate(
@@ -230,7 +233,7 @@ async fn api_token_session(
 ) -> Result<ApiCaller, ApiError> {
     let current_time = now();
     let row = sqlx::query(
-        "SELECT id,name,scopes_json,expires_at FROM api_clients WHERE token_hash=$1 AND org_id=$2 AND revoked_at IS NULL",
+        "SELECT id,name,scopes_json,expires_at FROM api_clients WHERE token_hash=$1 AND org_id=$2 AND revoked_at IS NULL AND suspended_at IS NULL",
     )
     .bind(hash(token))
     .bind(org_id.to_string())
@@ -277,7 +280,7 @@ async fn access_token_session(
 ) -> Result<ApiCaller, ApiError> {
     let current_time = now();
     let row = sqlx::query(
-        "SELECT t.api_client_id, c.name, t.scopes_json, t.expires_at, c.revoked_at, c.expires_at
+        "SELECT t.api_client_id, c.name, t.scopes_json, t.expires_at, c.revoked_at, c.expires_at, c.suspended_at
          FROM oauth_access_tokens t
          JOIN api_clients c ON c.id = t.api_client_id AND c.org_id = t.org_id
          WHERE t.token_hash=$1 AND t.org_id=$2",
@@ -294,7 +297,11 @@ async fn access_token_session(
     let access_expires_at: i64 = row.try_get(3)?;
     let revoked_at: Option<i64> = row.try_get(4)?;
     let client_expires_at: Option<i64> = row.try_get(5)?;
+    let suspended_at: Option<i64> = row.try_get(6)?;
+    // Checked on every request, so suspension or revocation of the client
+    // invalidates already-issued access tokens immediately.
     if revoked_at.is_some()
+        || suspended_at.is_some()
         || access_expires_at <= current_time
         || client_expires_at.is_some_and(|expires| expires <= current_time)
     {
@@ -347,9 +354,7 @@ pub(crate) async fn create_api_client(
     Json(input): Json<CreateApiClient>,
 ) -> Result<(StatusCode, Json<ApiClientCreated>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     insert_api_client(&s.store, org_id, &session, input).await
 }
 
@@ -429,15 +434,13 @@ pub(crate) async fn list_api_clients(
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApiClientRecord>>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     Ok(Json(load_api_clients(&s.store, org_id).await?))
 }
 
 async fn load_api_clients(store: &Store, org_id: Uuid) -> Result<Vec<ApiClientRecord>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,token_prefix,scopes_json,created_at,last_used_at,expires_at,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END FROM api_clients WHERE org_id=$1 ORDER BY name",
+        "SELECT id,name,token_prefix,scopes_json,created_at,last_used_at,expires_at,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,CASE WHEN suspended_at IS NOT NULL THEN 1 ELSE 0 END,rotated_at FROM api_clients WHERE org_id=$1 ORDER BY name",
     )
     .bind(org_id.to_string())
     .fetch_all(&store.pool)
@@ -455,6 +458,8 @@ async fn load_api_clients(store: &Store, org_id: Uuid) -> Result<Vec<ApiClientRe
                 last_used_at: row.try_get(5)?,
                 expires_at: row.try_get(6)?,
                 revoked: row.try_get::<i64, _>(7)? != 0,
+                suspended: row.try_get::<i64, _>(8)? != 0,
+                rotated_at: row.try_get(9)?,
             })
         })
         .collect()
@@ -466,9 +471,7 @@ pub(crate) async fn revoke_api_client(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     let mut tx = s.store.pool.begin().await?;
     let changed = sqlx::query(
         "UPDATE api_clients SET revoked_at=$1,token_hash=$2 WHERE id=$3 AND org_id=$4 AND revoked_at IS NULL",
@@ -648,7 +651,7 @@ pub(crate) async fn oauth_token(
     }
     let current_time = now();
     let row = sqlx::query(
-        "SELECT org_id,name,scopes_json,expires_at FROM api_clients WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+        "SELECT org_id,name,scopes_json,expires_at FROM api_clients WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND suspended_at IS NULL",
     )
     .bind(client_id.to_string())
     .bind(hash(&client_secret))
@@ -882,8 +885,9 @@ async fn rename_device(
     session: &Session,
     friendly_name: &str,
 ) -> Result<StatusCode, ApiError> {
-    if session.role == Role::Member && !session.user_id.starts_with("api:") {
-        return Err(ApiError::Forbidden);
+    // API clients reach here only after `require_scope(DevicesWrite)`.
+    if !session.user_id.starts_with("api:") {
+        require(session, Permission::ManagePeers)?;
     }
     let value = friendly_name.trim();
     let friendly_name = if value.is_empty() {
