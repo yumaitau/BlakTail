@@ -64,7 +64,11 @@ See [console.md](console.md).
 - Linux subnet routers and opt-in IPv4 exit nodes
 - Named network resources with routing-peer failover, access selection and overlap checks ([limits](network-resources.md#current-limits))
 - Dual-stack overlay addresses (CGNAT IPv4 plus an organisation ULA `/64`)
-- Device posture: last-seen/online, OS, agent version, search
+- Device inventory: last-seen/online, OS, agent version, search
+- Versioned posture checks that gate policy rules on self-reported agent/OS
+  version and coordinator-observed credential state (not attestation)
+- Explain access, and SSH rules enforced at Linux destinations (per-user
+  limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials
 - Prometheus metrics and an actor-attributed audit log
 - Single-host SQLite or concurrent PostgreSQL coordinator storage

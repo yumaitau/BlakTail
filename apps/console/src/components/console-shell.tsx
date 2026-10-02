@@ -22,7 +22,10 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
   },
   {
     label: "Access",
-    links: [{ href: "/acls", label: "Access policy" }],
+    links: [
+      { href: "/acls", label: "Access policy" },
+      { href: "/posture", label: "Posture checks" },
+    ],
   },
   { label: "DNS", links: [{ href: "/dns", label: "DNS" }] },
   { label: "Services", links: [{ href: "/services", label: "Private services" }] },

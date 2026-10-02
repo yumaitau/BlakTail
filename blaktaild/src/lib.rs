@@ -19,6 +19,7 @@ pub mod acl_filter;
 pub mod dns;
 pub mod relay_client;
 pub mod share;
+pub mod sshd;
 pub use dns::{
     configure_system_dns, dns_domain, organisation_dns_managed, organisation_resolver_suffixes,
     published_resolver_suffixes, remove_system_dns, MagicDns,
@@ -87,6 +88,8 @@ pub struct PeerIngress {
     pub deny_icmp: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_deny_users: Vec<String>,
 }
 
 impl Peer {
@@ -97,7 +100,8 @@ impl Peer {
                 if ingress.all
                     && ingress.deny_tcp.is_empty()
                     && ingress.deny_udp.is_empty()
-                    && !ingress.deny_icmp =>
+                    && !ingress.deny_icmp
+                    && ingress.ssh_deny_users.is_empty() =>
             {
                 if ingress.ssh_users.is_empty() {
                     "all".into()
@@ -124,6 +128,9 @@ impl Peer {
                 }
                 if !ingress.ssh_users.is_empty() {
                     parts.push(format!("ssh:{}", ingress.ssh_users.join(",")));
+                }
+                if !ingress.ssh_deny_users.is_empty() {
+                    parts.push(format!("ssh-deny:{}", ingress.ssh_deny_users.join(",")));
                 }
                 if parts.is_empty() {
                     "deny".into()
@@ -250,6 +257,9 @@ pub struct NodeState {
     pub control_revision: i64,
     #[serde(default)]
     pub published_shares: Vec<crate::PublishedShare>,
+    /// Last peer-map apply proved sshd enforces per-user SSH limits.
+    #[serde(default)]
+    pub ssh_users_enforced: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -549,10 +559,10 @@ impl Coordinator {
                 allowed_ips: vec![],
                 advertised_routes: registration.advertised_routes,
                 os: std::env::consts::OS,
-                os_version: std::env::consts::ARCH,
+                os_version: &os_version(),
                 agent_version: env!("CARGO_PKG_VERSION"),
                 hostname: registration.name,
-                capabilities: vec!["wireguard".into(), "magicdns".into()],
+                capabilities: agent_capabilities(false),
                 ephemeral: registration.ephemeral,
             })
             .send()
@@ -593,6 +603,7 @@ impl Coordinator {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            ssh_users_enforced: false,
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -601,6 +612,7 @@ impl Coordinator {
             .get(format!("{}/v1/nodes/{}/peers", self.base, state.node_id))
             .bearer_auth(&state.node_token);
         request = request.query(&[("ipv6", "true")]);
+        request = request.query(&inventory_query(state));
         let transport = *self
             .transport
             .lock()
@@ -635,6 +647,7 @@ impl Coordinator {
             ("ipv6", "true".into()),
             ("version", "2".into()),
         ]);
+        request = request.query(&inventory_query(state));
         if let Some(revision) = state.org_dns.as_ref().map(|dns| dns.revision) {
             request = request.query(&[("dns_revision", revision.to_string())]);
         }
@@ -837,6 +850,55 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     fs::rename(tmp, path)?;
     Ok(())
 }
+/// Capabilities this build provides. `ssh-users` is only claimed after the
+/// last apply verified the sshd drop-in.
+pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
+    let mut capabilities = vec!["wireguard".to_string(), "magicdns".to_string()];
+    if cfg!(target_os = "linux") {
+        capabilities.push("acl-filter".into());
+        if ssh_users_enforced {
+            capabilities.push("ssh-users".into());
+        }
+    }
+    capabilities
+}
+
+fn inventory_query(state: &NodeState) -> [(&'static str, String); 3] {
+    [
+        (
+            "capabilities",
+            agent_capabilities(state.ssh_users_enforced).join(","),
+        ),
+        ("agent_version", env!("CARGO_PKG_VERSION").to_string()),
+        ("os_version", os_version()),
+    ]
+}
+
+/// Self-reported OS release: `VERSION_ID` on Linux, the product version on
+/// macOS. Empty when unknown so posture treats it as missing.
+pub fn os_version() -> String {
+    if cfg!(target_os = "linux") {
+        return fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("VERSION_ID="))
+                    .map(|value| value.trim().trim_matches('"').to_string())
+            })
+            .unwrap_or_default();
+    }
+    if cfg!(target_os = "macos") {
+        return Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default();
+    }
+    String::new()
+}
+
 pub fn read_state(dir: &Path) -> Result<NodeState, Error> {
     Ok(serde_json::from_slice(&fs::read(dir.join("state.json"))?)?)
 }
@@ -2016,23 +2078,37 @@ pub fn apply_peer_map(
     let installed = installable_wireguard_peers(&state.peers, &desired);
     let changes = peer_diff(&state.peers, &installed);
     network.apply(&state.interface, &changes)?;
-    apply_peer_filter(network, dir, &state.interface, &installed)?;
+    state.ssh_users_enforced = apply_peer_filter(network, dir, &state.interface, &installed)?;
     state.peers = installed;
     write_state(dir, state)?;
     Ok(changes.len())
 }
 
+/// Installs the inbound filter and, when an sshd drop-in is configured,
+/// per-user SSH limits. Returns whether those limits are proven active;
+/// otherwise user-limited SSH sources are rejected at TCP 22.
 fn apply_peer_filter(
     network: &mut dyn Network,
     dir: &Path,
     interface: &str,
     peers: &[Peer],
-) -> Result<(), Error> {
-    network.apply_ingress(interface, peers)?;
+) -> Result<bool, Error> {
     write_secret(
         &dir.join("sshd_blaktail.conf"),
         acl_filter::sshd_policy_config(peers).as_bytes(),
-    )
+    )?;
+    let enforced = match sshd::configured_dropin() {
+        Some(path) => match sshd::sync(&path, peers, &mut sshd::SystemRunner, sshd::PID_FILE) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "sshd user policy not active; SSH stays closed to user-limited sources");
+                false
+            }
+        },
+        None => false,
+    };
+    network.apply_ingress(interface, &acl_filter::fail_closed_ssh(peers, enforced))?;
+    Ok(enforced)
 }
 
 /// Reinstalls the persisted peer set after a platform backend recreates its
@@ -2412,6 +2488,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            ssh_users_enforced: false,
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2475,6 +2552,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 3,
             published_shares: vec![],
+            ssh_users_enforced: false,
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));

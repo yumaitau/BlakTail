@@ -1290,6 +1290,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            ssh_users_enforced: false,
         }
     }
 

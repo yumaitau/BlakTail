@@ -1,0 +1,115 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import {
+  createPostureCheck,
+  deletePostureCheck,
+  updatePostureCheck,
+  type PostureDefinition,
+} from "@/lib/coord-policy";
+import { can } from "@/lib/roles";
+import { requireConsoleContext } from "@/lib/session";
+
+export type PostureActionResult = { ok: true } | { ok: false; error: string };
+
+const OS_FAMILIES = ["linux", "macos", "ios", "android", "windows"];
+const VERSION = /^v?\d+(\.\d+){0,3}$/u;
+
+function hoursToSeconds(value: FormDataEntryValue | null, label: string): number | undefined {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  const hours = Number(text);
+  if (!Number.isFinite(hours) || hours <= 0) {
+    throw new Error(`${label} must be a positive number of hours.`);
+  }
+  return Math.round(hours * 3600);
+}
+
+function definitionFrom(formData: FormData): PostureDefinition {
+  const definition: PostureDefinition = {};
+  const description = String(formData.get("description") ?? "").trim();
+  if (description) definition.description = description;
+  const agent = String(formData.get("min_agent_version") ?? "").trim();
+  if (agent) {
+    if (!VERSION.test(agent)) throw new Error("Minimum agent version must look like 0.2.0.");
+    definition.min_agent_version = agent;
+  }
+  const families = formData
+    .getAll("os_families")
+    .map(String)
+    .filter((family) => OS_FAMILIES.includes(family));
+  if (families.length) definition.os_families = families;
+  const minimums = String(formData.get("min_os_versions") ?? "").trim();
+  if (minimums) {
+    const entries: Record<string, string> = {};
+    for (const pair of minimums.split(",")) {
+      const [family, version] = pair.split("=").map((part) => part.trim().toLowerCase());
+      if (!family || !version || !OS_FAMILIES.includes(family) || !VERSION.test(version)) {
+        throw new Error("Minimum OS versions look like macos=14.0, linux=22.04.");
+      }
+      entries[family] = version;
+    }
+    definition.min_os_versions = entries;
+  }
+  const credential = hoursToSeconds(formData.get("max_credential_age_hours"), "Credential age");
+  if (credential !== undefined) definition.max_credential_age_secs = credential;
+  const report = hoursToSeconds(formData.get("max_report_age_hours"), "Report freshness");
+  if (report !== undefined) definition.max_report_age_secs = report;
+  if (formData.get("require_approved_peer") === "on") definition.require_approved_peer = true;
+  definition.on_missing_data = formData.get("on_missing_data") === "pass" ? "pass" : "fail";
+  return definition;
+}
+
+async function managerContext() {
+  const ctx = await requireConsoleContext();
+  if (!can(ctx.role, "manage_policy")) {
+    throw new Error("Only owners and admins can change posture checks.");
+  }
+  return ctx;
+}
+
+function failure(error: unknown, fallback: string): PostureActionResult {
+  return { ok: false, error: error instanceof Error ? error.message : fallback };
+}
+
+export async function createPostureCheckAction(formData: FormData): Promise<PostureActionResult> {
+  try {
+    const ctx = await managerContext();
+    const name = String(formData.get("name") ?? "").trim();
+    if (!/^[a-z][a-z0-9-]{0,31}$/u.test(name)) {
+      return { ok: false, error: "Name must be 1-32 lowercase letters, digits or hyphens." };
+    }
+    await createPostureCheck(ctx, name, definitionFrom(formData));
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return failure(error, "Could not create the posture check.");
+  }
+}
+
+export async function updatePostureCheckAction(formData: FormData): Promise<PostureActionResult> {
+  try {
+    const ctx = await managerContext();
+    const id = String(formData.get("id") ?? "");
+    const version = Number(formData.get("version"));
+    if (!id || !Number.isInteger(version)) {
+      return { ok: false, error: "Reload the page and try again." };
+    }
+    await updatePostureCheck(ctx, id, version, definitionFrom(formData));
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return failure(error, "Could not update the posture check.");
+  }
+}
+
+export async function deletePostureCheckAction(id: string): Promise<PostureActionResult> {
+  try {
+    const ctx = await managerContext();
+    await deletePostureCheck(ctx, id);
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return failure(error, "Could not delete the posture check.");
+  }
+}

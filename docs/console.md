@@ -23,7 +23,11 @@ authorisation.
   reusable keys with optional maximum uses, expiry and tags; the secret is
   shown once; inventory with creator, uses left, last use, expiry and revoke;
   install steps per platform that never contain the secret
-- `/acls` — people groups and access rules (owner/admin write)
+- `/acls` — people groups and access rules (owner/admin write), plus
+  **Explain access** for any member: matched rule, deny precedence, posture,
+  pairing and whether the destination device actually enforces the result
+- `/posture` — versioned posture checks (owner/admin write) and each
+  device's current assessment; self-reported data is labelled as such
 - `/dns` — organisation DNS workspace: effective settings, nameserver groups,
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
 - `/services` — private service names, target device, access tags, status and

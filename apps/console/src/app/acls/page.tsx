@@ -1,7 +1,9 @@
 import { AclEditor } from "@/components/acl-editor";
 import { ConsoleShell } from "@/components/console-shell";
+import { ExplainAccessPanel } from "@/components/explain-access-panel";
 import { PageHeader } from "@/components/page-header";
-import { getAcl } from "@/lib/coord";
+import { getAcl, listNodes } from "@/lib/coord";
+import { listPostureChecks } from "@/lib/coord-policy";
 import { listMemberships } from "@/lib/oidc";
 import { requireConsoleContext } from "@/lib/session";
 
@@ -17,6 +19,22 @@ export default async function AclsPage() {
   }
   const memberships = (await listMemberships(ctx.organisationId).catch(() => []))
     .filter((row) => row.status === "active");
+  const people = memberships.map((row) => ({
+    userId: row.userId,
+    email: row.email,
+    name: row.name,
+  }));
+  const [nodes, postureChecks] = await Promise.all([
+    listNodes(ctx).catch(() => null),
+    listPostureChecks(ctx).catch(() => null),
+  ]);
+  const devices = (nodes ?? [])
+    .filter((node) => !node.revoked && !node.deleted)
+    .map((node) => ({
+      id: node.id,
+      label: `${node.display_name || node.name} (${node.os ?? "OS not reported"})`,
+      os: node.os ?? null,
+    }));
 
   return (
     <ConsoleShell ctx={ctx} current="/acls">
@@ -30,12 +48,23 @@ export default async function AclsPage() {
           <AclEditor
             initialAcl={initialAcl}
             role={ctx.role}
-            people={memberships.map((row) => ({
-              userId: row.userId,
-              email: row.email,
-              name: row.name,
-            }))}
+            people={people}
+            postureChecks={postureChecks?.map((check) => check.name) ?? []}
           />
+        </div>
+        <div className="panel stack">
+          {nodes === null ? (
+            <p className="error" role="alert">
+              Could not load devices, so access cannot be explained right now.
+            </p>
+          ) : (
+            <ExplainAccessPanel
+              devices={devices}
+              people={people}
+              organisationName={ctx.organisationName}
+              role={ctx.role}
+            />
+          )}
         </div>
       </div>
     </ConsoleShell>

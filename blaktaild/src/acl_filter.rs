@@ -76,24 +76,90 @@ pub fn plan_overlay_filter(peers: &[Peer]) -> FilterPlan {
     }
 }
 
+/// True when an SSH grant names specific users or denies some, so only a
+/// verified sshd drop-in can express it.
+pub fn ssh_restricted(ingress: &crate::PeerIngress) -> bool {
+    let unrestricted = ingress.ssh_users.len() == 1
+        && ingress.ssh_users[0] == "*"
+        && ingress.ssh_deny_users.is_empty();
+    !ingress.ssh_users.is_empty() && !unrestricted
+}
+
+/// Without proven per-user sshd limits, reject TCP 22 from every source
+/// whose SSH grant is user-limited. The coordinator does the same; this is
+/// the agent's own fail-closed backstop.
+pub fn fail_closed_ssh(peers: &[Peer], users_enforced: bool) -> Vec<Peer> {
+    let mut peers = peers.to_vec();
+    if users_enforced {
+        return peers;
+    }
+    for peer in &mut peers {
+        if let Some(ingress) = &mut peer.ingress {
+            if ssh_restricted(ingress) && !ingress.deny_tcp.iter().any(|spec| spec == "22") {
+                ingress.deny_tcp.push("22".into());
+            }
+        }
+    }
+    peers
+}
+
+fn valid_login(user: &str) -> bool {
+    let mut chars = user.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && user.len() <= 32
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+/// sshd `Match Address` blocks for user-limited sources. Ends with `Match
+/// all` so nothing after an include is captured by the last block. A login
+/// that is not a plain name denies every user from that source.
 pub fn sshd_policy_config(peers: &[Peer]) -> String {
     let mut out = String::from("# managed by blaktaild\n");
+    let mut wrote = false;
     for peer in peers {
         let Some(ingress) = &peer.ingress else {
             continue;
         };
-        if ingress.ssh_users.is_empty() || ingress.ssh_users.iter().any(|user| user == "*") {
+        if !ssh_restricted(ingress) {
             continue;
         }
         let addresses = overlay_host_addrs(&peer.allowed_ips);
         if addresses.is_empty() {
             continue;
         }
+        wrote = true;
         out.push_str("Match Address ");
         out.push_str(&addresses.join(","));
-        out.push_str("\n    AllowUsers ");
-        out.push_str(&ingress.ssh_users.join(" "));
         out.push('\n');
+        let allow: Vec<&String> = ingress.ssh_users.iter().filter(|u| *u != "*").collect();
+        let names_ok = allow
+            .iter()
+            .copied()
+            .chain(ingress.ssh_deny_users.iter())
+            .all(|user| valid_login(user));
+        if !names_ok {
+            out.push_str("    DenyUsers *\n");
+            continue;
+        }
+        if !allow.is_empty() {
+            out.push_str("    AllowUsers ");
+            out.push_str(
+                &allow
+                    .iter()
+                    .map(|user| user.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            out.push('\n');
+        }
+        if !ingress.ssh_deny_users.is_empty() {
+            out.push_str("    DenyUsers ");
+            out.push_str(&ingress.ssh_deny_users.join(" "));
+            out.push('\n');
+        }
+    }
+    if wrote {
+        out.push_str("Match all\n");
     }
     out
 }
@@ -320,5 +386,64 @@ mod tests {
         })]);
         assert!(config.contains("Match Address 100.64.0.2,fd12:3456::2"));
         assert!(config.contains("AllowUsers blaktail"));
+        assert!(config.ends_with("Match all\n"));
+    }
+
+    #[test]
+    fn sshd_star_with_denies_and_injection_fail_closed() {
+        let config = sshd_policy_config(&[peer(PeerIngress {
+            all: true,
+            ssh_users: vec!["*".into()],
+            ssh_deny_users: vec!["root".into()],
+            ..PeerIngress::default()
+        })]);
+        assert!(config.contains("    DenyUsers root\n"));
+        assert!(!config.contains("AllowUsers"));
+        let unrestricted = sshd_policy_config(&[peer(PeerIngress {
+            all: true,
+            ssh_users: vec!["*".into()],
+            ..PeerIngress::default()
+        })]);
+        assert_eq!(unrestricted, "# managed by blaktaild\n");
+        let injected = sshd_policy_config(&[peer(PeerIngress {
+            ssh_users: vec!["ok\nMatch all\nPermitRootLogin yes".into()],
+            ..PeerIngress::default()
+        })]);
+        assert!(injected.contains("    DenyUsers *\n"));
+        assert!(!injected.contains("PermitRootLogin"));
+    }
+
+    #[test]
+    fn unverified_sshd_closes_port_22_for_user_limited_sources_only() {
+        let limited = peer(PeerIngress {
+            tcp: vec!["22".into(), "8080".into()],
+            ssh_users: vec!["deploy".into()],
+            ..PeerIngress::default()
+        });
+        let mut open = peer(PeerIngress {
+            tcp: vec!["22".into()],
+            ssh_users: vec!["*".into()],
+            ..PeerIngress::default()
+        });
+        open.allowed_ips = vec!["100.64.0.3/32".into()];
+        let closed = fail_closed_ssh(&[limited.clone(), open.clone()], false);
+        assert_eq!(closed[0].ingress.as_ref().unwrap().deny_tcp, vec!["22"]);
+        assert!(closed[1].ingress.as_ref().unwrap().deny_tcp.is_empty());
+        let plan = plan_overlay_filter(&closed);
+        let rules: Vec<String> = plan.ipv4.iter().map(|rule| rule.join(" ")).collect();
+        let reject = rules
+            .iter()
+            .position(|r| r.contains("-s 100.64.0.2 -p tcp --dport 22 -j REJECT"))
+            .expect("reject 22");
+        let accept = rules
+            .iter()
+            .position(|r| r.contains("-s 100.64.0.2 -p tcp --dport 22 -j ACCEPT"))
+            .expect("accept 22 still listed");
+        assert!(reject < accept, "reject must precede accept");
+        assert!(rules
+            .iter()
+            .any(|r| r.contains("-s 100.64.0.3 -p tcp --dport 22 -j ACCEPT")));
+        let enforced = fail_closed_ssh(&[limited], true);
+        assert!(enforced[0].ingress.as_ref().unwrap().deny_tcp.is_empty());
     }
 }
