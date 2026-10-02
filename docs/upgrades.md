@@ -11,6 +11,16 @@ current protocol does not negotiate a semantic version. Current additive IPv6 pe
 data is capability-gated with `?ipv6=true`, so the version-one schema migration does
 not force IPv6 routes onto older agents.
 
+The coordinator defines a minimum supported agent version
+(`MINIMUM_AGENT_VERSION` in `blaktail-coord/src/peer_lifecycle.rs`, currently
+`0.1.0`). The console device detail page flags agents that report an older
+version and links here. Raise it in the release that breaks compatibility.
+
+Agents built after October 2026 no longer accept `--join-key`; pipe the key on
+stdin or set `BLAKTAIL_JOIN_KEY`. Update automation before upgrading agents.
+They also report a measured transport summary (`direct`, `relay`, `mixed`) with
+each peer-map heartbeat; older agents show "not measured" in the console.
+
 Upgrade in this order:
 
 1. Back up console Postgres, the configured coordinator store, configuration, and TLS material.

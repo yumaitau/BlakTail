@@ -7,7 +7,6 @@ import {
   approveDeviceAuthorization,
   approveNodeRoutes,
   getAcl,
-  mintJoinKey,
   putAcl,
   putDns,
   type OrgDnsSettings,
@@ -56,35 +55,6 @@ function owningOrganisation(formData: FormData): string {
     throw new Error("The device's network account is required.");
   }
   return organisationId;
-}
-
-export async function mintJoinKeyAction(
-  formData: FormData,
-): Promise<ActionResult<{ key: string; expiresAt: number }>> {
-  try {
-    const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can mint join keys." };
-    }
-    const expiresInSeconds = Number(formData.get("expiresInSeconds") ?? 3600);
-    const singleUse = formData.get("singleUse") !== "false";
-    const tags = formData.getAll("tags").map(String).filter(isDeviceTag);
-    const result = await mintJoinKey(ctx, {
-      expiresInSeconds,
-      singleUse,
-      tags,
-    });
-    revalidatePath("/join-keys");
-    return {
-      ok: true,
-      data: { key: result.key, expiresAt: result.expires_at },
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not mint join key.",
-    };
-  }
 }
 
 export async function approveDeviceAuthorizationAction(

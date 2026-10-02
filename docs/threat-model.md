@@ -144,7 +144,7 @@ Sign in as owner or admin.
 1. Open `/devices`.
 2. Press **Revoke** on the compromised node.
 3. Confirm the row shows **Revoked**.
-4. Open `/join-keys`. Mint replacements only after unused leaked keys are revoked (step 4).
+4. Open `/join-keys` and press **Revoke** on every key that may have leaked, including reusable keys that still have uses left. Mint replacements only after that. If the device may come back (lost then found), **Suspend** on its detail page is reversible; Revoke is not.
 5. Wait one poll interval (30 seconds, worst case 60) then `ping` a remaining node from another remaining node.
 
 ### 2. Node self-revoke (machine you still control)
@@ -185,12 +185,12 @@ sqlite3 "${BLAKTAIL_DATABASE:-blaktail-coord.sqlite3}" \
   "UPDATE nodes SET revoked_at=strftime('%s','now') WHERE id='${NODE_ID}' AND revoked_at IS NULL;"
 ```
 
-Revoke every unused join key for the org (leaked key, not sure which one):
+Revoke every live join key for the org (leaked key, not sure which one; reusable keys stay live after their first use):
 
 ```sh
 sqlite3 "${BLAKTAIL_DATABASE:-blaktail-coord.sqlite3}" \
   "UPDATE join_keys SET revoked_at=strftime('%s','now')
-     WHERE org_id='${ORG_ID}' AND used_at IS NULL AND revoked_at IS NULL;"
+     WHERE org_id='${ORG_ID}' AND revoked_at IS NULL;"
 ```
 
 Revoke one known leaked join key (SHA-256 of the secret string, including the `btk_` prefix):

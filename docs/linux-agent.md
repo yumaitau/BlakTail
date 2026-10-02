@@ -23,8 +23,9 @@ sudo blaktaild down
 On a fresh node, `up` prints a ten-minute console URL and waits. Open that URL on
 any browser, sign in, confirm the displayed name and WireGuard-key fingerprint,
 then approve the node. This works unchanged over SSH and never requires copying a
-join key. Automation may still pass `--join-key`, set `BLAKTAIL_JOIN_KEY`, or pipe
-the key on stdin.
+join key. Automation may set `BLAKTAIL_JOIN_KEY` or pipe the key on stdin. There is
+no `--join-key` argument: secrets never go in argv, where process listings and
+shell history would expose them.
 
 The coordinator URL must use HTTPS except for localhost testing. The private key and credential-bearing state are stored under `/var/lib/blaktail` with mode `0600`; they are never logged. `up` polls every 30 seconds. A polling failure leaves the last applied WireGuard peer configuration untouched, so live tunnels continue while the coordinator is unavailable.
 

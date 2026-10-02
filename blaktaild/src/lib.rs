@@ -418,6 +418,8 @@ struct ApiErrorResponse {
 pub struct Coordinator {
     base: String,
     client: reqwest::Client,
+    /// Latest measured path summary, sent with the next peer-map heartbeat.
+    transport: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
 }
 impl Coordinator {
     pub fn new(base: &str) -> Result<Self, Error> {
@@ -444,7 +446,17 @@ impl Coordinator {
         Ok(Self {
             base,
             client: builder.build()?,
+            transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    /// Records `direct`, `relay` or `mixed` from fresh WireGuard handshakes;
+    /// `None` means nothing was measured and nothing is reported.
+    pub fn set_transport(&self, transport: Option<&'static str>) {
+        *self
+            .transport
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = transport;
     }
     pub async fn begin_device_authorization(
         &self,
@@ -569,6 +581,13 @@ impl Coordinator {
             .get(format!("{}/v1/nodes/{}/peers", self.base, state.node_id))
             .bearer_auth(&state.node_token);
         request = request.query(&[("ipv6", "true")]);
+        let transport = *self
+            .transport
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(transport) = transport {
+            request = request.query(&[("transport", transport)]);
+        }
         if let Some(revision) = state.org_dns.as_ref().map(|dns| dns.revision) {
             request = request.query(&[("dns_revision", revision.to_string())]);
         }

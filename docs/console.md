@@ -10,8 +10,19 @@ authorisation.
 - `/sign-in` — email and password; shows the shared project mission
 - `/privacy` — public software data-handling and retention statement
 - `/devices` — device inventory across linked networks; each row shows its
-  network and expands for rename, routes, tags, and revocation
-- `/join-keys` — mint join keys (owner/admin)
+  network and expands for rename, routes, tags, and revocation. The device
+  name opens its detail page.
+- `/devices/{nodeId}?organisation=…` — one device: node id, owner, WireGuard
+  key fingerprint, friendly/technical/MagicDNS names, addresses, tags, approved
+  routes, last heartbeat (online or stale by coordinator time), agent/OS
+  version against the coordinator's minimum, credential expiry, the
+  agent-reported transport (direct, relay, mixed, or "not measured") with its
+  timestamp, recent audit entries for the device, and suspend/resume, revoke
+  and delete with an impact preview (owner/admin)
+- `/join-keys` — enrolment workspace (owner/admin): mint named one-use or
+  reusable keys with optional maximum uses, expiry and tags; the secret is
+  shown once; inventory with creator, uses left, last use, expiry and revoke;
+  install steps per platform that never contain the secret
 - `/acls` — people groups and access rules (owner/admin write)
 - `/audit` — latest actor-attributed security and administration changes
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics

@@ -11,6 +11,7 @@ function needsAttention(node: NetworkNode): boolean {
   return (
     !node.deleted &&
     (node.revoked ||
+      node.suspended ||
       node.expired ||
       node.expires_soon ||
       node.advertised_routes.some((route) => !node.approved_routes.includes(route)))

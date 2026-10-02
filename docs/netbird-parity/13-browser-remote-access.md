@@ -17,3 +17,27 @@ NetBird has in-browser SSH/RDP and remote job surfaces. BlakTail offers overlay 
 Unauthorised member and revoked/suspended device cannot open new or existing session. Invalid host key fails closed; expired session cannot reconnect. Forced route failure does not send traffic outside approved AU path. Browser tests include keyboard access and safe tab closing; onshore gateway logs omit command contents unless explicitly opted in.
 
 **Evidence:** `docs/policy.md`, `apps/console/src/components/acl-editor.tsx`; https://docs.netbird.io/manage/peers/browser-client, https://docs.netbird.io/manage/peers/ssh, https://docs.netbird.io/manage/peers/remote-jobs.
+
+## Status (2 October 2026)
+
+**Done:** design only. [ADR 0006](../adr/0006-browser-remote-access.md) (Proposed) covers:
+- the trust boundary: a per-organisation onshore gateway that is itself a policy-checked BlakTail node, and never a cross-organisation proxy
+- single-use 60-second session tickets bound to person, org, gateway, target and OS user
+- a 30-minute hard cap, with policy and lifecycle re-checked every 60 seconds
+- host keys reported by the agent and pinned, failing closed
+- short-lived SSH certificates instead of stored credentials
+- no recording by default
+- a separate set of audit events
+- why it waits for draft 07 SSH enforcement, draft 12 field proof and step-up auth
+
+No UI or endpoint shipped.
+
+**Proven by tests:** nothing. This is a design record.
+
+**Still needs live/field proof or a decision:**
+- Accept or revise the ADR.
+- Proof of draft 07 SSH enforcement.
+- Draft 12 two-node lifecycle drills.
+- Step-up/MFA (draft 15).
+- A gateway section in the threat model, and an external review.
+- Separate ADRs for RDP and remote jobs.
