@@ -156,7 +156,7 @@ pub(crate) struct NetworkResource {
     description: String,
     kind: ResourceKind,
     pub(crate) cidr: Option<String>,
-    dns_target: Option<String>,
+    pub(crate) dns_target: Option<String>,
     /// `ipv4` or `ipv6` for CIDR resources.
     family: Option<String>,
     /// DNS targets are modelled only; resolution belongs to connectors.
@@ -181,11 +181,11 @@ pub(crate) struct NetworkResource {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RoutingPeerHealth {
-    node_id: Uuid,
-    name: Option<String>,
+    pub(crate) node_id: Uuid,
+    pub(crate) name: Option<String>,
     metric: u16,
     /// primary, standby, offline, not_advertising, expired or missing.
-    state: String,
+    pub(crate) state: String,
     online: bool,
     last_seen_at: Option<i64>,
     covering_route: Option<String>,
@@ -193,10 +193,10 @@ pub(crate) struct RoutingPeerHealth {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ClientDistribution {
-    node_id: Uuid,
+    pub(crate) node_id: Uuid,
     name: String,
     pub(crate) receives: bool,
-    reason: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1002,9 +1002,6 @@ async fn create_in_tx(
     via: &str,
 ) -> Result<ResourceDetail, ApiError> {
     let org = org_id.to_string();
-    // Bumping first takes the org row lock on PostgreSQL, serialising
-    // concurrent resource writers before the overlap check.
-    bump_control_revision(tx, &org).await?;
     let acl = load_acl(tx, &org).await?;
     let nodes = load_org_nodes(tx, &org).await?;
     let prepared = prepare(input, &org, session, &acl, &nodes, None)?;
@@ -1048,7 +1045,6 @@ async fn update_in_tx(
         .etag
         .as_deref()
         .ok_or_else(|| ApiError::BadRequest("etag is required".into()))?;
-    bump_control_revision(tx, &org).await?;
     let current = load_resource(tx, &org, id).await?;
     if current.etag != expected {
         return Err(ApiError::PreconditionFailed);
@@ -1138,7 +1134,6 @@ async fn delete_in_tx(
     via: &str,
 ) -> Result<(), ApiError> {
     let org = org_id.to_string();
-    bump_control_revision(tx, &org).await?;
     let current = load_resource(tx, &org, id).await?;
     if if_match.is_some_and(|expected| expected != current.etag) {
         return Err(ApiError::PreconditionFailed);
@@ -1161,12 +1156,19 @@ async fn delete_in_tx(
 }
 
 async fn overview(state: &AppState, org_id: Uuid) -> Result<NetworksOverview, ApiError> {
-    let org = org_id.to_string();
     let mut conn = state.store.pool.acquire().await?;
-    let acl = load_acl(&mut conn, &org).await?;
-    let nodes = load_org_nodes(&mut conn, &org).await?;
+    overview_conn(&mut conn, org_id).await
+}
+
+pub(crate) async fn overview_conn(
+    conn: &mut AnyConnection,
+    org_id: Uuid,
+) -> Result<NetworksOverview, ApiError> {
+    let org = org_id.to_string();
+    let acl = load_acl(conn, &org).await?;
+    let nodes = load_org_nodes(conn, &org).await?;
     let at = now();
-    let resources = load_resources(&mut conn, &org)
+    let resources = load_resources(conn, &org)
         .await?
         .into_iter()
         .map(|resource| evaluate(resource, &nodes, &acl, at))
@@ -1215,6 +1217,9 @@ async fn create(
     via: &str,
 ) -> Result<(StatusCode, ResourceDetail), ApiError> {
     let mut tx = state.store.pool.begin().await?;
+    // Bumping first takes the org row lock on PostgreSQL, serialising
+    // concurrent resource writers before the overlap check.
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let created = create_in_tx(&mut tx, org_id, session, input, via).await?;
     if input.dry_run {
         return Ok((StatusCode::OK, created));
@@ -1232,6 +1237,7 @@ async fn update(
     via: &str,
 ) -> Result<ResourceDetail, ApiError> {
     let mut tx = state.store.pool.begin().await?;
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let updated = update_in_tx(&mut tx, org_id, id, session, input, via).await?;
     if !input.dry_run {
         tx.commit().await?;
@@ -1258,6 +1264,7 @@ async fn delete(
                 .to_owned()
         });
     let mut tx = state.store.pool.begin().await?;
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     delete_in_tx(&mut tx, org_id, id, session, if_match.as_deref(), via).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1266,6 +1273,183 @@ async fn delete(
 fn parse_input(value: serde_json::Value) -> Result<ResourceInput, ApiError> {
     serde_json::from_value(value)
         .map_err(|error| ApiError::BadRequest(format!("invalid network resource: {error}")))
+}
+
+// ---------- change drafts ----------
+
+/// One live resource as an editable draft item: the create/update body plus
+/// its id. Server-managed fields (revision, etag, status) are left out.
+fn draft_item(resource: &NetworkResource) -> serde_json::Value {
+    let mut item = serde_json::json!({
+        "id": resource.id,
+        "name": resource.name,
+        "description": resource.description,
+        "ports": resource.ports,
+        "protocols": resource.protocols,
+        "routing_peers": resource.routing_peers,
+        "access": resource.access,
+        "enabled": resource.enabled,
+        "allow_nested_overlap": resource.allow_nested_overlap,
+    });
+    match (&resource.cidr, &resource.dns_target) {
+        (Some(cidr), _) => item["cidr"] = serde_json::json!(cidr),
+        (None, Some(target)) => item["dns_target"] = serde_json::json!(target),
+        _ => {}
+    }
+    item
+}
+
+/// Changes when any resource in the organisation is created, edited or
+/// deleted; a draft records it as its resources base.
+fn set_etag(resources: &[NetworkResource]) -> String {
+    let mut parts: Vec<String> = resources
+        .iter()
+        .map(|resource| format!("{}:{}", resource.id, resource.revision))
+        .collect();
+    parts.sort();
+    hash(&format!("network-resources:{}", parts.join(",")))[..32].to_owned()
+}
+
+pub(crate) async fn draft_snapshot(
+    conn: &mut AnyConnection,
+    org_id: Uuid,
+) -> Result<(Vec<serde_json::Value>, String), ApiError> {
+    let resources = load_resources(conn, &org_id.to_string()).await?;
+    Ok((
+        resources.iter().map(draft_item).collect(),
+        set_etag(&resources),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResourceChange {
+    pub(crate) op: &'static str,
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) before: Option<serde_json::Value>,
+    pub(crate) after: Option<serde_json::Value>,
+}
+
+/// Canonical form used to decide whether a draft item changes a resource.
+fn comparable(input: &ResourceInput) -> serde_json::Value {
+    serde_json::json!([
+        input.name.trim(),
+        input.description.trim(),
+        input.cidr,
+        input.dns_target,
+        input.ports,
+        input.protocols,
+        input.routing_peers,
+        input.access,
+        input.enabled,
+        input.allow_nested_overlap,
+    ])
+}
+
+/// Makes the organisation's resources match `desired` (the full set) through
+/// the ordinary create/update/delete validators and writers, inside the
+/// caller's transaction. The caller bumps the control revision.
+pub(crate) async fn apply_draft_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: Uuid,
+    session: &Session,
+    desired: &[serde_json::Value],
+    via: &str,
+) -> Result<Vec<ResourceChange>, ApiError> {
+    let org = org_id.to_string();
+    let live = load_resources(tx, &org).await?;
+    let mut wanted: Vec<(Option<Uuid>, ResourceInput)> = Vec::new();
+    for (index, item) in desired.iter().enumerate() {
+        let mut object = item
+            .as_object()
+            .cloned()
+            .ok_or_else(|| ApiError::BadRequest(format!("resources[{index}] must be an object")))?;
+        let id = match object.remove("id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .and_then(|v| Uuid::parse_str(v).ok())
+                    .ok_or_else(|| {
+                        ApiError::BadRequest(format!("resources[{index}].id is not a UUID"))
+                    })?,
+            ),
+        };
+        if object.contains_key("etag") || object.contains_key("dry_run") {
+            return Err(ApiError::BadRequest(format!(
+                "resources[{index}] may not set etag or dry_run; the draft tracks them"
+            )));
+        }
+        if let Some(id) = id {
+            if !live.iter().any(|resource| resource.id == id) {
+                return Err(ApiError::BadRequest(format!(
+                    "resources[{index}] names resource {id}, which does not exist in this organisation"
+                )));
+            }
+            if wanted.iter().any(|(other, _)| *other == Some(id)) {
+                return Err(ApiError::BadRequest(format!(
+                    "resource {id} appears twice in the draft"
+                )));
+            }
+        }
+        let input: ResourceInput = serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(|error| ApiError::BadRequest(format!("resources[{index}]: {error}")))?;
+        wanted.push((id, input));
+    }
+    let mut changes = Vec::new();
+    // Deletions first so a replacement can reuse a name or prefix.
+    for resource in &live {
+        if wanted.iter().any(|(id, _)| *id == Some(resource.id)) {
+            continue;
+        }
+        delete_in_tx(tx, org_id, resource.id, session, Some(&resource.etag), via).await?;
+        changes.push(ResourceChange {
+            op: "delete",
+            id: resource.id,
+            name: resource.name.clone(),
+            before: Some(draft_item(resource)),
+            after: None,
+        });
+    }
+    for (id, input) in wanted.iter_mut() {
+        let Some(id) = *id else { continue };
+        let current = live
+            .iter()
+            .find(|resource| resource.id == id)
+            .expect("checked above");
+        let before: ResourceInput = serde_json::from_value({
+            let mut item = draft_item(current);
+            item.as_object_mut().map(|o| o.remove("id"));
+            item
+        })
+        .map_err(|_| ApiError::CorruptData)?;
+        if comparable(&before) == comparable(input) {
+            continue;
+        }
+        input.etag = Some(current.etag.clone());
+        let updated = update_in_tx(tx, org_id, id, session, input, via).await?;
+        changes.push(ResourceChange {
+            op: "update",
+            id,
+            name: updated.resource.name.clone(),
+            before: Some(draft_item(current)),
+            after: Some(draft_item(&updated.resource)),
+        });
+    }
+    for (id, input) in &wanted {
+        if id.is_some() {
+            continue;
+        }
+        let created = create_in_tx(tx, org_id, session, input, via).await?;
+        changes.push(ResourceChange {
+            op: "create",
+            id: created.resource.id,
+            name: created.resource.name.clone(),
+            before: None,
+            after: Some(draft_item(&created.resource)),
+        });
+    }
+    Ok(changes)
 }
 
 // ---------- console routes ----------
@@ -1392,6 +1576,7 @@ pub(crate) async fn api_create(
         }
     }
     let mut tx = s.store.pool.begin().await?;
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let created = create_in_tx(&mut tx, org_id, &caller.session, &input, "admin_api").await?;
     let body = serde_json::to_value(Envelope {
         data: created,

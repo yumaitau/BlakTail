@@ -18,7 +18,11 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
   },
   {
     label: "Networks",
-    links: [{ href: "/networks", label: "Networks" }],
+    links: [
+      { href: "/networks", label: "Networks" },
+      { href: "/topology", label: "Topology" },
+      { href: "/changes", label: "Change drafts" },
+    ],
   },
   {
     label: "Access",

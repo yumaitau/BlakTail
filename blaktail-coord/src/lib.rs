@@ -1,4 +1,5 @@
 mod admin;
+mod change_drafts;
 pub mod connectors;
 mod dns_workspace;
 pub mod flows;
@@ -16,6 +17,7 @@ mod resources;
 mod service_users;
 mod shares;
 pub mod tailnet_lock;
+mod topology;
 mod webhooks;
 mod wg_only;
 
@@ -273,7 +275,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 22,
-        name: "change drafts and topology",
+        name: "change drafts",
         postgres_sql: include_str!("../migrations/postgres/0022_change_drafts.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0022_change_drafts.sql")),
     },
@@ -1424,6 +1426,8 @@ pub fn app_with_relays_console_and_metrics(
         .merge(admin::api_routes())
         .merge(dns_workspace::routes())
         .merge(private_services::routes())
+        .merge(topology::routes())
+        .merge(change_drafts::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -4398,6 +4402,19 @@ pub(crate) async fn publish_org_dns(
     current: &org_dns::OrgDnsResponse,
     next: &org_dns::OrgDnsSettings,
 ) -> Result<(), ApiError> {
+    write_org_dns_tx(tx, org_id, current, next).await?;
+    bump_control_revision(tx, org_id.to_string()).await?;
+    Ok(())
+}
+
+/// Writes the DNS document and its revision history without bumping the
+/// control revision, so a multi-surface publish can bump it once.
+pub(crate) async fn write_org_dns_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: Uuid,
+    current: &org_dns::OrgDnsResponse,
+    next: &org_dns::OrgDnsSettings,
+) -> Result<(), ApiError> {
     let next_json = serde_json::to_string(next).map_err(|_| ApiError::CorruptData)?;
     let previous_json = serde_json::to_string(&current.dns).map_err(|_| ApiError::CorruptData)?;
     let changed =
@@ -4413,7 +4430,6 @@ pub(crate) async fn publish_org_dns(
         return Err(ApiError::NotFound);
     }
     dns_workspace::record_revision(tx, org_id, current.revision + 1, &next_json).await?;
-    bump_control_revision(tx, org_id.to_string()).await?;
     Ok(())
 }
 
