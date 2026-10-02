@@ -1,0 +1,142 @@
+# Audit log and traffic diagnostics
+
+BlakTail keeps two separate records. The **audit log** records administrative
+changes: who changed what, and when. **Traffic diagnostics** are optional
+aggregate counters about network use. One never stands in for the other: an
+empty traffic view says nothing about admin activity, and the audit log never
+contains traffic.
+
+## Audit log
+
+### What is recorded
+
+Every coordinator mutation (devices, keys, policy, posture, DNS, routes,
+resources, services, webhooks, automation clients, traffic settings, audit
+exports) writes one row in the same database transaction as the change. Rows
+hold the actor (user id, name, email, role; automation clients appear as
+`api:<client id>` with role `api_client`), action, target type and id, a
+details object and a UTC timestamp. Console-side actions (sign-in policy,
+memberships, invitations, identity links) are stored in the console database
+and merged into the same timeline on `/audit`.
+
+### Reading, filtering and paging
+
+- Console: `/audit`, every role (`view_audit`). Filters: actor (user id,
+  email or name), action (`node.*` or `node.` for a prefix), target type,
+  target id, and a UTC date range. Pages of 50, newest first, with an
+  **Older events** link; the cursor spans both stores, so no event is skipped
+  or repeated across pages.
+- API: `GET /api/v1/audit` (`audit:read`) with the same filters,
+  `limit` up to 200 and `before=<created_at>:<id>` from `next_cursor`.
+  Console-side events are not in the API.
+
+### Redaction
+
+Details are redacted when read, on every path (console, API, export,
+webhook payloads): any key whose name contains `secret`, `password`,
+`token`, `private_key`, `api_key`, `authorization`, `cookie`, `signature` or
+`psk` (except identifiers such as `token_prefix` or `*_id`) and any string
+shaped like a BlakTail credential (`btk_…`, `bta_…`), a JWT or a PEM block is
+shown as `[redacted]`. Writers already avoid putting secrets in details;
+redaction is the second line of defence.
+
+### Export
+
+People with `export_audit` (owner, admin, auditor) can download CSV or JSON
+from `/audit`; automation needs the `audit:export` scope
+(`GET /api/v1/audit/export?format=csv`). Members and network admins cannot
+export. Each export is itself audited as `audit.exported` with its format,
+filters and row count. One export returns at most 10,000 coordinator events
+(`X-BlakTail-Export-Truncated: true` when capped); narrow the date range for
+more. CSV cells that start with `=`, `+`, `-` or `@` are prefixed with `'` so
+spreadsheets do not evaluate them.
+
+### Retention and deletion
+
+Coordinator audit rows older than the organisation's audit retention
+(`audit_retention_seconds`, 1–365 days, default 90) are deleted whenever the
+audit log is read. There is no per-row deletion. Console audit rows follow
+the operator's console database procedures ([privacy.md](privacy.md)).
+Backups keep deleted rows until the backups expire; operators must set and
+publish backup retention for their onshore environment.
+
+### Integrity chain
+
+Since schema 27 each coordinator audit row stores its per-organisation
+sequence number, the previous row's hash and its own SHA-256 hash over every
+field. `/audit` shows the chain status; `GET /v1/orgs/{org}/audit/verify` and
+`GET /api/v1/audit/verify` return `intact`, the verified range and any
+problems: an edited row, missing rows inside the window, or a removed or
+altered tail (the organisation keeps the latest sequence and hash).
+
+Limits, stated plainly:
+
+- The oldest retained row anchors the chain; rows aged out by retention are
+  expected to be gone.
+- Rows written before schema 27, the bootstrap row and console-side events
+  are not chained (reported as `unchained_events`).
+- Someone with write access to the database can rewrite every later row and
+  the head consistently. The chain detects casual or partial tampering, not a
+  determined database administrator. For stronger assurance, forward events
+  to an independent store (signed webhooks, below) or export regularly.
+- Writes that audit serialise per organisation on the organisation row.
+
+## Traffic diagnostics
+
+### Off by default, owner opt-in
+
+Traffic diagnostics are off for every organisation until an **owner**
+turns them on at `/traffic` (Events group) and chooses a sampling rate
+(1–100 %) and retention (1–30 days). Admins, network admins, auditors and
+members can view the page but not change it. Every change and every
+deletion of stored records is audited (`traffic.settings_updated`,
+`traffic.records_deleted`) and raises the `traffic.settings_changed` event.
+
+### What is accepted
+
+Devices upload aggregate counters to `POST /v1/nodes/{node_id}/flows` with
+their own node token. Each record is: organisation and device id (must be
+the uploading device's own), a service class label (`ssh`, `https`, …; at
+most 32 lowercase letters, digits, `-`, `_` — never a host name), a time
+bucket of at most one hour, protocol and port, byte and packet counts,
+transport (`direct`, `udp_relay`, `https_relay`) and decision (`allowed`,
+`denied`).
+
+Refused outright: uploads while the organisation is opted out (`409`,
+checked again inside the write so turning it off stops the very next
+upload), records for another organisation or device (`403`), unknown fields,
+and any key such as `url`, `uri`, `path`, `payload`, `body`, `headers`,
+`cookie`, `query`, `dns_query`, `qname`, `host`, `hostname` or `sni` (`400`).
+Batches are capped at 500 records and 256 KiB, uploads at 12 a minute per
+device, and storage at 200,000 records per organisation (`409` beyond it).
+The coordinator samples deterministically at the configured rate and deletes
+records past retention on upload and every 15 minutes.
+
+### What the page shows
+
+Allowed and denied bytes, packets and records; totals by transport and
+service class; hourly buckets for the last 6 hours to 7 days; the time of
+the last report; and a confidence note (device-reported, sampling rate,
+reporting devices out of active devices). States: **disabled**, **no data**
+(on but nothing received), **stale** (newest record older than two hours) and
+**current**.
+
+### Not collected today
+
+Current BlakTail agents (Linux, macOS, Windows, iOS, Android) do **not**
+send traffic records. The endpoint and page exist so an operator can opt in
+and so a future agent release can report; until then an opted-in
+organisation will see **no data**, and the page says why. macOS and iOS run
+WireGuard through boringtun inside the app or Network Extension, so any
+future collection there is limited to what that process observes (tunnel
+bytes per peer), not per-connection decisions. Traffic export is not offered.
+
+### Privacy
+
+Records never contain payloads, URLs, DNS questions or host names. They do
+reveal which device moved how much data over which service class and port in
+which hour, which is still personal information about the device's user.
+Turn collection on only with a stated purpose, keep retention short, and
+include it in the organisation's privacy notice. To answer an access or
+deletion request, an owner can delete all stored records from `/traffic`;
+records are otherwise only deleted by retention.

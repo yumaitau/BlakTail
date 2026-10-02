@@ -8,6 +8,7 @@ replace every `change-me` value.
 | --- | --- |
 | [env.local](env.local) | Compose environment for `localhost` |
 | [agent.toml](agent.toml) | Agent file config for the same stack |
+| [automation/](automation/README.md) | `/api/v1` curl walkthrough and read-only-by-default Terraform |
 | [../config/blaktail.toml.example](../config/blaktail.toml.example) | Full schema-v1 reference for coordinator, relay, agent, and console |
 
 `scripts/quickstart.sh` writes `.env` and copies the coordinator CA to
