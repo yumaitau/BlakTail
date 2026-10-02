@@ -5,7 +5,8 @@
 //! exists yet, so every service reports `reachable: false`.
 
 use crate::{
-    append_audit, bearer, bump_control_revision, console_session, https_services, now, org_dns,
+    append_audit, audit_log, bearer, bump_control_revision, console_session, https_services,
+    notifications, now, org_dns,
     permissions::{require, Permission},
     ApiError, AppState,
 };
@@ -560,6 +561,24 @@ async fn revoke_certificates(
     .rows_affected())
 }
 
+/// Revokes every live certificate issued to `node_id` (on suspension: a
+/// suspended device must not keep serving under a valid certificate).
+pub(crate) async fn revoke_node_certificates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: Uuid,
+    node_id: Uuid,
+) -> Result<u64, ApiError> {
+    Ok(sqlx::query(
+        "UPDATE service_certificates SET revoked_at=$1 WHERE org_id=$2 AND node_id=$3 AND revoked_at IS NULL",
+    )
+    .bind(now())
+    .bind(org_id.to_string())
+    .bind(node_id.to_string())
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
+}
+
 async fn list_services(
     State(s): State<AppState>,
     UrlPath(org_id): UrlPath<Uuid>,
@@ -668,7 +687,7 @@ async fn load_service(
 }
 
 /// Authenticates a node bearer token; revoked, deleted and unknown nodes all
-/// fail the same way.
+/// fail the same way. Suspended devices are refused (`suspended`).
 async fn node_org(
     s: &AppState,
     headers: &HeaderMap,
@@ -676,13 +695,16 @@ async fn node_org(
 ) -> Result<(Uuid, String), ApiError> {
     let token = bearer(headers)?;
     let row = sqlx::query(
-        "SELECT org_id,credential_expires_at,name FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT org_id,credential_expires_at,name,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
     .ok_or(ApiError::Unauthorized)?;
+    if row.try_get::<Option<i64>, _>(3)?.is_some() {
+        return Err(ApiError::Suspended);
+    }
     let expires: i64 = row.try_get(1)?;
     if expires <= now() {
         return Err(ApiError::CredentialExpired);
@@ -847,29 +869,30 @@ async fn issue_certificate(
     .bind(issued_at)
     .execute(&mut *tx)
     .await?;
-    // The actor is the serving node, not a console user, so this bypasses
-    // `append_audit`'s session-shaped actor.
-    sqlx::query(
-        "INSERT INTO audit_events(id,org_id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at) VALUES($1,$2,$3,$4,'','node','service.certificate_issued','service',$5,$6,$7)",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(org_id.to_string())
-    .bind(node_id.to_string())
-    .bind(&node_name)
-    .bind(service_id.to_string())
-    .bind(
-        serde_json::json!({
-            "fqdn": fqdn,
-            "node_id": node_id,
-            "serial": issued.serial,
-            "fingerprint_sha256": issued.fingerprint,
-            "not_after": issued.not_after,
-        })
-        .to_string(),
-    )
-    .bind(issued_at)
-    .execute(&mut *tx)
-    .await?;
+    // The actor is the serving node, not a console user, so this builds the
+    // chained entry itself instead of `append_audit`'s session-shaped actor.
+    let details = serde_json::json!({
+        "fqdn": fqdn,
+        "node_id": node_id,
+        "serial": issued.serial,
+        "fingerprint_sha256": issued.fingerprint,
+        "not_after": issued.not_after,
+    });
+    let entry = audit_log::ChainEntry {
+        org_id: org_id.to_string(),
+        id: Uuid::new_v4().to_string(),
+        actor_user_id: node_id.to_string(),
+        actor_name: node_name,
+        actor_email: String::new(),
+        actor_role: "node".into(),
+        action: "service.certificate_issued".into(),
+        target_type: "service".into(),
+        target_id: Some(service_id.to_string()),
+        details_json: details.to_string(),
+        created_at: issued_at,
+    };
+    audit_log::insert_chained(&mut tx, &entry).await?;
+    notifications::enqueue_for_audit(&mut tx, org_id, &entry, &details).await?;
     tx.commit().await?;
     Ok(Json(IssuedCertificate {
         certificate_pem: issued.pem,
@@ -1667,6 +1690,79 @@ mod tests {
         )
         .await;
 
+        // A suspended node can neither list its services nor obtain a
+        // certificate, and suspension revokes what it already holds.
+        let (status, issued) = call(
+            &r,
+            Method::POST,
+            &issue_path,
+            serde_json::json!({"csr_pem": csr_for(&[&fqdn])}),
+            Auth::Node(&token_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let (status, _) = call(
+            &r,
+            Method::POST,
+            &format!("/v1/orgs/{org_a}/nodes/{node_a}/suspend"),
+            serde_json::json!({"reason": "lost"}),
+            owner_a(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM service_certificates WHERE node_id=$1 AND revoked_at IS NULL",
+        )
+        .bind(node_a.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(live, 0);
+        let (status, error) = call(
+            &r,
+            Method::GET,
+            &format!("/v1/nodes/{node_a}/services"),
+            serde_json::Value::Null,
+            Auth::Node(&token_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error["code"], "suspended");
+        let (status, _) = call(
+            &r,
+            Method::POST,
+            &issue_path,
+            serde_json::json!({"csr_pem": csr_for(&[&fqdn])}),
+            Auth::Node(&token_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &r,
+            Method::POST,
+            &format!("/v1/orgs/{org_a}/nodes/{node_a}/resume"),
+            serde_json::json!({}),
+            owner_a(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Issuance audit rows are part of the tamper-evident chain.
+        let unchained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE org_id=$1 AND action='service.certificate_issued' AND (chain_seq IS NULL OR actor_role<>'node' OR actor_user_id<>$2)",
+        )
+        .bind(org_a.to_string())
+        .bind(node_a.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(unchained, 0);
+        assert!(
+            crate::audit_log::verify_chain(&store, org_a)
+                .await
+                .unwrap()
+                .intact
+        );
+
         // A revoked node can no longer obtain a certificate.
         let (status, _) = call(
             &r,
@@ -1710,8 +1806,11 @@ mod tests {
         .fetch_all(&store.pool)
         .await
         .unwrap();
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].0, "node");
-        assert!(!audit[0].1.contains("PRIVATE KEY") && !audit[0].1.contains("BEGIN"));
+        // The first issuance plus the one revoked by suspension.
+        assert_eq!(audit.len(), 2);
+        for (role, details) in &audit {
+            assert_eq!(role, "node");
+            assert!(!details.contains("PRIVATE KEY") && !details.contains("BEGIN"));
+        }
     }
 }

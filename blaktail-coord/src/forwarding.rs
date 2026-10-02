@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, Row};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 use uuid::Uuid;
 
@@ -159,6 +159,9 @@ pub(crate) struct RouterView<'a> {
     pub(crate) dns_name: &'a str,
     pub(crate) subject: &'a Subject,
     pub(crate) approved: &'a [String],
+    /// Advertised (possibly unapproved) routes: networks the router can
+    /// reach that exit clients must not reach through the exit route.
+    pub(crate) advertised: &'a [String],
 }
 
 impl RouterView<'_> {
@@ -201,6 +204,60 @@ pub(crate) fn host_cidr(value: &str) -> Option<String> {
         });
     }
     ipam::parse_cidr(&value).ok().map(|_| value)
+}
+
+/// `universe` (a default route) minus every prefix of the same family in
+/// `excluded`, as the fewest covering CIDRs.
+fn complement<'a>(universe: &str, excluded: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let Ok((network, _)) = ipam::parse_cidr(universe) else {
+        return Vec::new();
+    };
+    let ipv4 = network.is_ipv4();
+    let bits: u8 = if ipv4 { 32 } else { 128 };
+    let excluded: Vec<(u128, u8)> = excluded
+        .into_iter()
+        .filter_map(|prefix| ipam::parse_cidr(prefix).ok())
+        .filter(|(address, _)| address.is_ipv4() == ipv4)
+        .map(|(address, prefix)| (address_bits(address), prefix))
+        .collect();
+    let mut out = Vec::new();
+    split(&mut out, ipv4, bits, 0, 0, &excluded);
+    out
+}
+
+fn address_bits(address: IpAddr) -> u128 {
+    match address {
+        IpAddr::V4(address) => u128::from(u32::from(address)),
+        IpAddr::V6(address) => u128::from(address),
+    }
+}
+
+fn split(out: &mut Vec<String>, ipv4: bool, bits: u8, net: u128, len: u8, excluded: &[(u128, u8)]) {
+    // `a/alen` contains `b` when `b` is at least as long and agrees on alen bits.
+    let contains = |a: u128, alen: u8, b: u128, blen: u8| {
+        blen >= alen && (alen == 0 || (a ^ b) >> (u32::from(bits) - u32::from(alen)) == 0)
+    };
+    if excluded
+        .iter()
+        .any(|&(prefix, plen)| contains(prefix, plen, net, len))
+    {
+        return;
+    }
+    if !excluded
+        .iter()
+        .any(|&(prefix, plen)| contains(net, len, prefix, plen))
+    {
+        out.push(if ipv4 {
+            // `bits` is 32 here, so `net` fits.
+            format!("{}/{len}", Ipv4Addr::from(net as u32))
+        } else {
+            format!("{}/{len}", Ipv6Addr::from(net))
+        });
+        return;
+    }
+    let half = 1u128 << (u32::from(bits) - u32::from(len) - 1);
+    split(out, ipv4, bits, net, len + 1, excluded);
+    split(out, ipv4, bits, net | half, len + 1, excluded);
 }
 
 /// The destination subject for named-host rules, as `policy explain` and
@@ -259,17 +316,28 @@ pub(crate) fn compile_client(
     };
     let mut deny = Vec::new();
     let mut allow = Vec::new();
-    // An exit-node client must not reach prefixes this router carries for
-    // others just because 0.0.0.0/0 covers them.
-    if grants.contains_key(EXIT_ROUTE) {
-        let carried = router
-            .approved
+    // An exit-node client must not reach prefixes this router carries (or
+    // could carry) just because the default route covers them: traffic to
+    // such a prefix is governed only by the client's grant for it. Ungranted
+    // prefixes are denied outright, and the default route is allowed as its
+    // complement around every carried prefix, so a port-limited grant is
+    // never widened by the exit route.
+    let carried = router
+        .approved
+        .iter()
+        .chain(router.advertised)
+        .map(String::as_str)
+        .chain(distribution.reserved_for(router.id))
+        .filter(|prefix| !resources::is_default_route(prefix))
+        .collect::<BTreeSet<_>>();
+    let exits = grants
+        .keys()
+        .any(|prefix| resources::is_default_route(prefix));
+    if exits {
+        for prefix in carried
             .iter()
-            .map(String::as_str)
-            .chain(distribution.carried_by(router.id))
-            .filter(|prefix| *prefix != EXIT_ROUTE && !grants.contains_key(*prefix))
-            .collect::<BTreeSet<_>>();
-        for prefix in carried {
+            .filter(|prefix| !grants.contains_key(**prefix))
+        {
             deny.push(entry(prefix, ForwardService::everything()));
         }
     }
@@ -290,7 +358,12 @@ pub(crate) fn compile_client(
         }) {
             match rule.action {
                 Action::Deny => denied.merge(&rule_service(rule)),
-                Action::Allow => allowed.merge(&rule_service(rule)),
+                // Only rules that name hosts open a host; a general
+                // device-to-device allow says nothing about subnet hosts.
+                Action::Allow if !rule.dst_hosts.is_empty() => {
+                    allowed.merge(&rule_service(rule));
+                }
+                Action::Allow => {}
             }
         }
         if !denied.is_empty() {
@@ -300,32 +373,45 @@ pub(crate) fn compile_client(
         // the exit route.
         let routed_privately = grants
             .keys()
-            .any(|prefix| prefix != EXIT_ROUTE && within(prefix));
+            .any(|prefix| !resources::is_default_route(prefix) && within(prefix));
         if !allowed.is_empty() && routed_privately {
             allow.push(entry(&host, allowed));
         }
     }
     for (prefix, service) in grants {
-        allow.push(entry(&prefix, service));
+        if resources::is_default_route(&prefix) {
+            for part in complement(&prefix, carried.iter().copied()) {
+                allow.push(entry(&part, service.clone()));
+            }
+        } else {
+            allow.push(entry(&prefix, service));
+        }
     }
     filter.deny.extend(deny);
     filter.allow.extend(allow);
 }
 
-/// Name and approved routes of the requesting node, for its own allow-list.
-pub(crate) async fn load_router(
-    pool: &AnyPool,
-    node_id: Uuid,
-) -> Result<(String, Vec<String>), ApiError> {
-    let row = sqlx::query("SELECT name,approved_routes_json FROM nodes WHERE id=$1")
-        .bind(node_id.to_string())
-        .fetch_optional(pool)
-        .await?
-        .ok_or(ApiError::Unauthorized)?;
-    Ok((
-        row.try_get(0)?,
-        serde_json::from_str(&row.try_get::<String, _>(1)?).unwrap_or_default(),
-    ))
+/// The requesting node's name, approved routes and advertised routes, for
+/// its own allow-list.
+pub(crate) struct RouterRow {
+    pub(crate) name: String,
+    pub(crate) approved: Vec<String>,
+    pub(crate) advertised: Vec<String>,
+}
+
+pub(crate) async fn load_router(pool: &AnyPool, node_id: Uuid) -> Result<RouterRow, ApiError> {
+    let row = sqlx::query(
+        "SELECT name,approved_routes_json,advertised_routes_json FROM nodes WHERE id=$1",
+    )
+    .bind(node_id.to_string())
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    Ok(RouterRow {
+        name: row.try_get(0)?,
+        approved: serde_json::from_str(&row.try_get::<String, _>(1)?).unwrap_or_default(),
+        advertised: serde_json::from_str(&row.try_get::<String, _>(2)?).unwrap_or_default(),
+    })
 }
 
 // ---------- exit-node selections ----------
@@ -492,7 +578,7 @@ pub(crate) async fn client_filter(
 ) -> Result<ForwardFilter, ApiError> {
     let distribution = resources::load_distribution(pool, org_id).await?;
     let rows = sqlx::query(
-        "SELECT id,name,dns_name,approved_routes_json,allowed_ips_json FROM nodes WHERE org_id=$1 AND (id=$2 OR id=$3) AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT id,name,dns_name,approved_routes_json,allowed_ips_json,advertised_routes_json FROM nodes WHERE org_id=$1 AND (id=$2 OR id=$3) AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(org_id)
     .bind(router.0.to_string())
@@ -509,13 +595,15 @@ pub(crate) async fn client_filter(
                 row.try_get::<String, _>(2)?,
                 serde_json::from_str::<Vec<String>>(&row.try_get::<String, _>(3)?)
                     .unwrap_or_default(),
+                serde_json::from_str::<Vec<String>>(&row.try_get::<String, _>(5)?)
+                    .unwrap_or_default(),
             ));
         } else {
             overlay = serde_json::from_str(&row.try_get::<String, _>(4)?).unwrap_or_default();
         }
     }
     let mut filter = ForwardFilter::default();
-    let Some((name, dns_name, approved)) = router_row else {
+    let Some((name, dns_name, approved, advertised)) = router_row else {
         return Ok(filter);
     };
     let exit_request = exit_selection(pool, client.0).await?;
@@ -528,6 +616,7 @@ pub(crate) async fn client_filter(
             dns_name: &dns_name,
             subject: router.1,
             approved: &approved,
+            advertised: &advertised,
         },
         &ClientView {
             id: client.0,

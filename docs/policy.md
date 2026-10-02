@@ -6,6 +6,9 @@ organisations start with `"defaults": "deny"`. Existing documents without
 `defaults` keep the legacy same-tag and untagged allow; GET shows that as a
 visible `generated` rule. `PUT` requires the current `etag` when the caller
 sends `If-Match`. Admin `PUT /api/v1/policy` always requires `etag`.
+Publishes serialise on the organisation row and compare-and-swap the policy
+revision, so of two concurrent writes made against the same `etag` exactly one
+succeeds and the other gets 412 (on SQLite and Postgres alike).
 `{"rollback":true}` restores the previous document.
 
 ```sh
@@ -209,7 +212,9 @@ the compiled grant, and where enforcement happens:
 For a named host and a source device, `reasons` also says whether each
 enforcing routing peer would forward or drop the flow according to its compiled
 allow-list, which can differ from the policy decision: a network resource or a
-device-approved route can grant the subnet without a host rule. `peer_map`
+device-approved route can grant the subnet without a host rule. Only `allow`
+rules that list the host in `dst_hosts` widen a routing peer's allow-list for
+that host. `peer_map`
 means no routing peer carries the host at all.
 
 Results are simulations against the published revision; no packet is sent.

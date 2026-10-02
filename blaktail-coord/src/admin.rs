@@ -227,10 +227,11 @@ pub(crate) fn require_scope(caller: &ApiCaller, scope: Scope) -> Result<(), ApiE
 }
 
 /// The organisation permission a human console session needs for a scope.
-/// Read scopes stay open to every role, as they were before roles split.
+/// Read scopes stay open to every role, as they were before roles split,
+/// except webhook reads, which need the integrations permission.
 fn scope_permission(scope: Scope) -> Permission {
     match scope {
-        Scope::DevicesRead | Scope::StatusRead | Scope::WebhooksRead => Permission::ViewNetwork,
+        Scope::DevicesRead | Scope::StatusRead => Permission::ViewNetwork,
         Scope::AuditRead => Permission::ViewAudit,
         Scope::AuditExport => Permission::ExportAudit,
         Scope::DevicesWrite => Permission::ManagePeers,
@@ -238,7 +239,8 @@ fn scope_permission(scope: Scope) -> Permission {
         Scope::RoutesWrite => Permission::ManageNetworks,
         Scope::PolicyWrite => Permission::ManagePolicy,
         Scope::DnsWrite => Permission::ManageDns,
-        Scope::WebhooksWrite => Permission::ManageIntegrations,
+        // Webhook endpoints carry delivery URLs and signing metadata.
+        Scope::WebhooksRead | Scope::WebhooksWrite => Permission::ManageIntegrations,
     }
 }
 
@@ -1240,6 +1242,8 @@ async fn api_put_policy(
     let (org_id, caller) = authenticate_org_header(&s, &headers).await?;
     require_scope(&caller, Scope::PolicyWrite)?;
     let mut tx = s.store.pool.begin().await?;
+    // Lock the org row before reading the policy (see `put_acl`).
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let current = crate::load_acl_row_tx(&mut tx, org_id).await?;
     let expected = value
         .get("etag")
@@ -1262,7 +1266,6 @@ async fn api_put_policy(
     };
     let acl: crate::Acl = serde_json::from_str(&next).map_err(|_| ApiError::CorruptData)?;
     crate::publish_acl_tx(&mut tx, org_id, &current.json, &next, current.revision).await?;
-    bump_control_revision(&mut tx, org_id.to_string()).await?;
     append_audit(
         &mut tx,
         org_id,
@@ -1455,4 +1458,20 @@ async fn api_rotate_wg_only(
     Ok(Json(
         crate::wg_only::rotate_for_org(&s, org_id, peer_id, &caller.session, input).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_reads_need_the_integrations_permission() {
+        assert_eq!(
+            scope_permission(Scope::WebhooksRead),
+            Permission::ManageIntegrations
+        );
+        assert!(!Role::Member.can(scope_permission(Scope::WebhooksRead)));
+        assert!(Role::Admin.can(scope_permission(Scope::WebhooksRead)));
+        assert!(Role::Member.can(scope_permission(Scope::DevicesRead)));
+    }
 }

@@ -56,7 +56,7 @@ A serving node generates its own key and sends only a PKCS#10 CSR:
 - `POST /v1/nodes/:node/services/:service/certificate` with `{"csr_pem": …}`.
 
 The coordinator checks the node token (revoked, removed or expired nodes are
-refused), that the service belongs to the node's organisation (other
+refused; suspended nodes get 403 `suspended` on both node routes), that the service belongs to the node's organisation (other
 organisations get 404), that the node is the service's target (403 otherwise),
 and that the service is enabled. The CSR signature must verify, its key must be
 ECDSA P-256, ECDSA P-384 or Ed25519, and it may name only the service's full
@@ -64,7 +64,10 @@ name. Any request carrying private key material is rejected. Only the CSR's
 public key is used: the coordinator sets the subject (organisation, service and
 node IDs), the single DNS name, server-auth usage and a 24-hour lifetime. The
 CSR and certificate fingerprint are stored and the issue is audited as
-`service.certificate_issued` with actor role `node`. Keys, certificates and
+`service.certificate_issued` with actor role `node`, in the organisation's
+tamper-evident audit chain. Suspending a device revokes every service
+certificate issued to it (`service_certificates_revoked` in the
+`node.suspended` audit details); after resuming it must request new ones. Keys, certificates and
 payloads are not logged.
 
 Trusting the CA on client devices is manual today: download it from

@@ -683,3 +683,46 @@ async fn capability_report_on_long_poll_returns_the_recompiled_grant() {
     assert_eq!(grant["tcp"], serde_json::json!(["22", "443"]));
     assert!(grant.get("deny_tcp").is_none());
 }
+
+#[tokio::test]
+async fn concurrent_policy_puts_with_one_etag_publish_once() {
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "acl-race-org").await;
+    let owner = || signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let before = load_acl_row(&store, org.id).await.unwrap();
+    let etag = hash(&before.json);
+    let put = |defaults: &'static str| {
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/orgs/{}/acl", org.id))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", sign_test_assertion(&owner())),
+            )
+            .header("content-type", "application/json")
+            .header("if-match", format!("\"{etag}\""))
+            .body(Body::from(
+                serde_json::json!({"version":1,"defaults":defaults,"rules":[]}).to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(request)
+    };
+    let (first, second) = tokio::join!(put("deny"), put("same_tag"));
+    let mut statuses = [first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::NO_CONTENT, StatusCode::PRECONDITION_FAILED]
+    );
+    let after = load_acl_row(&store, org.id).await.unwrap();
+    assert_eq!(after.revision, before.revision + 1);
+    assert_eq!(after.previous.as_deref(), Some(before.json.as_str()));
+
+    // The publish itself is a compare-and-swap on the revision read, so a
+    // writer that read before another committed (Postgres READ COMMITTED)
+    // cannot overwrite it.
+    let mut tx = store.pool.begin().await.unwrap();
+    let stale = publish_acl_tx(&mut tx, org.id, &before.json, &before.json, before.revision).await;
+    assert!(matches!(stale, Err(ApiError::PreconditionFailed)));
+}

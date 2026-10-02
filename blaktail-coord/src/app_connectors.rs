@@ -9,12 +9,13 @@
 //!
 //! Reports are untrusted: any answer in a forbidden range (loopback,
 //! link-local, cloud metadata, multicast, unspecified, the overlay pools or
-//! a device's WireGuard endpoint) rejects the whole report and withdraws
-//! every lease for that resource, so DNS rebinding fails closed.
+//! a device's WireGuard endpoint, an enabled CIDR resource or a device's
+//! approved route) rejects the whole report and withdraws every lease for
+//! that resource, so DNS rebinding fails closed.
 
 use crate::{
-    append_audit, bearer, bump_control_revision, now, org_ula_address, ApiError, AppState, Role,
-    Session,
+    append_audit, bearer, bump_control_revision, now, org_ula_address, resources, ApiError,
+    AppState, Role, Session,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -367,6 +368,35 @@ async fn withdraw_all(
     Ok(())
 }
 
+/// Enabled CIDR resource prefixes and approved device routes (default routes
+/// aside). An answer inside one would hand that prefix's hosts out under the
+/// DNS resource's access and ports, bypassing its own.
+async fn protected_prefixes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut prefixes: Vec<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cidr FROM network_resources WHERE org_id=$1 AND kind='cidr' AND enabled<>0",
+    )
+    .bind(org_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .flatten()
+    .collect();
+    for approved in sqlx::query_scalar::<_, String>(
+        "SELECT approved_routes_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        prefixes.extend(serde_json::from_str::<Vec<String>>(&approved).unwrap_or_default());
+    }
+    prefixes.retain(|prefix| !resources::is_default_route(prefix));
+    Ok(prefixes)
+}
+
 async fn device_endpoints(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     org_id: &str,
@@ -453,6 +483,7 @@ async fn report_resolution(
     }
 
     let endpoints = device_endpoints(&mut tx, &org).await?;
+    let protected = protected_prefixes(&mut tx, &org).await?;
     let mut accepted: BTreeMap<String, u32> = BTreeMap::new();
     let mut blocked: Option<String> = None;
     for answer in &report.answers {
@@ -463,16 +494,23 @@ async fn report_resolution(
                 break;
             }
         };
-        let why = forbidden_reason(ip, &org).or_else(|| {
-            endpoints
-                .contains(&ip)
-                .then_some("a device's WireGuard endpoint")
-        });
+        let route = host_route(ip);
+        let why = forbidden_reason(ip, &org)
+            .or_else(|| {
+                endpoints
+                    .contains(&ip)
+                    .then_some("a device's WireGuard endpoint")
+            })
+            .or_else(|| {
+                protected
+                    .iter()
+                    .any(|prefix| resources::cidr_within(&route, prefix))
+                    .then_some("inside a network resource or approved device route")
+            });
         if let Some(why) = why {
             blocked = Some(format!("{fqdn} resolved to {ip} ({why})"));
             break;
         }
-        let route = host_route(ip);
         let ttl = accepted
             .get(&route)
             .map_or(answer.ttl, |t| (*t).min(answer.ttl));
@@ -1422,5 +1460,82 @@ pub(crate) mod integration {
         let raw: serde_json::Value = json(response).await;
         assert_eq!(raw["status"]["state"], "no_routing_peer");
         assert_eq!(raw["status"]["routing_peers"][0]["state"], "not_connector");
+    }
+
+    #[tokio::test]
+    async fn answers_inside_resources_or_approved_routes_fail_closed() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store.clone(), "ap-southeast-2".into(), SECRET);
+        let org = create_org(&router, "protected-org").await;
+        let owner = Who::person(org.id, "owner-1", "owner");
+        let connector = register(&router, &owner, "connector", &[CAP_APP_CONNECTOR]).await;
+        let subnet = register(&router, &owner, "subnet", &[]).await;
+        let laptop = register(&router, &owner, "laptop", &[]).await;
+        let response = call(
+            &router,
+            Method::POST,
+            &format!("/v1/orgs/{}/networks", org.id),
+            serde_json::json!({
+                "name": "Admin LAN",
+                "cidr": "10.50.0.0/24",
+                "ports": ["22"],
+                "protocols": ["tcp"],
+                "routing_peers": [{"node_id": subnet.id}],
+                "access": {"roles": ["owner"]},
+            }),
+            Some(owner.token()),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2")
+            .bind(r#"["10.60.0.0/16","0.0.0.0/0"]"#)
+            .bind(subnet.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let fqdn = "files.example.org.au";
+        let resource = create_dns_resource(&router, &owner, fqdn, &connector).await;
+        let id = resource.resource.id;
+
+        for answer in ["10.50.0.7", "10.60.1.1"] {
+            let response = report(&router, &connector, id, fqdn, &[(answer, 60)]).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{answer}");
+            let message = error_text(response).await;
+            assert!(message.contains("network resource"), "{message}");
+        }
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE org_id=$1 AND action='connector.resolution_blocked'",
+        )
+        .bind(org.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(blocked, 2);
+        // The approved default route does not block every answer.
+        assert_eq!(
+            report(&router, &connector, id, fqdn, &[("10.70.0.5", 60)])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        // A lease recorded before the prefix was protected is still never
+        // distributed: containment, not just equality, wins.
+        sqlx::query(
+            "INSERT INTO connector_leases(org_id,resource_id,node_id,route,ttl,resolved_at,expires_at) VALUES($1,$2,$3,$4,60,$5,$6)",
+        )
+        .bind(org.id.to_string())
+        .bind(id.to_string())
+        .bind(connector.id.to_string())
+        .bind("10.50.0.9/32")
+        .bind(now())
+        .bind(now() + 60)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let routes = routes_via(&router, &laptop, &connector).await;
+        assert!(routes.contains(&"10.70.0.5/32".to_owned()), "{routes:?}");
+        assert!(!routes.contains(&"10.50.0.9/32".to_owned()), "{routes:?}");
     }
 }

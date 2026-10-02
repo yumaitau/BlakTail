@@ -2140,17 +2140,22 @@ pub(crate) async fn publish_acl_tx(
     next_json: &str,
     revision: i64,
 ) -> Result<(), ApiError> {
-    let changed =
-        sqlx::query("UPDATE orgs SET acl_json=$1,acl_revision=$2,acl_previous_json=$3 WHERE id=$4")
-            .bind(next_json)
-            .bind(revision + 1)
-            .bind(current_json)
-            .bind(org_id.to_string())
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
+    // Compare-and-swap on the revision the caller read: a concurrent publish
+    // in between (possible on Postgres under READ COMMITTED) fails with 412
+    // instead of being silently overwritten.
+    let changed = sqlx::query(
+        "UPDATE orgs SET acl_json=$1,acl_revision=$2,acl_previous_json=$3 WHERE id=$4 AND acl_revision=$5",
+    )
+    .bind(next_json)
+    .bind(revision + 1)
+    .bind(current_json)
+    .bind(org_id.to_string())
+    .bind(revision)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
     if changed == 0 {
-        return Err(ApiError::NotFound);
+        return Err(ApiError::PreconditionFailed);
     }
     Ok(())
 }
@@ -2797,7 +2802,7 @@ async fn update_advertised_routes(
 ) -> Result<StatusCode, ApiError> {
     let routes = validate_advertised_routes(input.advertised_routes)?;
     let token = bearer(&headers)?;
-    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL")
+    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL")
         .bind(node_id.to_string())
         .bind(token)
         .fetch_optional(&s.store.pool)
@@ -2806,10 +2811,14 @@ async fn update_advertised_routes(
             Ok::<_, sqlx::Error>((
                 row.try_get::<i64, _>(0)?,
                 row.try_get::<String, _>(1)?,
+                row.try_get::<Option<i64>, _>(2)?,
             ))
         })
         .transpose()?;
-    let (credential_expires_at, approved_json) = row.ok_or(ApiError::Unauthorized)?;
+    let (credential_expires_at, approved_json, suspended_at) = row.ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -2838,17 +2847,24 @@ async fn update_node_shares(
     let token = bearer(&headers)?;
     let mut tx = s.store.pool.begin().await?;
     let row = sqlx::query(
-        "SELECT org_id,credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT org_id,credential_expires_at,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&mut *tx)
     .await?
     .map(|row| {
-        Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)?))
+        Ok::<_, sqlx::Error>((
+            row.try_get::<String, _>(0)?,
+            row.try_get::<i64, _>(1)?,
+            row.try_get::<Option<i64>, _>(2)?,
+        ))
     })
     .transpose()?;
-    let (org_id, credential_expires_at) = row.ok_or(ApiError::Unauthorized)?;
+    let (org_id, credential_expires_at, suspended_at) = row.ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -3328,19 +3344,18 @@ async fn list_peers(
             if !acl.allows(&source, &destination) {
                 return None;
             }
-            if let (Some((router_name, approved)), Some(filter)) =
-                (&forward_router, forward_filter.as_mut())
-            {
+            if let (Some(router_row), Some(filter)) = (&forward_router, forward_filter.as_mut()) {
                 let exit_request = exit_selections.get(&peer.id).cloned();
                 forwarding::compile_client(
                     &acl,
                     &resource_routes,
                     &forwarding::RouterView {
                         id: node_id,
-                        name: router_name,
+                        name: &router_row.name,
                         dns_name: &dns_name,
                         subject: &source,
-                        approved,
+                        approved: &router_row.approved,
+                        advertised: &router_row.advertised,
                     },
                     &forwarding::ClientView {
                         id: peer.id,
@@ -3460,18 +3475,28 @@ async fn list_updates(
         ));
     }
     let token = bearer(&headers)?;
-    let (org, suspended) = sqlx::query(
-        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+    let (org, suspended, credential_expires_at) = sqlx::query(
+        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END,credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
-    .map(|row| Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)? != 0)))
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            row.try_get::<String, _>(0)?,
+            row.try_get::<i64, _>(1)? != 0,
+            row.try_get::<i64, _>(2)?,
+        ))
+    })
     .transpose()?
     .ok_or(ApiError::Unauthorized)?;
     if suspended {
         return Err(ApiError::Suspended);
+    }
+    // An expired credential must not refresh posture or capabilities.
+    if credential_expires_at <= now() {
+        return Err(ApiError::CredentialExpired);
     }
     // Record reported capabilities before waiting: a change bumps the
     // revision so this same request returns the recompiled snapshot.
@@ -3621,14 +3646,21 @@ async fn update_relay_endpoint(
         ));
     }
     let token = bearer(&headers)?;
-    let expires_at: i64 = sqlx::query_scalar(
-        "SELECT credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+    let (expires_at, suspended_at) = sqlx::query(
+        "SELECT credential_expires_at,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
-        .ok_or(ApiError::Unauthorized)?;
+    .map(|row| {
+        Ok::<_, sqlx::Error>((row.try_get::<i64, _>(0)?, row.try_get::<Option<i64>, _>(1)?))
+    })
+    .transpose()?
+    .ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -4265,6 +4297,9 @@ async fn put_acl(
     let session = console_session(&s, &headers, org_id).await?;
     require(&session, Permission::ManagePolicy)?;
     let mut tx = s.store.pool.begin().await?;
+    // Take the org row lock before reading the policy, so concurrent writers
+    // serialise and the If-Match check sees the latest revision.
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let current = load_acl_row_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
         .get("if-match")
@@ -4289,7 +4324,6 @@ async fn put_acl(
     };
     let acl: Acl = serde_json::from_str(&next).map_err(|_| ApiError::CorruptData)?;
     publish_acl_tx(&mut tx, org_id, &current.json, &next, current.revision).await?;
-    bump_control_revision(&mut tx, org_id.to_string()).await?;
     append_audit(
         &mut tx,
         org_id,

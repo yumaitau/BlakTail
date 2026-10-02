@@ -292,7 +292,7 @@ impl OrgNode {
 
 // ---------- CIDR helpers ----------
 
-fn is_default_route(cidr: &str) -> bool {
+pub(crate) fn is_default_route(cidr: &str) -> bool {
     cidr == "0.0.0.0/0" || cidr == "::/0"
 }
 
@@ -747,6 +747,10 @@ fn evaluate(
 /// request.
 pub(crate) struct Distribution {
     routes: Vec<ActiveRoute>,
+    /// Every CIDR resource prefix (enabled or not) with all of its routing
+    /// peers, selected or standby: what an exit node must keep exit-only
+    /// clients out of.
+    reserved: Vec<(String, Vec<Uuid>)>,
 }
 
 struct ActiveRoute {
@@ -763,8 +767,19 @@ pub(crate) async fn load_distribution(
 ) -> Result<Distribution, ApiError> {
     let mut conn = pool.acquire().await?;
     let resources = load_resources(&mut conn, org_id).await?;
+    let reserved = resources
+        .iter()
+        .filter_map(|resource| {
+            let cidr = resource.cidr.clone()?;
+            let peers = resource.routing_peers.iter().map(|p| p.node_id).collect();
+            Some((cidr, peers))
+        })
+        .collect();
     if !resources.iter().any(|resource| resource.enabled) {
-        return Ok(Distribution { routes: Vec::new() });
+        return Ok(Distribution {
+            routes: Vec::new(),
+            reserved,
+        });
     }
     let nodes = load_org_nodes(&mut conn, org_id).await?;
     let leases = if resources
@@ -775,6 +790,11 @@ pub(crate) async fn load_distribution(
     } else {
         OrgLeases::default()
     };
+    let enabled_prefixes: Vec<String> = resources
+        .iter()
+        .filter(|resource| resource.enabled)
+        .filter_map(|resource| resource.cidr.clone())
+        .collect();
     let at = now();
     let mut routes: Vec<ActiveRoute> = Vec::new();
     let mut host_routes = Vec::new();
@@ -804,24 +824,36 @@ pub(crate) async fn load_distribution(
             }
         }
     }
+    // A connector answer inside a CIDR resource or an approved device route
+    // would widen (or re-route) access to that prefix with the DNS
+    // resource's own access and ports, so such host routes are never
+    // distributed, whichever router carries the prefix.
+    let protected: Vec<&str> = enabled_prefixes
+        .iter()
+        .map(String::as_str)
+        .chain(
+            nodes
+                .iter()
+                .flat_map(|node| node.approved.iter().map(String::as_str)),
+        )
+        .filter(|prefix| !is_default_route(prefix))
+        .collect();
     // WireGuard cannot give one prefix to two peers (and blaktaild drops a
     // peer whose AllowedIPs collide), so a host route already carried by a
     // different router stays with the first claimant.
-    let mut claimed: BTreeMap<String, Uuid> = routes
-        .iter()
-        .map(|route| (route.cidr.clone(), route.router))
-        .collect();
-    for node in &nodes {
-        for route in &node.approved {
-            claimed.entry(route.clone()).or_insert(node.id);
-        }
-    }
+    let mut claimed: BTreeMap<String, Uuid> = BTreeMap::new();
     for route in host_routes {
+        if protected
+            .iter()
+            .any(|prefix| cidr_within(&route.cidr, prefix))
+        {
+            continue;
+        }
         if *claimed.entry(route.cidr.clone()).or_insert(route.router) == route.router {
             routes.push(route);
         }
     }
-    Ok(Distribution { routes })
+    Ok(Distribution { routes, reserved })
 }
 
 impl Distribution {
@@ -869,6 +901,18 @@ impl Distribution {
             .iter()
             .filter(move |route| route.router == router)
             .map(|route| route.cidr.as_str())
+    }
+
+    /// Every prefix `router` could forward to as a resource routing peer:
+    /// the prefixes it currently carries plus every CIDR resource that lists
+    /// it as a routing peer, selected or not.
+    pub(crate) fn reserved_for(&self, router: Uuid) -> impl Iterator<Item = &str> {
+        self.carried_by(router).chain(
+            self.reserved
+                .iter()
+                .filter(move |(_, peers)| peers.contains(&router))
+                .map(|(cidr, _)| cidr.as_str()),
+        )
     }
 }
 

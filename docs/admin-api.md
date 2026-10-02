@@ -37,7 +37,9 @@ resume it (`…/suspend`, `…/resume`). Suspension blocks token minting and
 rejects already-issued access tokens on their next request. These are console
 routes authorised by the signed console assertion, not `/api/v1` operations.
 Human console sessions calling `/api/v1` need the role permission matching
-each write scope ([roles.md](roles.md)).
+each write scope ([roles.md](roles.md)). `webhooks:read` is the one read
+scope that also needs a permission (`manage_integrations`), because webhook
+listings expose delivery URLs.
 
 ## Writes
 

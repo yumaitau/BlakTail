@@ -65,6 +65,10 @@ resource shows **Blocked** with the reason, and the event is audited (marked
 - BlakTail's own overlay (`100.64.0.0/10` and the organisation's IPv6 `/64`);
 - any device's WireGuard endpoint address in the organisation (it would
   route the tunnel through itself);
+- an address inside an enabled CIDR network resource or a device's approved
+  route (default routes aside): the host would otherwise be reachable with the
+  DNS resource's access and ports instead of that prefix's own. Leases already
+  stored inside such a prefix are not distributed either;
 - anything that is not a single host address (a prefix wider than `/32` or
   `/128`).
 

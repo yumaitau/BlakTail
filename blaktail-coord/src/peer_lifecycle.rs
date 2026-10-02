@@ -550,6 +550,11 @@ async fn set_suspended(
         ));
     }
     bump_control_revision(&mut tx, org_id.to_string()).await?;
+    let certificates_revoked = if suspend {
+        crate::private_services::revoke_node_certificates(&mut tx, org_id, node_id).await?
+    } else {
+        0
+    };
     let (action, event) = if suspend {
         ("node.suspended", "device.suspended")
     } else {
@@ -559,6 +564,9 @@ async fn set_suspended(
         "technical_name": technical_name,
         "approved_routes": approved_routes,
     });
+    if certificates_revoked > 0 {
+        details["service_certificates_revoked"] = certificates_revoked.into();
+    }
     if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
         details["reason"] = reason.into();
     }
@@ -842,6 +850,76 @@ mod tests {
         let back: serde_json::Value = json(peers(&r, &b).await).await;
         assert_eq!(back["dns_name"], b.dns_name.as_str());
         assert_eq!(back["assigned_ips"][0], b.assigned_ip.as_str());
+    }
+
+    #[tokio::test]
+    async fn suspended_or_expired_node_cannot_change_its_own_state() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store.clone(), "ap-southeast-2".into(), SECRET);
+        let org_id = org(&r, "suspend-writes-org").await;
+        let a = node(&r, org_id, "alpha").await;
+        let suspended = call(
+            &r,
+            Method::POST,
+            &format!("/v1/orgs/{org_id}/nodes/{}/suspend", a.id),
+            serde_json::json!({}),
+            console(As(org_id, Role::Admin)),
+        )
+        .await;
+        assert_eq!(suspended.status(), StatusCode::NO_CONTENT);
+        for (path, body) in [
+            (
+                "routes",
+                serde_json::json!({"advertised_routes": ["10.9.0.0/24"]}),
+            ),
+            ("shares", serde_json::json!({"shares": []})),
+            (
+                "relay-endpoint",
+                serde_json::json!({"endpoint": "203.0.113.5:41641"}),
+            ),
+        ] {
+            let response = call(
+                &r,
+                Method::PUT,
+                &format!("/v1/nodes/{}/{path}", a.id),
+                body,
+                Some(a.node_token.clone()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let error: serde_json::Value = json(response).await;
+            assert_eq!(error["code"], "suspended", "{path}");
+        }
+
+        // An expired credential cannot refresh reported inventory through
+        // the update stream.
+        let b = node(&r, org_id, "bravo").await;
+        let pool = &store.pool;
+        sqlx::query("UPDATE nodes SET credential_expires_at=$1 WHERE id=$2")
+            .bind(now() - 1)
+            .bind(b.id.to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        let updates = call(
+            &r,
+            Method::GET,
+            &format!(
+                "/v1/nodes/{}/updates?since=0&capabilities=forward-filter&agent_version=9.9.9",
+                b.id
+            ),
+            serde_json::json!({}),
+            Some(b.node_token.clone()),
+        )
+        .await;
+        assert!(updates.status().is_client_error(), "{}", updates.status());
+        let agent: Option<String> =
+            sqlx::query_scalar("SELECT agent_version FROM nodes WHERE id=$1")
+                .bind(b.id.to_string())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_ne!(agent.as_deref(), Some("9.9.9"));
     }
 
     #[tokio::test]

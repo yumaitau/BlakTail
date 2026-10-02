@@ -43,6 +43,28 @@ fn entries<'a>(rules: &'a [ForwardRule], client: &RegisterResponse) -> Vec<&'a F
         .collect()
 }
 
+/// Whether `client`'s entries in `filter` let it reach `host` on this service.
+fn reaches(
+    filter: &ForwardFilter,
+    client: &RegisterResponse,
+    host: &str,
+    protocol: Option<AclProtocol>,
+    port: Option<u16>,
+) -> bool {
+    let own = |rules: &[ForwardRule]| {
+        rules
+            .iter()
+            .filter(|rule| rule.client == client.id)
+            .cloned()
+            .collect()
+    };
+    let filter = ForwardFilter {
+        deny: own(&filter.deny),
+        allow: own(&filter.allow),
+    };
+    crate::forwarding::permits(&filter, host, protocol, port)
+}
+
 fn sources_of(node: &RegisterResponse) -> BTreeSet<String> {
     node.assigned_ips.iter().cloned().collect()
 }
@@ -326,10 +348,13 @@ async fn exit_node_forwarding_only_for_clients_that_select_it() {
     assert!(selected.exit_node_active);
     assert!(revision(store.clone()).await > before);
     let filter = allow_list(&router, &exit).await;
-    let bob_allow = entries(&filter.allow, &client_b);
-    assert!(bob_allow
+    assert!(reaches(&filter, &client_b, "203.0.113.9/32", None, None));
+    assert!(reaches(&filter, &client_b, "10.1.0.4/32", None, None));
+    assert!(!reaches(&filter, &client_b, "10.1.9.4/32", None, None));
+    // The exit route is allowed as its complement around carried prefixes.
+    assert!(entries(&filter.allow, &client_b)
         .iter()
-        .any(|rule| rule.destination == "0.0.0.0/0" && rule.service.all));
+        .all(|rule| rule.destination != "0.0.0.0/0"));
     assert!(entries(&filter.deny, &client_b)
         .iter()
         .any(|rule| rule.destination == "10.1.9.0/24" && rule.service.all));
@@ -341,17 +366,122 @@ async fn exit_node_forwarding_only_for_clients_that_select_it() {
     // compiles the same exit allow-list without Bob polling again.
     let replica = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
     let filter = allow_list(&replica, &exit).await;
-    assert!(entries(&filter.allow, &client_b)
-        .iter()
-        .any(|rule| rule.destination == "0.0.0.0/0" && rule.service.all));
+    assert!(reaches(&filter, &client_b, "203.0.113.9/32", None, None));
 
     // Deselecting withdraws it again.
     poll(&router, &client_b, "").await;
     let filter = allow_list(&router, &exit).await;
-    assert!(entries(&filter.allow, &client_b)
-        .iter()
-        .all(|rule| rule.destination != "0.0.0.0/0"));
+    assert!(!reaches(&filter, &client_b, "203.0.113.9/32", None, None));
     assert!(entries(&filter.deny, &client_b).is_empty());
+}
+
+#[tokio::test]
+async fn exit_route_never_widens_carried_prefixes_or_host_rules() {
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "exit-carried-org").await;
+    let owner = || signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let alice = || signed_session(org.id, "alice", Role::Admin, now() + 60);
+    // A general allow (no named hosts) must not open subnet hosts; only the
+    // named-host rule does.
+    put_policy(
+        &router,
+        org.id,
+        &owner(),
+        serde_json::json!({
+            "version": 1,
+            "defaults": "same_tag",
+            "groups": {"field": ["alice"]},
+            "hosts": {"nas": "10.1.0.10", "wiki": "10.1.0.20"},
+            "rules": [
+                {"action":"allow","src_groups":["field"]},
+                {"action":"allow","src_groups":["field"],"dst_hosts":["wiki"],"dst_ports":["8080"],"protocols":["tcp"]}
+            ]
+        }),
+    )
+    .await;
+    let exit = register_test_node(
+        &router,
+        org.id,
+        &owner(),
+        "exit-a",
+        "exit-a-key",
+        &["0.0.0.0/0", "192.168.50.0/24"],
+    )
+    .await;
+    approve(&router, org.id, &owner(), exit.id, &["0.0.0.0/0"]).await;
+    let standby_owner = register_test_node(
+        &router,
+        org.id,
+        &owner(),
+        "router-b",
+        "router-b-key",
+        &["10.2.0.0/24"],
+    )
+    .await;
+    create_resource(
+        &router,
+        org.id,
+        &owner(),
+        serde_json::json!({
+            "name": "Web only",
+            "cidr": "10.1.0.0/24",
+            "ports": ["443"],
+            "protocols": ["tcp"],
+            "routing_peers": [{"node_id": exit.id, "metric": 10}],
+            "access": {"groups": ["field"]},
+        }),
+    )
+    .await;
+    // Exit-a is only a standby routing peer here: router-b is selected.
+    create_resource(
+        &router,
+        org.id,
+        &owner(),
+        serde_json::json!({
+            "name": "Standby",
+            "cidr": "10.2.0.0/24",
+            "routing_peers": [
+                {"node_id": standby_owner.id, "metric": 10},
+                {"node_id": exit.id, "metric": 100}
+            ],
+            "access": {"groups": ["field"]},
+        }),
+    )
+    .await;
+    let client = register_test_node(&router, org.id, &alice(), "alice", "alice-key", &[]).await;
+    assert!(
+        poll(&router, &client, "?exit_node=exit-a")
+            .await
+            .exit_node_active
+    );
+    let filter = allow_list(&router, &exit).await;
+    let tcp = Some(AclProtocol::Tcp);
+    // Internet traffic still exits.
+    assert!(reaches(&filter, &client, "203.0.113.9/32", tcp, Some(22)));
+    // The port-limited resource keeps its limit despite the exit route.
+    assert!(reaches(&filter, &client, "10.1.0.5/32", tcp, Some(443)));
+    assert!(!reaches(&filter, &client, "10.1.0.5/32", tcp, Some(22)));
+    assert!(!reaches(
+        &filter,
+        &client,
+        "10.1.0.5/32",
+        Some(AclProtocol::Udp),
+        Some(53)
+    ));
+    // A general rule does not open a named host; the named-host rule does.
+    assert!(!reaches(&filter, &client, "10.1.0.10/32", tcp, Some(22)));
+    assert!(reaches(&filter, &client, "10.1.0.20/32", tcp, Some(8080)));
+    // Standby resource prefixes and advertised-but-unapproved routes are
+    // closed to the exit client.
+    assert!(!reaches(&filter, &client, "10.2.0.5/32", tcp, Some(443)));
+    assert!(!reaches(
+        &filter,
+        &client,
+        "192.168.50.5/32",
+        tcp,
+        Some(443)
+    ));
 }
 
 #[tokio::test]

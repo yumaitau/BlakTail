@@ -47,11 +47,16 @@ reject every other packet they would forward from the overlay:
 - routes approved on the device (not resources) keep their behaviour: every
   client policy lets reach the router may use the whole prefix;
 - policy `hosts` inside a prefix the client receives: matching `deny` rules
-  become carve-outs that win over everything, and matching `allow` rules add
-  their ports for that host;
-- `0.0.0.0/0` only for clients that currently select this router as their exit
-  node, and those clients are explicitly denied the router's other subnets
-  they were not given.
+  become carve-outs that win over everything, and `allow` rules that name the
+  host in `dst_hosts` add their ports for that host (a general device-to-device
+  allow without `dst_hosts` does not open subnet hosts);
+- the default route only for clients that currently select this router as
+  their exit node. It is sent as its complement around every prefix the
+  router carries or could carry (approved and advertised routes, and every
+  CIDR resource that lists it as a routing peer, selected or standby, enabled
+  or not), so traffic to such a prefix is governed only by the client's own
+  grant for it: a port-limited resource keeps its ports for exit clients, and
+  prefixes the client was not given are denied outright.
 
 The coordinator recompiles the list on every control revision (resource,
 policy, device or capability change, or a client changing its exit node).
