@@ -10,7 +10,7 @@ use crate::{
     append_audit, bump_control_revision, canonical_capabilities, console_session,
     normalise_inventory_text, now,
     permissions::{require, Permission},
-    valid_acl_group_name, Acl, ApiError, AppState, DeviceTag, Role, Store, Subject,
+    valid_acl_group_name, Acl, ApiError, AppState, DeviceTag, Role, Session, Store, Subject,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -573,6 +573,25 @@ pub(crate) async fn record_report(
     if !changed && reported_at.is_some_and(|at| now() - at < 60) {
         return Ok(current);
     }
+    let failing = if changed {
+        match load_facts(&store.pool, org_id, Some(node_id))
+            .await?
+            .into_iter()
+            .next()
+        {
+            Some(before) => {
+                let mut after = before.clone();
+                after.capabilities = next_caps.clone();
+                after.agent_version = next_agent.clone();
+                after.os_version = next_os.clone();
+                after.inventory_reported_at = Some(now());
+                crate::notifications::newly_failing_checks(store, org_id, &before, &after).await?
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     let mut tx = store.pool.begin().await?;
     sqlx::query(
         "UPDATE nodes SET capabilities_json=$1,agent_version=$2,os_version=$3,inventory_reported_at=$4 WHERE id=$5 AND org_id=$6",
@@ -587,6 +606,19 @@ pub(crate) async fn record_report(
     .await?;
     if changed {
         bump_control_revision(&mut tx, org_id).await?;
+    }
+    if !failing.is_empty() {
+        crate::webhooks::enqueue(
+            &mut tx,
+            Uuid::parse_str(org_id).map_err(|_| ApiError::CorruptData)?,
+            "posture.failed",
+            &serde_json::json!({
+                "device_id": node_id,
+                "checks": failing,
+                "source": "agent_reported",
+            }),
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(next_caps)
@@ -673,21 +705,21 @@ pub(crate) fn enforcement_profile(os: Option<&str>, capabilities: &[String]) -> 
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CreateCheck {
+pub(crate) struct CreateCheck {
     name: String,
     definition: PostureDefinition,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpdateCheck {
+pub(crate) struct UpdateCheck {
     /// The version the editor loaded; a mismatch returns 412.
     version: i64,
     definition: PostureDefinition,
 }
 
 #[derive(Serialize)]
-struct CheckView {
+pub(crate) struct CheckView {
     id: String,
     name: String,
     version: i64,
@@ -727,7 +759,17 @@ async fn list_checks(
     headers: HeaderMap,
 ) -> Result<Json<Vec<CheckView>>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ViewNetwork)?;
+    list_checks_as(&s, org_id, &session).await
+}
+
+/// Console and `/api/v1/posture-checks` share these functions, so both apply
+/// the same permission check and validation.
+pub(crate) async fn list_checks_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+) -> Result<Json<Vec<CheckView>>, ApiError> {
+    require(session, Permission::ViewNetwork)?;
     let refs = referenced_checks(&published_acl(&s.store, org_id).await?);
     let checks = load_checks(&s.store.pool, &org_id.to_string()).await?;
     Ok(Json(
@@ -753,7 +795,16 @@ async fn create_check(
     Json(input): Json<CreateCheck>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManagePolicy)?;
+    create_check_as(&s, org_id, &session, input).await
+}
+
+pub(crate) async fn create_check_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+    input: CreateCheck,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    require(session, Permission::ManagePolicy)?;
     if !valid_acl_group_name(&input.name) {
         return Err(ApiError::BadRequest(
             "posture check name must be 1-32 lowercase letters, digits, or hyphens".into(),
@@ -785,7 +836,7 @@ async fn create_check(
     append_audit(
         &mut tx,
         org_id,
-        &session,
+        session,
         "posture_check.created",
         "posture_check",
         Some(&id),
@@ -806,7 +857,17 @@ async fn update_check(
     Json(input): Json<UpdateCheck>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManagePolicy)?;
+    update_check_as(&s, org_id, &session, check_id, input).await
+}
+
+pub(crate) async fn update_check_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+    check_id: Uuid,
+    input: UpdateCheck,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require(session, Permission::ManagePolicy)?;
     input.definition.validate()?;
     let mut tx = s.store.pool.begin().await?;
     let row = sqlx::query(
@@ -841,7 +902,7 @@ async fn update_check(
     append_audit(
         &mut tx,
         org_id,
-        &session,
+        session,
         "posture_check.updated",
         "posture_check",
         Some(&check_id.to_string()),
@@ -865,7 +926,16 @@ async fn delete_check(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManagePolicy)?;
+    delete_check_as(&s, org_id, &session, check_id).await
+}
+
+pub(crate) async fn delete_check_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+    check_id: Uuid,
+) -> Result<StatusCode, ApiError> {
+    require(session, Permission::ManagePolicy)?;
     let mut tx = s.store.pool.begin().await?;
     let name: String =
         sqlx::query_scalar("SELECT name FROM posture_checks WHERE id=$1 AND org_id=$2")
@@ -891,7 +961,7 @@ async fn delete_check(
     append_audit(
         &mut tx,
         org_id,
-        &session,
+        session,
         "posture_check.deleted",
         "posture_check",
         Some(&check_id.to_string()),

@@ -167,12 +167,12 @@ async fn get_revision(
 }
 
 #[derive(Deserialize)]
-struct ValidateRequest {
+pub(crate) struct ValidateRequest {
     dns: serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct ValidateResponse {
+pub(crate) struct ValidateResponse {
     dns: org_dns::OrgDnsSettings,
     warnings: Vec<String>,
 }
@@ -185,10 +185,19 @@ async fn validate(
     Json(input): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ApiError> {
     console_session(&s, &headers, org_id).await?;
+    validate_draft(&s.store, org_id, input).await.map(Json)
+}
+
+/// Shared by the console route and `/api/v1/dns/validate`.
+pub(crate) async fn validate_draft(
+    store: &Store,
+    org_id: Uuid,
+    input: ValidateRequest,
+) -> Result<ValidateResponse, ApiError> {
     let dns = org_dns::parse_settings(&input.dns.to_string())?;
     let mut warnings = dns.warnings();
-    warnings.extend(route_warnings(&s.store, org_id, &dns).await?);
-    Ok(Json(ValidateResponse { dns, warnings }))
+    warnings.extend(route_warnings(store, org_id, &dns).await?);
+    Ok(ValidateResponse { dns, warnings })
 }
 
 /// Private resolver and record addresses that no device address or approved
