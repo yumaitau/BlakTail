@@ -87,6 +87,10 @@ unknown field rejects the document.
   port on that path is allowed. Linux agents install an INPUT filter on
   the overlay from each peer's compiled `ingress` grant (destination
   enforcement). Legacy snapshots without `ingress` stay unfiltered.
+  Routing peers reporting `forward-filter` also enforce `hosts` rules on
+  forwarded traffic: host `deny` rules always win, host `allow` rules add
+  ports inside prefixes the client already receives. See
+  [Router forwarding enforcement](network-resources.md#router-forwarding-enforcement).
 - `ssh` selects the same source and destination roles, tags, and groups,
   plus operating-system `users` (`ubuntu` or `*`) and `allow` / `deny` /
   `check`. SSH evaluation has no same-tag default. See
@@ -127,6 +131,7 @@ Destination capabilities, reported by the agent on every poll:
 | --- | --- | --- |
 | `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild` |
 | `ssh-users` | Verified sshd per-source `AllowUsers`/`DenyUsers` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` set and verified |
+| `forward-filter` | Routing peer forwards only its compiled `forward_filter` allow-list | Linux `blaktaild` |
 
 An agent that predates these capabilities reports neither, so user-limited
 SSH stays closed at port level (fail closed); it never widens access. The
@@ -193,10 +198,19 @@ rules skipped for posture or a lapsed `check`, group and tag membership,
 the source's posture, whether each side's peer map includes the other,
 the compiled grant, and where enforcement happens:
 
-- `device_enforced`: the destination agent reported `acl-filter`;
+- `device_enforced`: the destination agent reported `acl-filter` (for a
+  named `dst_host`: every routing peer carrying it reported `forward-filter`);
 - `peer_map`: no tunnel exists, which every client honours;
-- `not_enforced`: the destination does not filter inbound traffic;
+- `not_enforced`: the destination does not filter inbound traffic, or a
+  routing peer carrying the named host does not report `forward-filter`
+  ("forwarding not enforced — upgrade agent");
 - `unknown`: a Linux agent that has not reported filter support.
+
+For a named host and a source device, `reasons` also says whether each
+enforcing routing peer would forward or drop the flow according to its compiled
+allow-list, which can differ from the policy decision: a network resource or a
+device-approved route can grant the subnet without a host rule. `peer_map`
+means no routing peer carries the host at all.
 
 Results are simulations against the published revision; no packet is sent.
 Device ids from another organisation return 404.

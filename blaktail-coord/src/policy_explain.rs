@@ -5,7 +5,7 @@
 //! actually enforced. Members may explain; nothing here mutates state.
 
 use crate::{
-    console_session, load_acl_row, now,
+    console_session, forwarding, load_acl_row, now,
     permissions::{require, Permission},
     posture::{enforcement_profile, Enforcement, NodeFacts, PostureContext, CAP_SSH_USERS},
     subject_in_group, valid_ssh_os_user, Acl, AclProtocol, AclSshAction, Action, ApiError,
@@ -520,11 +520,74 @@ async fn explain(
             input.protocol,
             Some(host_name),
         );
-        reasons.push("Subnet-route traffic is not filtered by agents. Host rules are evaluated here and in policy tests, but nothing enforces them at packet level yet.".into());
-        let enforcement = EnforcementView {
-            state: "not_enforced",
-            detail: "Route destinations are not filtered by any agent.".into(),
-            destination: enforcement_profile(None, &[]),
+        let org = org_id.to_string();
+        let host_cidr = acl
+            .hosts
+            .get(host_name)
+            .and_then(|value| forwarding::host_cidr(value))
+            .ok_or(ApiError::CorruptData)?;
+        let routers = forwarding::host_routers(&s.store.pool, &org, &host_cidr).await?;
+        for router in &routers {
+            let Some(router_facts) = ctx.facts.get(&router.id) else {
+                continue;
+            };
+            if !router.enforced {
+                reasons.push(format!("Forwarding not enforced on {} (carries {}): upgrade its agent. Any client paired with it can reach the whole subnet on any port.", router.name, router.prefix));
+                continue;
+            }
+            let Some(facts) = source_facts else {
+                continue;
+            };
+            let filter = forwarding::client_filter(
+                &s.store.pool,
+                &org,
+                &acl,
+                (router.id, &device_subject(router_facts, &ctx)),
+                (facts.id, &source),
+            )
+            .await?;
+            let forwards = forwarding::permits(&filter, &host_cidr, input.protocol, input.port);
+            reasons.push(format!(
+                "{} (carries {}) {} this flow from its compiled allow-list (route distribution, resource ports and host rules).",
+                router.name,
+                router.prefix,
+                if forwards { "would forward" } else { "drops" }
+            ));
+        }
+        let enforcement = if routers.is_empty() {
+            EnforcementView {
+                state: "peer_map",
+                detail: "No routing peer carries a route to this host, so no client receives one."
+                    .into(),
+                destination: enforcement_profile(None, &[]),
+            }
+        } else {
+            let profile = routers
+                .first()
+                .and_then(|router| ctx.facts.get(&router.id))
+                .map(|facts| enforcement_profile(facts.os.as_deref(), &facts.capabilities))
+                .unwrap_or_else(|| enforcement_profile(None, &[]));
+            let unenforced: Vec<&str> = routers
+                .iter()
+                .filter(|router| !router.enforced)
+                .map(|router| router.name.as_str())
+                .collect();
+            if unenforced.is_empty() {
+                EnforcementView {
+                    state: "device_enforced",
+                    detail: "Every routing peer that carries this host filters forwarded traffic (forward-filter).".into(),
+                    destination: profile,
+                }
+            } else {
+                EnforcementView {
+                    state: "not_enforced",
+                    detail: format!(
+                        "Forwarding not enforced on {}: upgrade the agent.",
+                        unenforced.join(", ")
+                    ),
+                    destination: profile,
+                }
+            }
         };
         (
             allowed,

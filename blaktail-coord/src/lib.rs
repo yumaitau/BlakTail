@@ -3,6 +3,7 @@ mod change_drafts;
 pub mod connectors;
 mod dns_workspace;
 pub mod flows;
+mod forwarding;
 pub mod https_fallback;
 pub mod https_services;
 pub mod ipam;
@@ -3068,6 +3069,10 @@ struct PeersResponse {
     shares: Vec<shares::PublishedShare>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     control_updates: Option<ControlUpdatesCapability>,
+    /// Present only for agents reporting `forward-filter`: what this node
+    /// may forward from the overlay when it routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forward_filter: Option<forwarding::ForwardFilter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3193,6 +3198,19 @@ async fn list_peers(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if forwarding::record_exit_selection(node_id, requested_exit) {
+        let mut tx = s.store.pool.begin().await?;
+        bump_control_revision(&mut tx, &org).await?;
+        tx.commit().await?;
+    }
+    let forward_router = if forwarding::enforces(&source_capabilities) {
+        Some(forwarding::load_router(&s.store.pool, node_id).await?)
+    } else {
+        None
+    };
+    let mut forward_filter = forward_router
+        .as_ref()
+        .map(|_| forwarding::ForwardFilter::default());
     let rows = sqlx::query("SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CASE WHEN relay_endpoint_updated_at>$3 THEN relay_endpoint ELSE NULL END,approved_routes_json,shares_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL AND deleted_at IS NULL AND suspended_at IS NULL AND credential_expires_at>$4 ORDER BY name")
         .bind(org.clone())
         .bind(node_id.to_string())
@@ -3245,6 +3263,29 @@ async fn list_peers(
         .filter_map(|(mut peer, destination, approved, dest_shares)| {
             if !acl.allows(&source, &destination) {
                 return None;
+            }
+            if let (Some((router_name, approved)), Some(filter)) =
+                (&forward_router, forward_filter.as_mut())
+            {
+                let exit_request = forwarding::exit_selection(peer.id);
+                forwarding::compile_client(
+                    &acl,
+                    &resource_routes,
+                    &forwarding::RouterView {
+                        id: node_id,
+                        name: router_name,
+                        dns_name: &dns_name,
+                        subject: &source,
+                        approved,
+                    },
+                    &forwarding::ClientView {
+                        id: peer.id,
+                        subject: &destination,
+                        overlay: &peer.allowed_ips,
+                        exit_request: exit_request.as_deref(),
+                    },
+                    filter,
+                );
             }
             let mut ingress = acl.peer_ingress_for(&destination, &source, ssh_users_enforced);
             shares::grant_share_ports(
@@ -3335,6 +3376,7 @@ async fn list_peers(
         control_updates: Some(ControlUpdatesCapability {
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
+        forward_filter,
     }))
 }
 
@@ -5909,6 +5951,7 @@ mod tests {
     use tower::ServiceExt;
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
+    mod forwarding;
     mod policy_posture;
 
     #[test]

@@ -10,8 +10,8 @@
 
 use crate::{
     admin::{authenticate_org_header, idempotency_key, require_scope, Envelope, Scope},
-    append_audit, bump_control_revision, console_session, hash, ipam, now, org_ula_address,
-    parse_acl_port_spec,
+    append_audit, bump_control_revision, console_session, forwarding, hash, ipam, now,
+    org_ula_address, parse_acl_port_spec,
     permissions::{require, Permission},
     subject_in_group, Acl, ApiError, AppState, DeviceTag, Role, Session, Subject, NODE_ONLINE_SECS,
 };
@@ -163,8 +163,8 @@ pub(crate) struct NetworkResource {
     dns_resolution: Option<String>,
     ports: Vec<String>,
     protocols: Vec<ResourceProtocol>,
-    /// Ports and protocols are recorded but the routing peer still forwards
-    /// the whole prefix; see docs/network-resources.md.
+    /// `enforced` when the selected routing peer reports `forward-filter`
+    /// and so forwards only these ports; otherwise `not_enforced`.
     port_enforcement: String,
     routing_peers: Vec<RoutingPeer>,
     access: ResourceAccess,
@@ -189,6 +189,8 @@ pub(crate) struct RoutingPeerHealth {
     online: bool,
     last_seen_at: Option<i64>,
     covering_route: Option<String>,
+    /// `enforced` when this peer reports `forward-filter`, else `not_enforced`.
+    forwarding: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -204,6 +206,10 @@ pub(crate) struct ResourceStatus {
     /// distributing, stale, no_routing_peer, dns_not_resolved or disabled.
     pub(crate) state: String,
     pub(crate) selected_routing_peer: Option<Uuid>,
+    /// Whether the selected routing peer filters forwarded traffic:
+    /// `enforced`, `not_enforced` or `no_routing_peer`.
+    pub(crate) forwarding: String,
+    pub(crate) forwarding_detail: String,
     pub(crate) routing_peers: Vec<RoutingPeerHealth>,
     pub(crate) clients: Vec<ClientDistribution>,
 }
@@ -227,6 +233,9 @@ pub(crate) struct DeviceRoutes {
     approved_routes: Vec<String>,
     /// Advertised but never approved: these are not distributed.
     unapproved_routes: Vec<String>,
+    /// `enforced` when the device reports `forward-filter`, else `not_enforced`.
+    forwarding: String,
+    forwarding_detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -244,6 +253,7 @@ struct OrgNode {
     last_seen_at: Option<i64>,
     credential_expires_at: i64,
     subject: Subject,
+    capabilities: Vec<String>,
 }
 
 impl OrgNode {
@@ -269,7 +279,7 @@ fn cidrs_overlap(left: &str, right: &str) -> bool {
     ipam::pools_overlap(left, right).unwrap_or(false)
 }
 
-fn cidr_within(inner: &str, outer: &str) -> bool {
+pub(crate) fn cidr_within(inner: &str, outer: &str) -> bool {
     match (ipam::parse_cidr(inner), ipam::parse_cidr(outer)) {
         (Ok((inner_net, inner_prefix)), Ok((outer_net, outer_prefix))) => {
             inner_net.is_ipv4() == outer_net.is_ipv4()
@@ -464,7 +474,7 @@ async fn load_resource(
 
 async fn load_org_nodes(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<OrgNode>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,display_name,advertised_routes_json,approved_routes_json,last_seen_at,credential_expires_at,user_id,user_role,tags_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY name",
+        "SELECT id,name,display_name,advertised_routes_json,approved_routes_json,last_seen_at,credential_expires_at,user_id,user_role,tags_json,capabilities_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY name",
     )
     .bind(org_id)
     .fetch_all(&mut *conn)
@@ -487,6 +497,7 @@ async fn load_org_nodes(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<Or
                     json_column(row, 9).unwrap_or_default(),
                 )
                 .with_user(row.try_get::<String, _>(7)?),
+                capabilities: json_column(row, 10).unwrap_or_default(),
             })
         })
         .collect()
@@ -555,6 +566,11 @@ fn evaluate_peers(
             online,
             last_seen_at: node.and_then(|node| node.last_seen_at),
             covering_route: covering,
+            forwarding: node
+                .map_or("not_enforced", |node| {
+                    forwarding::status(&node.label(), &node.capabilities).0
+                })
+                .into(),
         });
     }
     let selected = candidates
@@ -576,7 +592,12 @@ fn evaluate_peers(
     )
 }
 
-fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) -> ResourceDetail {
+fn evaluate(
+    mut resource: NetworkResource,
+    nodes: &[OrgNode],
+    acl: &Acl,
+    at: i64,
+) -> ResourceDetail {
     let (selected, routing_peers) = evaluate_peers(&resource, nodes, at);
     let state = if !resource.enabled {
         "disabled"
@@ -590,6 +611,21 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
         }
     };
     let router = selected.and_then(|id| nodes.iter().find(|node| node.id == id));
+    let (forwarding, forwarding_detail) = match router {
+        Some(router) => {
+            let (state, detail) = forwarding::status(&router.label(), &router.capabilities);
+            (state.to_owned(), detail)
+        }
+        None => (
+            "no_routing_peer".to_owned(),
+            "No routing peer carries this resource.".to_owned(),
+        ),
+    };
+    resource.port_enforcement = if forwarding == "enforced" {
+        "enforced".into()
+    } else {
+        "not_enforced".into()
+    };
     let default_route = resource.cidr.as_deref().is_some_and(is_default_route);
     let clients = nodes
         .iter()
@@ -635,6 +671,8 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
         status: ResourceStatus {
             state: state.into(),
             selected_routing_peer: selected,
+            forwarding,
+            forwarding_detail,
             routing_peers,
             clients,
         },
@@ -653,6 +691,7 @@ struct ActiveRoute {
     router: Uuid,
     routing_peers: Vec<Uuid>,
     access: ResourceAccess,
+    service: forwarding::ForwardService,
 }
 
 pub(crate) async fn load_distribution(
@@ -672,6 +711,7 @@ pub(crate) async fn load_distribution(
         .filter_map(|resource| {
             let (selected, _) = evaluate_peers(&resource, &nodes, at);
             Some(ActiveRoute {
+                service: forwarding::resource_service(&resource.ports, &resource.protocols),
                 cidr: resource.cidr?,
                 router: selected?,
                 routing_peers: resource.routing_peers.iter().map(|p| p.node_id).collect(),
@@ -693,6 +733,22 @@ impl Distribution {
         acl: &Acl,
         exit_selected: bool,
     ) -> Vec<String> {
+        self.grants_via(router, source_id, source, acl, exit_selected)
+            .into_iter()
+            .map(|(cidr, _)| cidr)
+            .collect()
+    }
+
+    /// `routes_via` with each resource's port/protocol constraints, for the
+    /// routing peer's forward allow-list.
+    pub(crate) fn grants_via(
+        &self,
+        router: Uuid,
+        source_id: Uuid,
+        source: &Subject,
+        acl: &Acl,
+        exit_selected: bool,
+    ) -> Vec<(String, forwarding::ForwardService)> {
         self.routes
             .iter()
             .filter(|route| {
@@ -701,8 +757,16 @@ impl Distribution {
                     && (!is_default_route(&route.cidr) || exit_selected)
                     && route.access.matches(source, &acl.groups)
             })
-            .map(|route| route.cidr.clone())
+            .map(|route| (route.cidr.clone(), route.service.clone()))
             .collect()
+    }
+
+    /// Every resource prefix currently assigned to `router`.
+    pub(crate) fn carried_by(&self, router: Uuid) -> impl Iterator<Item = &str> {
+        self.routes
+            .iter()
+            .filter(move |route| route.router == router)
+            .map(|route| route.cidr.as_str())
     }
 }
 
@@ -1176,7 +1240,8 @@ pub(crate) async fn overview_conn(
     let device_routes = nodes
         .iter()
         .filter(|node| !node.advertised.is_empty() || !node.approved.is_empty())
-        .map(|node| DeviceRoutes {
+        .map(|node| (node, forwarding::status(&node.label(), &node.capabilities)))
+        .map(|(node, (forwarding, forwarding_detail))| DeviceRoutes {
             node_id: node.id,
             name: node.name.clone(),
             display_name: node.display_name.clone(),
@@ -1191,6 +1256,8 @@ pub(crate) async fn overview_conn(
                 .filter(|route| !node.approved.contains(route))
                 .cloned()
                 .collect(),
+            forwarding: forwarding.into(),
+            forwarding_detail,
         })
         .collect();
     Ok(NetworksOverview {

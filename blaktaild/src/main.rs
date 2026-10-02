@@ -1177,6 +1177,8 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 return Err(error);
             }
             let previous_ipv4_forward = state.router_previous_ipv4_forward;
+            // Known allow-list first, so routing never starts unfiltered.
+            network.apply_forward_filter(&interface, state.forward_filter.as_ref())?;
             match network.configure_router(
                 &interface,
                 &previous_routes,
@@ -1240,6 +1242,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             let mut network = make_network();
             network.setup(&state.interface, &key_path, &state.interface_addresses())?;
+            network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
             state.router_previous_ipv4_forward = network.configure_router(
                 &state.interface,
                 &state.advertised_routes,

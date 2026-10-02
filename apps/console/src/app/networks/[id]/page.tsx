@@ -98,8 +98,25 @@ export default async function NetworkResourcePage({
                     {[...resource.protocols.map((p) => p.toUpperCase()), ...resource.ports].join(", ") ||
                       "Any"}
                     <div className="muted">
-                      Recorded only: the routing peer forwards the whole subnet today.
+                      {resource.port_enforcement === "enforced"
+                        ? "Enforced by the routing peer for each authorised device."
+                        : "Not enforced: the routing peer forwards the whole subnet."}
                     </div>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Router forwarding</dt>
+                  <dd>
+                    <span
+                      className={`badge ${resource.status.forwarding === "enforced" ? "online" : "offline"}`}
+                    >
+                      {resource.status.forwarding === "enforced"
+                        ? "Enforced"
+                        : resource.status.forwarding === "not_enforced"
+                          ? "Forwarding not enforced — upgrade agent"
+                          : "No routing peer"}
+                    </span>
+                    <div className="muted">{resource.status.forwarding_detail}</div>
                   </dd>
                 </div>
                 <div>
@@ -151,6 +168,7 @@ export default async function NetworkResourcePage({
                         <th>Role</th>
                         <th>Health</th>
                         <th>Covering advertisement</th>
+                        <th>Forwarding</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -166,6 +184,13 @@ export default async function NetworkResourcePage({
                             <div className="muted">{lastSeen(peer.last_seen_at)}</div>
                           </td>
                           <td className="mono">{peer.covering_route ?? "None"}</td>
+                          <td>
+                            {peer.forwarding === "enforced" ? (
+                              <span className="badge online">Enforced</span>
+                            ) : (
+                              <span className="badge offline">Not enforced — upgrade agent</span>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

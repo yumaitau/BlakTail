@@ -171,9 +171,9 @@ export function NetworkResourceForm({
           ))}
         </fieldset>
         <p className="muted">
-          Ports and protocols are recorded for review but are not yet enforced
-          by the routing peer, which forwards the whole subnet. Restrict ports
-          with access policy on the destination devices.
+          Routing peers whose agent reports forward filtering forward only
+          these ports and protocols, and only for authorised devices. Older
+          routing peers forward the whole subnet; the resource page says which.
         </p>
       </fieldset>
 
