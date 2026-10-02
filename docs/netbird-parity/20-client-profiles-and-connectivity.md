@@ -17,3 +17,24 @@ NetBird clients support profiles, reconnect/autostart, inbound blocking and spli
 Two independent org profiles with overlapping private CIDRs never cross-route or share names; connect/disconnect/restart preserves intended state. On iPhone across independent NATs, forced direct-UDP failure continues encrypted traffic over approved relay, with observed transport shown; if impossible, no parity claim. Split exclusions and internal DNS proven by packet capture on supported OS.
 
 **Evidence:** `README.md`, `docs/ios.md`, `apps/ios/Tunnel/TunnelSession.swift`; https://docs.netbird.io/client/profiles, https://docs.netbird.io/client/block-inbound-connections, https://docs.netbird.io/client/connect-on-startup.
+
+## Status (2 October 2026)
+
+**Done:**
+- iPhone relay inspected: `blaktail-ios-wg` has no relay client (Android
+  shares the same gap; Windows has relay only because it runs `blaktaild`).
+  `docs/ios.md` now documents exactly what is missing (relay socket and
+  framing, reflexive endpoint report, per-peer path state machine, AU-only
+  selection, observed-transport UI) and recommends moving the relay client
+  into a shared crate behind the existing C ABI. No parity is claimed.
+- Desktop agents gained deterministic AU-only multi-relay failover (draft 21),
+  which a future mobile relay must mirror so peers share a relay.
+
+**Proven by tests:** none for iPhone in this change (no Swift changes).
+
+**Still needs live/field proof or a decision:**
+- iPhone/Android relay implementation and a physical-device test across
+  independent NATs with forced direct-UDP failure.
+- Profiles, split tunnelling, block-inbound and connect-on-startup design and
+  implementation were not started; the two-org overlapping-CIDR test remains
+  open.

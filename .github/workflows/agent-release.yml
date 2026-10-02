@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
+      source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
     steps:
       - name: Checkout exact tag
         uses: actions/checkout@v6
@@ -53,6 +54,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_TAG")"
           test -z "$(git status --porcelain)"
           printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+          # Pin embedded timestamps to the tagged commit for reproducible packages.
+          printf 'source_date_epoch=%s\n' "$(git log -1 --format=%ct HEAD)" >>"$GITHUB_OUTPUT"
 
   linux:
     name: Linux ${{ matrix.target }}
@@ -85,6 +88,7 @@ jobs:
           mkdir dist
           docker build \
             --platform "linux/${{ matrix.arch }}" \
+            --build-arg "SOURCE_DATE_EPOCH=${{ needs.preflight.outputs.source_date_epoch }}" \
             --output type=local,dest=dist \
             -f deploy/docker/agent-package.Dockerfile .
           test -f "dist/blaktaild-${{ matrix.target }}.deb"
@@ -189,12 +193,15 @@ jobs:
       - name: Build, sign, notarise, and staple package
         shell: bash
         env:
+          SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+          CARGO_INCREMENTAL: "0"
           BLAKTAIL_APPLICATION_IDENTITY: ${{ secrets.MACOS_APPLICATION_IDENTITY }}
           BLAKTAIL_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
           NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
         run: |
           set -euo pipefail
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=. --remap-path-prefix=$HOME/.cargo=cargo"
           cargo build --locked --release -p blaktaild -p blaktail-config
           mkdir dist
           package="$(
@@ -280,6 +287,24 @@ jobs:
         with:
           subject-path: dist/SHA256SUMS
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksum manifest with Sigstore keyless signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The certificate binds the signature to this workflow at this tag via
+          # GitHub OIDC; no long-lived signing key exists to leak or rotate.
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            dist/SHA256SUMS
+          cosign verify-blob \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            dist/SHA256SUMS
+
       - name: Create draft, upload once, then publish
         shell: bash
         env:
@@ -308,6 +333,11 @@ jobs:
           mkdir published
           gh release download "$RELEASE_TAG" --dir published
           cd published
+          cosign verify-blob \
+            --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS
           sha256sum --check SHA256SUMS
           for asset in blaktaild-*; do
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"

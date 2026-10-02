@@ -103,6 +103,19 @@ services:
       coord:
         condition: service_started
 
+  # Second Australian relay for deploy/homelab/prove-relay-failover.sh.
+  relay-secondary:
+    build:
+      context: .
+      dockerfile: deploy/docker/relay.Dockerfile
+    profiles: ["relay-failover"]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=0700
+    environment:
+      BLAKTAIL_REGION: ${BLAKTAIL_REGION:-ap-southeast-2}
+      BLAKTAIL_RELAY_AUTH_SECRET: ${BLAKTAIL_RELAY_AUTH_SECRET:?set BLAKTAIL_RELAY_AUTH_SECRET in .env}
+
 volumes:
   agent-office-data:
   agent-store-data:

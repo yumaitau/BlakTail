@@ -12,6 +12,10 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 2 ;; esac \
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=/root/.cargo/bin:$PATH
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS="--remap-path-prefix=/src=. --remap-path-prefix=/root/.cargo=cargo"
 
 WORKDIR /src
 COPY . .
@@ -21,6 +25,8 @@ RUN cargo build --locked --release -p blaktaild -p blaktail-config \
 FROM debian:12-slim AS package
 
 ARG TARGETARCH
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends dpkg-dev rpm \

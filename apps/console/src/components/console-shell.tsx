@@ -37,6 +37,7 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     label: "Settings",
     links: [
       { href: "/status", label: "Status" },
+      { href: "/operations", label: "Operator health" },
       { href: "/settings", label: "Settings" },
     ],
   },

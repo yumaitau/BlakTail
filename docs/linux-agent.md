@@ -16,6 +16,7 @@ sudo blaktaild up --coord https://127.0.0.1:8443 --coord-ca certs/ca.crt
 sudo blaktaild up --coord https://coord.example.org \
   --endpoint 203.0.113.10:51820
 sudo blaktaild status
+sudo blaktaild status --json   # one JSON object for local tools; no credentials
 sudo blaktaild pause  # reversible; keeps enrolment
 sudo blaktaild down
 ```

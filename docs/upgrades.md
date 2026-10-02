@@ -1,5 +1,8 @@
 # Upgrade and version-skew policy
 
+Which versions work together, and what rollback can undo, is in
+[compatibility.md](compatibility.md).
+
 BlakTail is pre-1.0. The only unconditional compatibility guarantee is that the
 coordinator, relay, console, and agents use the same release tag. Arbitrary version
 skew is unsupported.
@@ -55,3 +58,85 @@ startup never migrates and refuses missing, older, newer, or gapped schema state
 Database downgrade is unsupported: restore the pre-upgrade snapshot with the old
 binary. Agent rollback is supported only when that release's notes confirm its state
 format is compatible.
+
+## Backup and restore
+
+This runbook covers what an operator must back up and how to prove a restore.
+BlakTail does not run backups for you; the numbers below are targets you set
+and prove, not guarantees the software makes.
+
+### What to back up, together
+
+| Data | Where | Notes |
+| --- | --- | --- |
+| Console identity (people, memberships, sessions, SSO providers, invitations) | Console Postgres | Holds OIDC client secrets; encrypt the backup |
+| Coordinator state (organisations, devices, keys' public halves, policy, DNS, audit, outbox) | Coordinator SQLite file or Postgres | Node tokens are stored hashed; sealed service CA keys need the coordinator secret to open |
+| Secrets | `BLAKTAIL_AUTH_HMAC_SECRET`, `BLAKTAIL_RELAY_AUTH_SECRET`, `BETTER_AUTH_SECRET`, database credentials, TLS keys | Store in your secret manager, separately from data backups |
+| Configuration | `blaktail.toml`, env files, Compose/Terraform | Version-controlled, without secrets |
+| Logs and object stores you added | Your log platform | Only if your retention policy requires them |
+
+Take the console and coordinator backups at the same point in time (stop
+writes, or snapshot both within the same minute). A console backup newer than
+the coordinator can show devices the coordinator no longer knows, and the
+reverse.
+
+### Recovery objectives
+
+Set and write down, per deployment:
+
+- **RPO** (how much change you can lose): equal to your backup interval. With
+  nightly `pg_dump` it is up to 24 hours of enrolments, policy edits and audit
+  events. Devices enrolled after the backup must re-enrol after a restore.
+  Managed PostgreSQL with point-in-time recovery (PITR) can lower this to
+  minutes; SQLite file copies cannot.
+- **RTO** (how long until people can connect again): the time to provision a
+  database, restore, start coordinator and console, and pass the checks below.
+  Measure it in a drill; do not quote a number you have not timed. Existing
+  WireGuard tunnels keep their last configuration while the coordinator is
+  down, so already-connected devices usually keep working during the outage;
+  new enrolments, policy changes and credential renewals wait.
+
+### Residency
+
+Keep backups, snapshots, PITR logs and secret-manager copies in Australian
+regions you control. BlakTail cannot see or enforce where your backup tooling,
+DNS provider, IdP, telemetry or support channels store data; those are your
+choices and need their own residency review. Do not describe a deployment as
+onshore unless each of them is.
+
+### Record the backup proof
+
+After each successful backup, have the backup job write a small JSON marker
+readable by the coordinator and point `BLAKTAIL_BACKUP_PROOF_FILE` at it:
+
+```json
+{"completed_at": 1790000000, "restore_verified_at": 1789900000, "label": "nightly pg_dump"}
+```
+
+`completed_at` and `restore_verified_at` are Unix seconds. The **Operator
+health** page (owners and auditors) shows these times and the label; it never
+shows paths, bucket names or keys, and labels are reduced to letters, digits,
+spaces, `.`, `_` and `-`. Without the variable the page says "not recorded".
+The marker is the operator's claim: BlakTail does not open or verify the backup.
+
+### Restore drill
+
+1. Restore both databases into **new, empty** databases in a private
+   environment. Never overwrite the source.
+2. Start the coordinator with the restored database and the original
+   `BLAKTAIL_AUTH_HMAC_SECRET` and `BLAKTAIL_RELAY_AUTH_SECRET`; start the
+   console against the restored console database.
+3. Confirm `/readyz`, then open **Operator health**: schema must show
+   "Current", and relay probes must succeed.
+4. Sign in as an owner through the restored console. Counting rows is not a
+   restore test.
+5. Enrol or reconnect two test devices against the restored coordinator and
+   prove two-way reachability (the [two-node drill](two-node-drill.md)).
+6. Record the elapsed time as your measured RTO and update
+   `restore_verified_at` in the marker.
+7. Destroy the recovery environment, including its copies of secrets.
+
+Export and deletion: an organisation's data can be exported with the audit
+export and `/api/v1` inventory endpoints. Deleting an organisation from the
+live databases does not remove it from earlier backups; expire backups on a
+schedule that matches your retention promise.

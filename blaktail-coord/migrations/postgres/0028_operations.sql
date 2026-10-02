@@ -1,2 +1,2 @@
--- Reserved slot; intentionally empty until its feature lands.
-SELECT 1;
+-- Persisted exit-node selection (forwarding). NULL = no exit node selected.
+ALTER TABLE nodes ADD COLUMN exit_node_id TEXT;

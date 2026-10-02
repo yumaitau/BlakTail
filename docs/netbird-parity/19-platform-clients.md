@@ -17,3 +17,25 @@ NetBird provides Windows, macOS, Linux, iOS, Android and platform-specific insta
 Per claimed OS, clean-host two-node test covers enrollment, bidirectional traffic, MagicDNS, route/policy, NAT relay, reboot, revoke, reinstall and uninstall. CI builds on native target, packages are signed/verifiable, and release matrix marks experimental vs supported. Onshore control endpoint remains operator-selected.
 
 **Evidence:** `README.md`, `docs/project-status.md`, `docs/windows-agent.md`, `apps/android`, `apps/linux-tray/README.md`; https://docs.netbird.io/get-started/install, https://docs.netbird.io/client/desktop-app.
+
+## Status (2 October 2026)
+
+**Done:**
+- `docs/platform-support.md`: platform matrix separating code from proof;
+  Windows and Android marked experimental with no device proof, iPhone without
+  relay, appliances/containers explicitly unsupported, no Snap-only path.
+- Linux tray (`apps/linux-tray/main.py`) replaced: drives the systemd-managed
+  agent (service state, Details via `blaktaild status --json`, Connect with
+  browser approval via `xdg-open`, Disconnect = stop + `pause`), privileged
+  actions through pkexec, no embedded daemon, "leave network" not offered.
+- New local control interface `blaktaild status --json` (no node token,
+  relay capability or keys). No unprivileged socket added: state is root-only
+  and group provisioning would be needed first (documented).
+
+**Proven by tests:** `apps/linux-tray/test_main.py` (status parsing, summary,
+enrolment URL detection), `blaktaild` `status_json_reports_relay_selection_without_credentials`.
+
+**Still needs live/field proof or a decision:**
+- No Windows binary built; no Android or Windows physical-device drill; no
+  clean Ubuntu GNOME validation of the tray; no packaging or signing for any
+  of these. Swift/Android/Windows code was not touched or built in this change.
