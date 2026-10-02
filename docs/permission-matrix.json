@@ -12,7 +12,8 @@
     "export_audit",
     "manage_integrations",
     "manage_api_clients",
-    "manage_security"
+    "manage_security",
+    "view_operations"
   ],
   "roles": {
     "owner": [
@@ -27,7 +28,8 @@
       "export_audit",
       "manage_integrations",
       "manage_api_clients",
-      "manage_security"
+      "manage_security",
+      "view_operations"
     ],
     "admin": [
       "view_network",
@@ -51,7 +53,7 @@
       "manage_services",
       "view_audit"
     ],
-    "auditor": ["view_network", "view_audit", "export_audit"],
+    "auditor": ["view_network", "view_audit", "export_audit", "view_operations"],
     "member": ["view_network", "view_audit"]
   }
 }

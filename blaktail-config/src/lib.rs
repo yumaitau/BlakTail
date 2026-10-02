@@ -1805,7 +1805,27 @@ fn url_host_is_loopback(url: &Url) -> bool {
     }
 }
 
-fn validate_relay_endpoint(value: &str, field: &str, violations: &mut Vec<Violation>) {
+/// Splits a `coordinator.relays` entry into its UDP endpoint and optional
+/// declared region: `relay-a.example.org.au:3478#ap-southeast-2`. Untagged
+/// entries inherit `coordinator.region`.
+pub fn split_relay_entry(entry: &str) -> (&str, Option<&str>) {
+    match entry.trim().split_once('#') {
+        Some((endpoint, region)) => (endpoint.trim(), Some(region.trim())),
+        None => (entry.trim(), None),
+    }
+}
+
+fn validate_relay_endpoint(entry: &str, field: &str, violations: &mut Vec<Violation>) {
+    let (value, region) = split_relay_entry(entry);
+    if let Some(region) = region {
+        if !is_australian_region(region) {
+            violation(
+                violations,
+                field,
+                "declares a region that is not an approved Australian cloud region",
+            );
+        }
+    }
     let candidate = format!("udp://{value}");
     match Url::parse(&candidate) {
         Ok(url)
@@ -2663,6 +2683,33 @@ mod tests {
         assert!(fields.contains("agent.coordinator_url"));
         assert!(fields.contains("coordinator.relays[0]"));
         assert!(fields.contains("console.base_url"));
+    }
+
+    #[test]
+    fn relay_entries_may_declare_only_australian_regions() {
+        assert_eq!(
+            split_relay_entry(" relay-a.example:3478#australiaeast "),
+            ("relay-a.example:3478", Some("australiaeast"))
+        );
+        assert_eq!(
+            split_relay_entry("relay-a.example:3478"),
+            ("relay-a.example:3478", None)
+        );
+        let mut environment = valid_environment();
+        environment.insert(
+            "BLAKTAIL_RELAYS".into(),
+            "relay-a.example:3478#ap-southeast-2,relay-b.example:3478,relay-c.example:3478#us-east-1"
+                .into(),
+        );
+        let loaded = LoadedConfig::load_with_environment(None, Service::All, environment).unwrap();
+        let fields = loaded
+            .violations(Service::All)
+            .into_iter()
+            .map(|violation| violation.field)
+            .collect::<BTreeSet<_>>();
+        assert!(!fields.contains("coordinator.relays[0]"));
+        assert!(!fields.contains("coordinator.relays[1]"));
+        assert!(fields.contains("coordinator.relays[2]"));
     }
 
     #[test]
