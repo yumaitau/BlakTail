@@ -30,7 +30,31 @@ struct Records {
     domain: String,
     addresses: HashMap<String, Vec<IpAddr>>,
     split: Vec<(String, Vec<SocketAddr>)>,
+    zones: Vec<Zone>,
 }
+
+#[derive(Clone, Default)]
+struct Zone {
+    name: String,
+    records: HashMap<String, Vec<ZoneRecord>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ZoneData {
+    Address(IpAddr),
+    Cname(String),
+    Txt(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ZoneRecord {
+    data: ZoneData,
+    ttl: u32,
+}
+
+const MAX_TXT_LEN: usize = 1_024;
+const MAX_CNAME_DEPTH: usize = 8;
+const MAX_RESPONSE_LEN: usize = 1_232;
 
 enum DnsAction {
     Reply(Vec<u8>),
@@ -189,6 +213,9 @@ pub fn organisation_resolver_suffixes(state: &NodeState) -> Vec<String> {
     for route in &snapshot.split {
         push(&route.suffix);
     }
+    for zone in &snapshot.zones {
+        push(&zone.name);
+    }
     suffixes
 }
 
@@ -217,19 +244,101 @@ fn records_from_state(state: &NodeState, domain: &str) -> Records {
         }
     }
     let mut split = Vec::new();
+    let mut zones = Vec::new();
     if let Some(snapshot) = &state.org_dns {
         if snapshot.managed {
             for record in &snapshot.records {
                 insert_extra_record(&mut addresses, record);
             }
             split = split_from_snapshot(snapshot);
+            zones = zones_from_snapshot(snapshot);
         }
     }
     Records {
         domain: domain.into(),
         addresses,
         split,
+        zones,
     }
+}
+
+fn zones_from_snapshot(snapshot: &crate::OrgDnsSnapshot) -> Vec<Zone> {
+    let mut zones: Vec<Zone> = Vec::new();
+    for published in &snapshot.zones {
+        let name = published.name.trim_end_matches('.').to_ascii_lowercase();
+        if !valid_published_suffix(&name) || zones.iter().any(|zone| zone.name == name) {
+            continue;
+        }
+        let mut zone = Zone {
+            name,
+            records: HashMap::new(),
+        };
+        for record in &published.records {
+            let owner = record.name.trim_end_matches('.').to_ascii_lowercase();
+            if !in_suffix(&owner, &zone.name) || !labels_are_safe(&owner) {
+                continue;
+            }
+            let Some(data) = zone_data(record) else {
+                continue;
+            };
+            let ttl = if record.ttl == 0 {
+                DNS_TTL_SECS
+            } else {
+                record.ttl
+            };
+            let entries = zone.records.entry(owner).or_default();
+            let record = ZoneRecord { data, ttl };
+            if !entries.contains(&record) {
+                entries.push(record);
+            }
+        }
+        zones.push(zone);
+    }
+    zones
+}
+
+fn zone_data(record: &crate::OrgDnsZoneRecord) -> Option<ZoneData> {
+    let value = record.value.trim();
+    match record.record_type.to_ascii_uppercase().as_str() {
+        "A" => value
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .map(|address| ZoneData::Address(IpAddr::V4(address))),
+        "AAAA" => value
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|address| ZoneData::Address(IpAddr::V6(address))),
+        "CNAME" => {
+            let target = value.trim_end_matches('.').to_ascii_lowercase();
+            (!target.is_empty() && target.len() <= 253 && labels_are_safe(&target))
+                .then_some(ZoneData::Cname(target))
+        }
+        "TXT" => (record.value.len() <= MAX_TXT_LEN
+            && record
+                .value
+                .bytes()
+                .all(|byte| (0x20..0x7f).contains(&byte)))
+        .then(|| ZoneData::Txt(record.value.clone())),
+        _ => None,
+    }
+}
+
+fn in_suffix(name: &str, suffix: &str) -> bool {
+    name == suffix || name.ends_with(&format!(".{suffix}"))
+}
+
+/// The zone answering `name`, unless a longer split suffix claims it.
+fn zone_for<'a>(name: &str, records: &'a Records) -> Option<&'a Zone> {
+    let zone = records
+        .zones
+        .iter()
+        .filter(|zone| in_suffix(name, &zone.name))
+        .max_by_key(|zone| zone.name.len())?;
+    let longer_split = records
+        .split
+        .iter()
+        .any(|(suffix, _)| suffix.len() > zone.name.len() && in_suffix(name, suffix));
+    (!longer_split).then_some(zone)
 }
 
 fn split_from_snapshot(snapshot: &crate::OrgDnsSnapshot) -> Vec<(String, Vec<SocketAddr>)> {
@@ -510,7 +619,7 @@ fn dns_action(query: &[u8], records: &Records) -> Option<DnsAction> {
     }
     let name = name.to_ascii_lowercase();
     let in_magic = magic_name(&name, &records.domain);
-    if !in_magic && !records.addresses.contains_key(&name) {
+    if !in_magic && zone_for(&name, records).is_none() && !records.addresses.contains_key(&name) {
         if let Some(resolvers) = split_resolvers(&name, records) {
             return Some(DnsAction::Forward(resolvers));
         }
@@ -539,8 +648,20 @@ fn answer(query: &[u8], records: &Records) -> Option<Vec<u8>> {
     let query_type = u16::from_be_bytes([query[name_end], query[name_end + 1]]);
     let query_class = u16::from_be_bytes([query[name_end + 2], query[name_end + 3]]);
     let name = name.to_ascii_lowercase();
-    let addresses = records.addresses.get(&name);
     let in_magic = magic_name(&name, &records.domain);
+    if !in_magic {
+        if let Some(zone) = zone_for(&name, records) {
+            return Some(zone_response(
+                query,
+                question_end,
+                &name,
+                (query_type, query_class),
+                zone,
+                records,
+            ));
+        }
+    }
+    let addresses = records.addresses.get(&name);
     let in_domain = in_magic || addresses.is_some();
     let address = addresses.and_then(|addresses| address_for_query(addresses, query_type));
     let response_code = if !in_domain {
@@ -577,6 +698,140 @@ fn answer(query: &[u8], records: &Records) -> Option<Vec<u8>> {
         }
     }
     Some(response)
+}
+
+fn zone_response(
+    query: &[u8],
+    question_end: usize,
+    name: &str,
+    (query_type, query_class): (u16, u16),
+    zone: &Zone,
+    records: &Records,
+) -> Vec<u8> {
+    // A name exists if it owns records or is an ancestor of an owner.
+    let exists = zone.records.keys().any(|owner| in_suffix(owner, name));
+    let response_code: u16 = if exists { 0 } else { 3 };
+    let mut answers = Vec::new();
+    if exists && query_class == 1 {
+        collect_answers(name, query_type, records, 0, &mut answers);
+    }
+    let flags = u16::from_be_bytes([query[2], query[3]]);
+    let mut body = Vec::new();
+    let mut count = 0u16;
+    let mut truncated = false;
+    for (owner, ttl, record_type, data) in &answers {
+        let mut record = Vec::new();
+        if owner == name {
+            record.extend_from_slice(&[0xc0, 0x0c]);
+        } else {
+            encode_name(&mut record, owner);
+        }
+        record.extend_from_slice(&record_type.to_be_bytes());
+        record.extend_from_slice(&1u16.to_be_bytes());
+        record.extend_from_slice(&ttl.to_be_bytes());
+        record.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        record.extend_from_slice(data);
+        if question_end + body.len() + record.len() > MAX_RESPONSE_LEN {
+            truncated = true;
+            break;
+        }
+        body.extend(record);
+        count += 1;
+    }
+    let mut response = Vec::with_capacity(question_end + body.len());
+    response.extend_from_slice(&query[..2]);
+    let truncation = if truncated { 0x0200 } else { 0 };
+    let response_flags = 0x8000 | 0x0400 | truncation | (flags & 0x0100) | response_code;
+    response.extend_from_slice(&response_flags.to_be_bytes());
+    response.extend_from_slice(&1u16.to_be_bytes());
+    response.extend_from_slice(&count.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&query[DNS_HEADER_LEN..question_end]);
+    response.extend(body);
+    response
+}
+
+type Answer = (String, u32, u16, Vec<u8>);
+
+/// Appends local answers for `name`, following CNAMEs through zones, extra
+/// records and MagicDNS only. Unknown targets end the chain: never recursive.
+fn collect_answers(
+    name: &str,
+    query_type: u16,
+    records: &Records,
+    depth: usize,
+    answers: &mut Vec<Answer>,
+) {
+    if depth > MAX_CNAME_DEPTH {
+        return;
+    }
+    let zone_records = if magic_name(name, &records.domain) {
+        None
+    } else {
+        zone_for(name, records).map(|zone| zone.records.get(name))
+    };
+    match zone_records {
+        Some(Some(entries)) => {
+            let cname = entries.iter().find_map(|record| match &record.data {
+                ZoneData::Cname(target) => Some((target, record.ttl)),
+                _ => None,
+            });
+            if let Some((target, ttl)) = cname {
+                let mut data = Vec::new();
+                encode_name(&mut data, target);
+                answers.push((name.into(), ttl, 5, data));
+                if query_type != 5 && !answers.iter().any(|answer| answer.0 == *target) {
+                    collect_answers(target, query_type, records, depth + 1, answers);
+                }
+                return;
+            }
+            for record in entries {
+                let (record_type, data) = match &record.data {
+                    ZoneData::Address(IpAddr::V4(address)) => (1, address.octets().to_vec()),
+                    ZoneData::Address(IpAddr::V6(address)) => (28, address.octets().to_vec()),
+                    ZoneData::Txt(text) => (16, encode_txt(text)),
+                    ZoneData::Cname(_) => continue,
+                };
+                if record_type == query_type {
+                    answers.push((name.into(), record.ttl, record_type, data));
+                }
+            }
+        }
+        Some(None) => {}
+        None => {
+            for address in records.addresses.get(name).into_iter().flatten() {
+                let (record_type, data) = match address {
+                    IpAddr::V4(address) => (1, address.octets().to_vec()),
+                    IpAddr::V6(address) => (28, address.octets().to_vec()),
+                };
+                if record_type == query_type {
+                    answers.push((name.into(), DNS_TTL_SECS, record_type, data));
+                }
+            }
+        }
+    }
+}
+
+fn encode_name(buffer: &mut Vec<u8>, name: &str) {
+    for label in name.split('.').filter(|label| !label.is_empty()) {
+        buffer.push(label.len() as u8);
+        buffer.extend_from_slice(label.as_bytes());
+    }
+    buffer.push(0);
+}
+
+fn encode_txt(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return vec![0];
+    }
+    let mut data = Vec::with_capacity(bytes.len() + bytes.len() / 255 + 1);
+    for chunk in bytes.chunks(255) {
+        data.push(chunk.len() as u8);
+        data.extend_from_slice(chunk);
+    }
+    data
 }
 
 fn error_response(query: &[u8], response_code: u16) -> Option<Vec<u8>> {
@@ -1193,6 +1448,7 @@ mod tests {
             search_domains: vec!["internal.example".into()],
             split: vec![],
             global_resolvers: vec![],
+            zones: vec![],
         });
         let records = records_from_state(&state, "12345678.blaktail");
         let a = answer(&query("wiki.internal.example", 1), &records).unwrap();
@@ -1274,6 +1530,7 @@ mod tests {
                 resolvers: vec!["127.0.0.1:53535".into()],
             }],
             global_resolvers: vec![],
+            zones: vec![],
         }
     }
 
@@ -1337,6 +1594,7 @@ mod tests {
                 resolvers: vec![upstream_addr.to_string()],
             }],
             global_resolvers: vec![],
+            zones: vec![],
         });
         let dns = MagicDns::spawn_at(
             "127.0.0.1:0".parse().unwrap(),
@@ -1384,6 +1642,7 @@ mod tests {
                 resolvers: resolvers.iter().map(|value| (*value).to_string()).collect(),
             }],
             global_resolvers: vec![],
+            zones: vec![],
         }
     }
 
@@ -1478,6 +1737,7 @@ mod tests {
                 resolvers: vec!["10.0.0.53".into()],
             }],
             global_resolvers: vec![],
+            zones: vec![],
         });
         let records = records_from_state(&state, "12345678.blaktail");
         let extra = answer(&query("wiki.internal.example", 1), &records).unwrap();
@@ -1490,5 +1750,228 @@ mod tests {
             vec!["internal.example".to_string()]
         );
         assert!(!organisation_dns_managed(&state));
+    }
+
+    fn zone_snapshot() -> crate::OrgDnsSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "revision": 9,
+            "managed": true,
+            "records": [
+                {"name": "wiki.apps.example", "type": "A", "value": "10.0.0.10"}
+            ],
+            "split": [
+                {"suffix": "apps.example", "resolvers": []},
+                {"suffix": "deep.apps.example", "resolvers": ["127.0.0.1:53535"]}
+            ],
+            "zones": [
+                {"name": "apps.example", "records": [
+                    {"name": "wiki.apps.example", "type": "A", "value": "10.0.0.10", "ttl": 120},
+                    {"name": "wiki.apps.example", "type": "A", "value": "10.0.0.11", "ttl": 120},
+                    {"name": "wiki.apps.example", "type": "AAAA", "value": "fd00::10", "ttl": 120},
+                    {"name": "docs.apps.example", "type": "CNAME", "value": "wiki.apps.example", "ttl": 60},
+                    {"name": "laptop.apps.example", "type": "CNAME", "value": "peer.12345678.blaktail", "ttl": 60},
+                    {"name": "apps.example", "type": "TXT", "value": "v=example"},
+                    {"name": "long.apps.example", "type": "TXT", "value": "x".repeat(300), "ttl": 90},
+                    {"name": "a.b.apps.example", "type": "A", "value": "10.0.0.12", "ttl": 30}
+                ]},
+                {"name": "evil.blaktail", "records": [
+                    {"name": "x.evil.blaktail", "type": "A", "value": "10.9.9.9"}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn zone_records() -> Records {
+        let mut state = state();
+        state.org_dns = Some(zone_snapshot());
+        records_from_state(&state, "12345678.blaktail")
+    }
+
+    /// (type, ttl, rdata) for each answer record.
+    fn answers(request: &[u8], response: &[u8]) -> Vec<(u16, u32, Vec<u8>)> {
+        let count = u16::from_be_bytes([response[6], response[7]]);
+        let mut offset = request.len();
+        let mut out = Vec::new();
+        for _ in 0..count {
+            if response[offset] & 0xc0 == 0xc0 {
+                offset += 2;
+            } else {
+                while response[offset] != 0 {
+                    offset += response[offset] as usize + 1;
+                }
+                offset += 1;
+            }
+            let record_type = u16::from_be_bytes([response[offset], response[offset + 1]]);
+            let ttl = u32::from_be_bytes(response[offset + 4..offset + 8].try_into().unwrap());
+            let length = u16::from_be_bytes([response[offset + 8], response[offset + 9]]) as usize;
+            offset += 10;
+            out.push((record_type, ttl, response[offset..offset + length].to_vec()));
+            offset += length;
+        }
+        assert_eq!(offset, response.len());
+        out
+    }
+
+    type ZoneAnswer = (u8, Vec<(u16, u32, Vec<u8>)>);
+
+    fn zone_answer(name: &str, query_type: u16) -> ZoneAnswer {
+        let records = zone_records();
+        let request = query(name, query_type);
+        let Some(DnsAction::Reply(response)) = dns_action(&request, &records) else {
+            panic!("{name} should be answered locally");
+        };
+        assert_ne!(response[2] & 0x04, 0, "zone answers are authoritative");
+        (response[3] & 0x0f, answers(&request, &response))
+    }
+
+    #[test]
+    fn zone_answers_every_address_with_published_ttl() {
+        let (code, a) = zone_answer("wiki.apps.example", 1);
+        assert_eq!(code, 0);
+        assert_eq!(
+            a,
+            vec![(1, 120, vec![10, 0, 0, 10]), (1, 120, vec![10, 0, 0, 11])]
+        );
+        let (code, aaaa) = zone_answer("wiki.apps.example", 28);
+        assert_eq!(code, 0);
+        assert_eq!(aaaa.len(), 1);
+        assert_eq!(aaaa[0].0, 28);
+        assert_eq!(
+            aaaa[0].2,
+            "fd00::10".parse::<std::net::Ipv6Addr>().unwrap().octets()
+        );
+    }
+
+    #[test]
+    fn zone_cname_chases_locally_within_zone_and_to_magic_dns() {
+        let (code, docs) = zone_answer("docs.apps.example", 1);
+        assert_eq!(code, 0);
+        assert_eq!(docs.len(), 3);
+        assert_eq!((docs[0].0, docs[0].1), (5, 60));
+        assert_eq!(docs[0].2, b"\x04wiki\x04apps\x07example\x00".to_vec());
+        assert_eq!(docs[1], (1, 120, vec![10, 0, 0, 10]));
+        let (_, cname_only) = zone_answer("docs.apps.example", 5);
+        assert_eq!(cname_only.len(), 1);
+        let (code, laptop) = zone_answer("laptop.apps.example", 1);
+        assert_eq!(code, 0);
+        assert_eq!(laptop.len(), 2);
+        assert_eq!(laptop[1], (1, DNS_TTL_SECS, vec![100, 64, 0, 2]));
+    }
+
+    #[test]
+    fn zone_txt_splits_character_strings_and_defaults_ttl() {
+        let (code, apex) = zone_answer("apps.example", 16);
+        assert_eq!(code, 0);
+        assert_eq!(apex, vec![(16, DNS_TTL_SECS, b"\x09v=example".to_vec())]);
+        let (_, long) = zone_answer("long.apps.example", 16);
+        assert_eq!(long[0].1, 90);
+        let data = &long[0].2;
+        assert_eq!(data.len(), 302);
+        assert_eq!(data[0], 255);
+        assert_eq!(data[256], 45);
+    }
+
+    #[test]
+    fn zone_nxdomain_nodata_and_empty_non_terminals() {
+        let (code, missing) = zone_answer("missing.apps.example", 1);
+        assert_eq!(code, 3);
+        assert!(missing.is_empty());
+        let (code, nodata) = zone_answer("apps.example", 1);
+        assert_eq!(code, 0);
+        assert!(nodata.is_empty());
+        let (code, txt_for_a) = zone_answer("wiki.apps.example", 16);
+        assert_eq!(code, 0);
+        assert!(txt_for_a.is_empty());
+        let (code, empty_non_terminal) = zone_answer("b.apps.example", 1);
+        assert_eq!(code, 0);
+        assert!(empty_non_terminal.is_empty());
+    }
+
+    #[test]
+    fn longer_split_under_zone_forwards_and_public_or_blaktail_zone_stay_closed() {
+        let records = zone_records();
+        assert!(matches!(
+            dns_action(&query("db.deep.apps.example", 1), &records),
+            Some(DnsAction::Forward(resolvers))
+                if resolvers == vec!["127.0.0.1:53535".parse().unwrap()]
+        ));
+        assert!(matches!(
+            dns_action(&query("example.com", 1), &records),
+            Some(DnsAction::Reply(response)) if response[3] & 0x0f == 5
+        ));
+        assert!(matches!(
+            dns_action(&query("x.evil.blaktail", 1), &records),
+            Some(DnsAction::Reply(response)) if response[3] & 0x0f == 5
+        ));
+        assert!(records
+            .zones
+            .iter()
+            .all(|zone| zone.name != "evil.blaktail"));
+        let mut state = state();
+        state.org_dns = Some(zone_snapshot());
+        assert_eq!(
+            organisation_resolver_suffixes(&state),
+            vec!["apps.example".to_string(), "deep.apps.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn oversized_zone_answers_set_truncation() {
+        let records: Vec<_> = (0..120)
+            .map(|index| {
+                serde_json::json!({
+                    "name": "big.apps.example", "type": "TXT",
+                    "value": format!("{index:03}{}", "y".repeat(40)),
+                })
+            })
+            .collect();
+        let mut state = state();
+        state.org_dns = Some(
+            serde_json::from_value(serde_json::json!({
+                "managed": true,
+                "zones": [{"name": "apps.example", "records": records}]
+            }))
+            .unwrap(),
+        );
+        let records = records_from_state(&state, "12345678.blaktail");
+        let request = query("big.apps.example", 16);
+        let response = answer(&request, &records).unwrap();
+        assert!(response.len() <= MAX_RESPONSE_LEN);
+        assert_ne!(response[2] & 0x02, 0);
+        assert!(!answers(&request, &response).is_empty());
+    }
+
+    #[test]
+    fn legacy_and_future_snapshots_deserialise() {
+        let legacy: crate::OrgDnsSnapshot = serde_json::from_str(
+            r#"{"revision":2,"managed":true,"magic_dns_suffix":"12345678.blaktail",
+                "global_resolvers":[],"split":[],"search_domains":["internal.example"],
+                "records":[{"name":"wiki.internal.example","type":"A","value":"10.0.0.10"}]}"#,
+        )
+        .unwrap();
+        assert!(legacy.zones.is_empty());
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("zones"));
+        let mut state = state();
+        state.org_dns = Some(legacy);
+        let records = records_from_state(&state, "12345678.blaktail");
+        let a = answer(&query("wiki.internal.example", 1), &records).unwrap();
+        assert_eq!(&a[a.len() - 4..], &[10, 0, 0, 10]);
+        let missing = answer(&query("missing.internal.example", 1), &records).unwrap();
+        assert_eq!(missing[3] & 0x0f, 5);
+
+        let future: crate::OrgDnsSnapshot = serde_json::from_str(
+            r#"{"revision":3,"managed":true,"nameserver_groups":[{"name":"x"}],
+                "zones":[{"name":"apps.example","future":true,
+                  "records":[{"name":"apps.example","type":"MX","value":"10 mail","ttl":60,"weight":1}]}],
+                "some_new_field":{"nested":[1,2]}}"#,
+        )
+        .unwrap();
+        assert_eq!(future.zones.len(), 1);
+        let mut state = self::state();
+        state.org_dns = Some(future);
+        let records = records_from_state(&state, "12345678.blaktail");
+        let mx = answer(&query("apps.example", 15), &records).unwrap();
+        assert_eq!(mx[3] & 0x0f, 3);
     }
 }

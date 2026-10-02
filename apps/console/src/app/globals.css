@@ -1346,3 +1346,50 @@ button.quiet-danger:hover:not(:disabled),
     scroll-behavior: auto !important;
   }
 }
+
+.dns-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin: 0;
+}
+
+.dns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.dns-assign {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.dns-hint {
+  display: block;
+  font-size: 12px;
+}
+
+.dns-pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+.dns-diff {
+  margin: 0;
+}
+
+.dns-diff-added {
+  color: var(--blaktail-eucalyptus-400);
+}
+
+.dns-diff-removed {
+  color: var(--destructive);
+}

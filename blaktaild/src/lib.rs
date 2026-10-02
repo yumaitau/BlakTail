@@ -266,6 +266,26 @@ pub struct OrgDnsSnapshot {
     pub split: Vec<OrgDnsSplit>,
     #[serde(default)]
     pub global_resolvers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<OrgDnsZone>,
+}
+
+/// Coordinator-published custom zone the local stub answers authoritatively.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OrgDnsZone {
+    pub name: String,
+    #[serde(default)]
+    pub records: Vec<OrgDnsZoneRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OrgDnsZoneRecord {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub value: String,
+    #[serde(default)]
+    pub ttl: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

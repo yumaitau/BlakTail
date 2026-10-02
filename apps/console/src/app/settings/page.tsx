@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { IdentitySettings } from "@/components/identity-settings";
 import { ApiClientManager } from "@/components/api-client-manager";
@@ -6,9 +7,8 @@ import { MembershipManager } from "@/components/membership-manager";
 import { OidcProviderManager } from "@/components/oidc-provider-manager";
 import { ScimManager } from "@/components/scim-manager";
 import { PageHeader } from "@/components/page-header";
-import { DnsSettings } from "@/components/dns-settings";
 import { WebhookManager } from "@/components/webhook-manager";
-import { getDns, listApiClients, listWebhooks } from "@/lib/coord";
+import { listApiClients, listWebhooks } from "@/lib/coord";
 import { listPendingInvitations } from "@/lib/invitations";
 import { listIdentitySettings } from "@/lib/identity-links";
 import { listIdentityProviders, listMemberships } from "@/lib/oidc";
@@ -18,7 +18,7 @@ import { TAGLINE } from "@/lib/tagline";
 
 export default async function SettingsPage() {
   const ctx = await requireConsoleContext();
-  const [invitations, identitySettings, apiClients, webhooks, providers, memberships, dns] =
+  const [invitations, identitySettings, apiClients, webhooks, providers, memberships] =
     await Promise.all([
       listPendingInvitations(ctx),
       listIdentitySettings(ctx),
@@ -34,7 +34,6 @@ export default async function SettingsPage() {
       ctx.role === "owner"
         ? listMemberships(ctx.organisationId)
         : Promise.resolve([]),
-      getDns(ctx).catch(() => null),
     ]);
 
   return (
@@ -106,18 +105,18 @@ export default async function SettingsPage() {
             <MembershipManager memberships={memberships} />
           </div>
         ) : null}
-        {dns ? (
-          <div id="dns">
-            <DnsSettings initial={dns} readOnly={ctx.role === "member"} />
+        <div className="panel stack" id="dns">
+          <h2>Organisation DNS</h2>
+          <p className="muted">
+            Nameserver groups, custom zones, split DNS, previews and revision
+            history now live on their own page.
+          </p>
+          <div>
+            <Link className="button secondary" href="/dns">
+              Open DNS
+            </Link>
           </div>
-        ) : (
-          <div className="panel stack" id="dns">
-            <h2>Organisation DNS</h2>
-            <p className="muted">
-              Coordinator DNS settings are unavailable in this environment.
-            </p>
-          </div>
-        )}
+        </div>
         {canMutateTailnet(ctx.role) ? (
           <div id="webhooks">
             <WebhookManager destinations={webhooks} />

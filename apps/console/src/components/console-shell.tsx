@@ -20,6 +20,8 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     label: "Access",
     links: [{ href: "/acls", label: "Access policy" }],
   },
+  { label: "DNS", links: [{ href: "/dns", label: "DNS" }] },
+  { label: "Services", links: [{ href: "/services", label: "Private services" }] },
   {
     label: "Events",
     links: [{ href: "/audit", label: "Audit log" }],

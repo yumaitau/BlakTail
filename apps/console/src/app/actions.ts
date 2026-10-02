@@ -9,8 +9,6 @@ import {
   getAcl,
   mintJoinKey,
   putAcl,
-  putDns,
-  type OrgDnsSettings,
   createApiClient,
   createWebhook,
   createWgOnlyPeer,
@@ -554,38 +552,6 @@ export async function saveAclAction(formData: FormData): Promise<ActionResult> {
     return {
       ok: false,
       error: error instanceof Error ? error.message : "Could not save ACL.",
-    };
-  }
-}
-
-export async function saveDnsAction(formData: FormData): Promise<ActionResult> {
-  try {
-    const ctx = await requireConsoleContext();
-    if (!canMutateTailnet(ctx.role)) {
-      return { ok: false, error: "Only owners and admins can publish DNS settings." };
-    }
-    const etag = String(formData.get("etag") ?? "");
-    const rollback = formData.get("rollback") === "true";
-    if (rollback) {
-      await putDns(ctx, { rollback: true }, etag);
-      revalidatePath("/settings");
-      return { ok: true, data: undefined };
-    }
-    const raw = String(formData.get("dnsJson") ?? "");
-    let parsed: OrgDnsSettings;
-    try {
-      parsed = JSON.parse(raw) as OrgDnsSettings;
-    } catch {
-      return { ok: false, error: "DNS settings must be valid JSON." };
-    }
-    await putDns(ctx, { dns: parsed }, etag);
-    revalidatePath("/settings");
-    return { ok: true, data: undefined };
-  } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error ? error.message : "Could not publish DNS settings.",
     };
   }
 }
