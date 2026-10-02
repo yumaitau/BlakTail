@@ -20,7 +20,6 @@ use sqlx::{AnyPool, Row};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
-    sync::{Mutex, OnceLock},
 };
 use uuid::Uuid;
 
@@ -331,37 +330,58 @@ pub(crate) async fn load_router(
 
 // ---------- exit-node selections ----------
 //
-// Clients choose an exit node per request (`exit_node=`); the coordinator
-// has no column for it. Selections are kept in memory, and a change bumps
-// the control revision so the exit node's allow-list follows. After a
-// restart, or on a replica that has not seen the client's request, the
-// client is missing from the exit node's list: forwarding fails closed until
-// the client polls again.
+// Clients choose an exit node per request (`exit_node=`). The request is
+// persisted in `nodes.exit_node_id` (the requested name, matched the same way
+// `list_peers` matches it), so every replica and a restarted coordinator
+// compile the same allow-list. A change bumps the control revision so the
+// exit node's allow-list follows.
 
-fn exit_selections() -> &'static Mutex<HashMap<Uuid, String>> {
-    static SELECTIONS: OnceLock<Mutex<HashMap<Uuid, String>>> = OnceLock::new();
-    SELECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+/// Records `node_id`'s exit-node request inside `tx`. Returns whether it changed.
+pub(crate) async fn record_exit_selection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    node_id: Uuid,
+    requested: Option<&str>,
+) -> Result<bool, ApiError> {
+    let changed = sqlx::query(
+        "UPDATE nodes SET exit_node_id=$1 WHERE id=$2 AND COALESCE(exit_node_id,'')<>COALESCE($1,'')",
+    )
+    .bind(requested)
+    .bind(node_id.to_string())
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    Ok(changed > 0)
 }
 
-/// Records `node_id`'s exit-node request. Returns whether it changed.
-pub(crate) fn record_exit_selection(node_id: Uuid, requested: Option<&str>) -> bool {
-    let mut selections = exit_selections()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match requested {
-        Some(requested) => {
-            selections.insert(node_id, requested.to_owned()).as_deref() != Some(requested)
+/// Every current exit-node request in an organisation, by client node id.
+pub(crate) async fn exit_selections(
+    pool: &AnyPool,
+    org_id: &str,
+) -> Result<HashMap<Uuid, String>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT id,exit_node_id FROM nodes WHERE org_id=$1 AND exit_node_id IS NOT NULL AND revoked_at IS NULL AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    let mut selections = HashMap::new();
+    for row in rows {
+        let id: String = row.try_get(0)?;
+        if let Ok(id) = id.parse() {
+            selections.insert(id, row.try_get(1)?);
         }
-        None => selections.remove(&node_id).is_some(),
     }
+    Ok(selections)
 }
 
-pub(crate) fn exit_selection(node_id: Uuid) -> Option<String> {
-    exit_selections()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&node_id)
-        .cloned()
+async fn exit_selection(pool: &AnyPool, node_id: Uuid) -> Result<Option<String>, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT exit_node_id FROM nodes WHERE id=$1")
+            .bind(node_id.to_string())
+            .fetch_optional(pool)
+            .await?
+            .flatten(),
+    )
 }
 
 // ---------- enforcement status ----------
@@ -498,7 +518,7 @@ pub(crate) async fn client_filter(
     let Some((name, dns_name, approved)) = router_row else {
         return Ok(filter);
     };
-    let exit_request = exit_selection(client.0);
+    let exit_request = exit_selection(pool, client.0).await?;
     compile_client(
         acl,
         &distribution,

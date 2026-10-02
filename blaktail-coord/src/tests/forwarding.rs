@@ -337,6 +337,14 @@ async fn exit_node_forwarding_only_for_clients_that_select_it() {
         .iter()
         .all(|rule| rule.destination != "0.0.0.0/0"));
 
+    // A restarted coordinator or another replica on the same database
+    // compiles the same exit allow-list without Bob polling again.
+    let replica = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let filter = allow_list(&replica, &exit).await;
+    assert!(entries(&filter.allow, &client_b)
+        .iter()
+        .any(|rule| rule.destination == "0.0.0.0/0" && rule.service.all));
+
     // Deselecting withdraws it again.
     poll(&router, &client_b, "").await;
     let filter = allow_list(&router, &exit).await;

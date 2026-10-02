@@ -55,9 +55,8 @@ reject every other packet they would forward from the overlay:
 
 The coordinator recompiles the list on every control revision (resource,
 policy, device or capability change, or a client changing its exit node).
-Exit-node selections are held in coordinator memory: after a coordinator
-restart, or behind a second coordinator replica, an exit client is denied
-until its next poll (at most ~25 seconds), never wrongly allowed.
+Exit-node selections are stored in `nodes.exit_node_id`, so a restarted
+coordinator or another replica compiles the same exit allow-list.
 
 Routing peers that do **not** report `forward-filter` still receive and
 distribute routes, so upgrades never cut off a site, but the risk is shown:

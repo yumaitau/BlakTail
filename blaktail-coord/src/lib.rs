@@ -3223,9 +3223,11 @@ async fn list_peers(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if forwarding::record_exit_selection(node_id, requested_exit) {
+    {
         let mut tx = s.store.pool.begin().await?;
-        bump_control_revision(&mut tx, &org).await?;
+        if forwarding::record_exit_selection(&mut tx, node_id, requested_exit).await? {
+            bump_control_revision(&mut tx, &org).await?;
+        }
         tx.commit().await?;
     }
     let forward_router = if forwarding::enforces(&source_capabilities) {
@@ -3282,6 +3284,11 @@ async fn list_peers(
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let exit_selections = if forward_router.is_some() {
+        forwarding::exit_selections(&s.store.pool, &org).await?
+    } else {
+        HashMap::new()
+    };
     let mut exit_node_active = false;
     let mut peers = candidates
         .into_iter()
@@ -3292,7 +3299,7 @@ async fn list_peers(
             if let (Some((router_name, approved)), Some(filter)) =
                 (&forward_router, forward_filter.as_mut())
             {
-                let exit_request = forwarding::exit_selection(peer.id);
+                let exit_request = exit_selections.get(&peer.id).cloned();
                 forwarding::compile_client(
                     &acl,
                     &resource_routes,
