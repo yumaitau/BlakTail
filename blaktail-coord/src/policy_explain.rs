@@ -144,7 +144,101 @@ struct ExplainResponse {
     reasons: Vec<String>,
 }
 
-fn device_subject(facts: &NodeFacts, ctx: &PostureContext) -> Subject {
+/// One device-to-device evaluation through the same evaluator and peer-map
+/// compiler agents receive. The topology view and change-draft previews call
+/// this so there is exactly one policy engine.
+pub(crate) struct DeviceFlow {
+    pairing: Pairing,
+    compiled: PeerIngress,
+    profile: Enforcement,
+    pub(crate) policy_allows: bool,
+    pub(crate) admitted: bool,
+    basis: &'static str,
+}
+
+impl DeviceFlow {
+    pub(crate) fn paired(&self) -> bool {
+        self.pairing.source_map_includes_destination && self.pairing.destination_map_includes_source
+    }
+    pub(crate) fn decision(&self) -> bool {
+        self.policy_allows && self.admitted && self.paired()
+    }
+    pub(crate) fn basis(&self) -> &'static str {
+        if !self.paired() && self.policy_allows {
+            "no_pairing"
+        } else {
+            self.basis
+        }
+    }
+    pub(crate) fn enforcement(&self) -> &'static str {
+        enforcement_state(self.paired(), &self.profile)
+    }
+}
+
+fn enforcement_state(paired: bool, profile: &Enforcement) -> &'static str {
+    if !paired {
+        "peer_map"
+    } else {
+        match profile.packet_filter {
+            "enforced" => "device_enforced",
+            "unknown" => "unknown",
+            _ => "not_enforced",
+        }
+    }
+}
+
+pub(crate) fn device_flow(
+    acl: &Acl,
+    source: &Subject,
+    destination: &Subject,
+    dest: &NodeFacts,
+    protocol: Option<AclProtocol>,
+    port: Option<u16>,
+) -> DeviceFlow {
+    let profile = enforcement_profile(dest.os.as_deref(), &dest.capabilities);
+    let compiled = acl.peer_ingress_for(
+        source,
+        destination,
+        dest.capabilities.iter().any(|c| c == CAP_SSH_USERS),
+    );
+    let pairing = Pairing {
+        source_map_includes_destination: acl.allows(source, destination),
+        destination_map_includes_source: acl.allows(destination, source),
+    };
+    let (mut flow_allow, mut flow_deny) = (false, false);
+    for rule in &acl.rules {
+        if acl.rule_matches(rule, source, destination, port, protocol, None) {
+            match rule.action {
+                Action::Allow => flow_allow = true,
+                Action::Deny => flow_deny = true,
+            }
+        }
+    }
+    let policy_allows = acl.allows_flow(source, destination, port, protocol, None);
+    let admitted = ingress_admits(&compiled, protocol, port);
+    let basis = if flow_deny {
+        "deny_rule"
+    } else if flow_allow {
+        "rule"
+    } else if policy_allows {
+        "default_same_tag"
+    } else if acl.ssh_governed(source, destination) && port == Some(22) {
+        "ssh_closed"
+    } else {
+        "default_deny"
+    };
+    DeviceFlow {
+        pairing,
+        compiled,
+        profile,
+        policy_allows,
+        admitted,
+        basis,
+    }
+}
+
+/// Builds the subject the peer-map compiler uses for an active device.
+pub(crate) fn device_subject(facts: &NodeFacts, ctx: &PostureContext) -> Subject {
     let mut subject = Subject::new(facts.role, facts.tags.clone()).with_user(facts.user_id.clone());
     ctx.apply(facts.id, &mut subject);
     subject
@@ -447,16 +541,17 @@ async fn explain(
         )
     } else {
         let dest = destination_facts.expect("validated destination device");
-        let profile = enforcement_profile(dest.os.as_deref(), &dest.capabilities);
-        let compiled = acl.peer_ingress_for(
+        let flow = device_flow(
+            &acl,
             &source,
             &destination,
-            dest.capabilities.iter().any(|c| c == CAP_SSH_USERS),
+            dest,
+            input.protocol,
+            input.port,
         );
-        let pairing = Pairing {
-            source_map_includes_destination: acl.allows(&source, &destination),
-            destination_map_includes_source: acl.allows(&destination, &source),
-        };
+        let profile = flow.profile;
+        let compiled = flow.compiled;
+        let pairing = flow.pairing;
         let paired =
             pairing.source_map_includes_destination && pairing.destination_map_includes_source;
         let (policy_allows, compiled_allows, basis) = if let Some(user) = ssh_user {
@@ -479,37 +574,16 @@ async fn explain(
                 },
             )
         } else {
-            let allowed = acl.allows_flow(&source, &destination, input.port, input.protocol, None);
-            let admitted = ingress_admits(&compiled, input.protocol, input.port);
-            let basis = if flow_deny {
-                "deny_rule"
-            } else if flow_allow {
-                "rule"
-            } else if allowed {
-                "default_same_tag"
-            } else if acl.ssh_governed(&source, &destination) && input.port == Some(22) {
-                "ssh_closed"
-            } else {
-                "default_deny"
-            };
-            if allowed && !admitted {
+            if flow.policy_allows && !flow.admitted {
                 reasons.push("Rules allow this, but the compiled grant for this destination does not open it (SSH rules govern TCP 22, or an explicit deny covers it).".into());
             }
-            (allowed, admitted, basis)
+            (flow.policy_allows, flow.admitted, flow.basis)
         };
         if !paired {
             reasons.push("WireGuard pairing needs policy in both directions: each device only receives peers it may itself reach. One side does not include the other, so no tunnel exists.".into());
         }
         let decision = policy_allows && compiled_allows && paired;
-        let state = if !paired {
-            "peer_map"
-        } else {
-            match profile.packet_filter {
-                "enforced" => "device_enforced",
-                "unknown" => "unknown",
-                _ => "not_enforced",
-            }
-        };
+        let state = enforcement_state(paired, &profile);
         let detail = match state {
             "peer_map" => {
                 "No tunnel is configured between these devices, on every client type.".to_string()

@@ -1393,3 +1393,42 @@ button.quiet-danger:hover:not(:disabled),
 .dns-diff-removed {
   color: var(--destructive);
 }
+
+/* Topology graph: static, no motion; the page list is its text equivalent. */
+.topology-graph {
+  width: 100%;
+  max-height: 70vh;
+  background: var(--blaktail-night-900);
+  border-radius: 0.5rem;
+}
+
+.topology-heading,
+.topology-label {
+  fill: var(--blaktail-sand-200);
+  font-size: 12px;
+}
+
+.topology-heading {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.topology-dot {
+  fill: var(--blaktail-orange-500);
+}
+
+.topology-line {
+  stroke: var(--blaktail-sand-300);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.topology-line-resource {
+  stroke: var(--blaktail-wattle-400);
+  stroke-dasharray: 4 3;
+}
+
+.topology-graph a:focus-visible .topology-dot {
+  stroke: var(--blaktail-sand-100);
+  stroke-width: 3;
+}

@@ -28,6 +28,16 @@ authorisation.
   pairing and whether the destination device actually enforces the result
 - `/posture` — versioned posture checks (owner/admin write) and each
   device's current assessment; self-reported data is labelled as such
+- `/topology` — who can reach what in the selected organisation: devices
+  (online, stale, suspended, expired, agent-reported transport with its
+  timestamp or "not measured"), network resources and routing peers, approved
+  routes, and every effective path with a text explanation and a link to the
+  page that owns it. Searchable and filterable; an optional static graph
+  groups devices by tag. See [Topology and change drafts](#topology-and-change-drafts).
+- `/changes` — server-side change drafts: stage access policy, network
+  resource and DNS changes together, preview the diff and reachability change,
+  and publish them atomically (owner, admin and network admin; members and
+  auditors see summaries)
 - `/dns` — organisation DNS workspace: effective settings, nameserver groups,
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
 - `/services` — private service names, target device, access tags, status and
@@ -37,6 +47,43 @@ authorisation.
 - `/settings` — separate **Network accounts** and **Ways to sign in**, secure
   login linking/unlinking, owner conflict decisions, invitations, and account details
 - `/invite?token=…` — one-use invitation acceptance; public account creation remains disabled
+
+## Topology and change drafts
+
+`GET /v1/orgs/{org}/topology` (any member) is a read model, not a second
+policy engine: device-to-device paths come from the same evaluator and
+peer-map compiler that agents receive (`policy_explain::device_flow`), and
+resource paths from the network-resource distribution. Suspended and expired
+devices have no paths. Path type combines the two endpoints' own transport
+summaries; it is not a per-pair measurement, reports older than ten minutes
+show as not measured, and nothing is sent to external analytics. Pairwise
+evaluation stops at 400 active devices and says so.
+
+A change draft (`/v1/orgs/{org}/changes`) is bound to one organisation,
+versioned, and expires after seven days. It stores proposed documents for any
+of access policy, DNS and network resources (the full desired resource list),
+plus the live etag of each surface when it was created. Creating, editing,
+previewing, rebasing, discarding and publishing need the permission of every
+surface the draft touches (`manage_policy`, `manage_dns`,
+`manage_networks`); other roles get summaries without payloads. Keys that look
+like credentials are refused.
+
+Preview and publish run the same code: every surface is applied with the
+ordinary validators and writers on one database transaction, which preview
+rolls back and publish commits. Publish therefore applies all surfaces or
+none, bumps the control revision once, and records `change_draft.published`
+with the draft id and before/after revisions (plus `acl.updated`,
+`dns.updated` and per-resource entries). If any surface changed since the
+draft's base, publish returns 409 and the draft must be rebased; editing with
+a stale draft version returns 412. Risk flags (deny rules removed, defaults
+widened, default-route exposure, nested route overlap, deleted resources,
+paths opened or closed, DNS warnings) must each be confirmed. Last-owner
+lockout does not apply: these surfaces cannot remove console access.
+
+Limits: agents still pick up the published state on their next poll, so
+devices converge over seconds rather than at one instant; the console shows
+the previous document as the one-step rollback for policy and DNS, but there
+is no multi-surface undo yet; reachability is address-family neutral.
 
 ## First owner and invitations
 

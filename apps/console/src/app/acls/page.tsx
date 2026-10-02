@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { AclEditor } from "@/components/acl-editor";
 import { ConsoleShell } from "@/components/console-shell";
 import { ExplainAccessPanel } from "@/components/explain-access-panel";
@@ -5,6 +6,7 @@ import { PageHeader } from "@/components/page-header";
 import { getAcl, listNodes } from "@/lib/coord";
 import { listPostureChecks } from "@/lib/coord-policy";
 import { listMemberships } from "@/lib/oidc";
+import { roleLabel } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 export default async function AclsPage() {
@@ -40,10 +42,16 @@ export default async function AclsPage() {
     <ConsoleShell ctx={ctx} current="/acls">
       <div className="stack">
         <PageHeader
+          eyebrow={ctx.organisationName}
           title="Access"
           description="New organisations start deny-all. Existing documents keep the visible same-tag legacy default until you switch them to deny."
         />
         <div className="panel stack">
+          <p className="muted">
+            <span className="badge network">{ctx.organisationName}</span> {roleLabel(ctx.role)} ·
+            See the effect on <Link href="/topology">Topology</Link>, or stage this with route and
+            DNS changes in a <Link href="/changes">change draft</Link>.
+          </p>
           {error ? <p className="error">{error}</p> : null}
           <AclEditor
             initialAcl={initialAcl}

@@ -290,6 +290,30 @@ export default async function DeviceDetailPage({
             Which peers can reach this device is decided by tags and the{" "}
             <Link href="/acls">access policy</Link> for {ctx.organisationName}.
           </p>
+          <nav aria-label="Related pages for this device">
+            <ul className="audit-details">
+              <li>
+                <Link href={`/topology?node=${node.id}&organisation=${ctx.organisationId}`}>
+                  Who this device can reach, and who can reach it
+                </Link>{" "}
+                <span className="muted">(effective paths in {ctx.organisationName})</span>
+              </li>
+              <li>
+                <Link href="/networks">Network resources and routing peers</Link>
+              </li>
+              <li>
+                <Link href="/dns">DNS</Link>{" "}
+                <span className="muted">(MagicDNS name {node.dns_name || "not assigned"})</span>
+              </li>
+              <li>
+                <Link href="/changes">Stage policy, route and DNS changes together</Link>
+              </li>
+            </ul>
+            <p className="muted">
+              Networks, DNS, access policy and change drafts open for the organisation selected in
+              the switcher; make sure it is {ctx.organisationName}.
+            </p>
+          </nav>
         </section>
 
         <PeerLifecycle
