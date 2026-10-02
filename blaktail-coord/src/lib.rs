@@ -1,5 +1,6 @@
 mod admin;
 pub mod connectors;
+mod dns_workspace;
 pub mod flows;
 pub mod https_fallback;
 pub mod https_services;
@@ -8,6 +9,7 @@ mod metrics;
 mod org_dns;
 mod peer_lifecycle;
 mod permissions;
+mod private_services;
 mod resources;
 mod shares;
 pub mod tailnet_lock;
@@ -273,7 +275,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 23,
-        name: "DNS zones and nameserver groups",
+        name: "DNS revision history",
         postgres_sql: include_str!("../migrations/postgres/0023_dns_zones.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0023_dns_zones.sql")),
     },
@@ -1413,6 +1415,8 @@ pub fn app_with_relays_console_and_metrics(
         .merge(peer_lifecycle::routes())
         .merge(resources::routes())
         .merge(admin::api_routes())
+        .merge(dns_workspace::routes())
+        .merge(private_services::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -3259,9 +3263,10 @@ async fn list_peers(
         assigned_ips.retain(|address| !address.contains(':'));
     }
     let (relay_token, relay_expires_at) = relay_credentials(&s, node_id);
-    let dns = org_dns::parse_settings(&org_dns_json)
-        .ok()
-        .map(|settings| settings.agent_view(&org, org_dns_revision));
+    let dns = org_dns::parse_settings(&org_dns_json).ok().map(|settings| {
+        let device_tags: Vec<String> = serde_json::from_str(&source_tags).unwrap_or_default();
+        settings.agent_view(&org, org_dns_revision, &device_tags)
+    });
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
@@ -4196,9 +4201,7 @@ async fn put_dns(
     Json(value): Json<serde_json::Value>,
 ) -> Result<Json<org_dns::OrgDnsResponse>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    permissions::require(&session, permissions::Permission::ManageDns)?;
     let mut tx = s.store.pool.begin().await?;
     let current = load_org_dns_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
@@ -4212,11 +4215,15 @@ async fn put_dns(
             return Err(ApiError::PreconditionFailed);
         }
     }
-    let rollback = value
-        .get("rollback")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let next = if rollback {
+    let rollback_to = value.get("rollback_to").and_then(|value| value.as_i64());
+    let rollback = rollback_to.is_some()
+        || value
+            .get("rollback")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    let next = if let Some(revision) = rollback_to {
+        dns_workspace::load_revision_tx(&mut tx, org_id, revision).await?
+    } else if rollback {
         load_previous_dns_tx(&mut tx, org_id).await?
     } else {
         let settings = value.get("dns").cloned().unwrap_or(value);
@@ -4239,6 +4246,9 @@ async fn put_dns(
             "managed": next.managed,
             "split": next.split.len(),
             "records": next.records.len(),
+            "nameserver_groups": next.nameserver_groups.len(),
+            "zones": next.zones.len(),
+            "rollback_to": rollback_to,
         }),
     )
     .await?;
@@ -4273,6 +4283,8 @@ pub(crate) async fn load_org_dns(
     let (applied, enrolled) = shares::dns_applied_counts(store, org_id, response.revision).await?;
     response.applied = applied;
     response.enrolled = enrolled;
+    let route_warnings = dns_workspace::route_warnings(store, org_id, &response.dns).await?;
+    response.warnings.extend(route_warnings);
     Ok(response)
 }
 
@@ -4311,7 +4323,9 @@ fn org_dns_from_row(
 ) -> Result<org_dns::OrgDnsResponse, ApiError> {
     let dns = org_dns::parse_settings(&dns_json).unwrap_or_else(|_| org_dns::default_settings());
     let record_preview = dns.record_preview();
+    let warnings = dns.warnings();
     Ok(org_dns::OrgDnsResponse {
+        warnings,
         revision,
         etag: hash(&format!("{revision}:{dns_json}")),
         has_previous: previous.as_deref().is_some_and(|value| !value.is_empty()),
@@ -4343,6 +4357,7 @@ pub(crate) async fn publish_org_dns(
     if changed == 0 {
         return Err(ApiError::NotFound);
     }
+    dns_workspace::record_revision(tx, org_id, current.revision + 1, &next_json).await?;
     bump_control_revision(tx, org_id.to_string()).await?;
     Ok(())
 }

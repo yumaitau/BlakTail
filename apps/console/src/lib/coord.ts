@@ -138,7 +138,7 @@ function coordBaseUrl(): string {
   return url.replace(/\/$/, "");
 }
 
-async function coordFetch(
+export async function coordFetch(
   path: string,
   init: RequestInit & { ctx?: ConsoleContext } = {},
 ): Promise<Response> {
@@ -157,7 +157,7 @@ async function coordFetch(
   });
 }
 
-async function readError(res: Response): Promise<string> {
+export async function readError(res: Response): Promise<string> {
   try {
     const body = (await res.json()) as { error?: string };
     if (body.error) return body.error;
@@ -585,6 +585,32 @@ export type OrgDnsSettings = {
   split: { suffix: string; resolvers: string[] }[];
   search_domains: string[];
   records: { name: string; type: "A" | "AAAA"; value: string }[];
+  nameserver_groups?: NameserverGroup[];
+  zones?: DnsZone[];
+};
+
+export type NameserverGroup = {
+  name: string;
+  resolvers: string[];
+  match_domains: string[];
+  enabled: boolean;
+  all_devices: boolean;
+  tags: DeviceTag[];
+};
+
+export type ZoneRecordType = "A" | "AAAA" | "CNAME" | "TXT";
+
+export type ZoneRecord = {
+  name: string;
+  type: ZoneRecordType;
+  value: string;
+  ttl?: number;
+};
+
+export type DnsZone = {
+  name: string;
+  enabled: boolean;
+  records: ZoneRecord[];
 };
 
 export type OrgDnsResponse = {
@@ -596,32 +622,13 @@ export type OrgDnsResponse = {
   record_preview?: { name: string; split_suffix: string | null }[];
   applied?: number;
   enrolled?: number;
+  warnings?: string[];
 };
 
 export async function getDns(ctx: ConsoleContext): Promise<OrgDnsResponse> {
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/dns`, {
     method: "GET",
     ctx,
-  });
-  if (!res.ok) {
-    throw new Error(await readError(res));
-  }
-  return res.json() as Promise<OrgDnsResponse>;
-}
-
-export async function putDns(
-  ctx: ConsoleContext,
-  body: { dns?: OrgDnsSettings; rollback?: boolean },
-  etag: string,
-): Promise<OrgDnsResponse> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot publish DNS settings.");
-  }
-  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/dns`, {
-    method: "PUT",
-    ctx,
-    headers: { "If-Match": etag },
-    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(await readError(res));

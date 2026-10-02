@@ -24,6 +24,10 @@ authorisation.
   shown once; inventory with creator, uses left, last use, expiry and revoke;
   install steps per platform that never contain the secret
 - `/acls` — people groups and access rules (owner/admin write)
+- `/dns` — organisation DNS workspace: effective settings, nameserver groups,
+  custom zones, split DNS, split-match preview and revision history (owner/admin write)
+- `/services` — private service names, target device, access tags, status and
+  the organisation service CA (owner/admin write)
 - `/audit` — latest actor-attributed security and administration changes
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics
 - `/settings` — separate **Network accounts** and **Ways to sign in**, secure
@@ -191,11 +195,34 @@ failover metric, chooses which roles, tags or policy groups receive each route,
 and shows routing-peer health and effective distribution per device. Members can
 read it; owners and admins change it. See [network-resources.md](network-resources.md).
 
-Settings can publish organisation DNS: split suffixes, upstream resolvers, search
-domains, and extra A/AAAA records. Members are read-only. MagicDNS names stay
-coordinator-authoritative and cannot be impersonated from this form. The page
-shows which extra records match a split suffix and how many enrolled devices have
-applied the current revision.
+
+`/dns` publishes organisation DNS (Settings now links there). The page shows the
+published revision, how many enrolled devices have applied it, whether DNS is
+managed, the protected MagicDNS suffix and coordinator warnings (for example
+loopback or link-local record targets). Owners and admins edit nameserver groups
+(ordered resolvers, match domains, enabled, all devices or office/ranger/store
+tags), custom zones with A/AAAA/CNAME/TXT records and TTLs, and the original
+split suffixes, search domains and extra A/AAAA records. An Advanced JSON editor
+covers the whole document. **Check** asks the coordinator to validate and
+canonicalise the draft without publishing; **Publish DNS** sends it with the
+current etag, and a stale etag shows "Someone else published a newer revision;
+reload". The split-match preview answers which source handles a name for a chosen
+device or tag set (MagicDNS, zone, forwarded group or split route, or not
+handled). Revision history lists revisions recorded since this workspace shipped,
+compares any of them with the current document as a line diff, and restores one
+as a new revision; one-step rollback still covers the latest earlier revision.
+Members can read everything and use preview but cannot publish. Agents older than
+this release answer only zone A/AAAA records.
+
+`/services` lists private services under the organisation's
+`svc.<org-prefix>.blaktail` namespace, separate from device MagicDNS names. Owners
+and admins preview a name (full name, collisions, warnings) before creating it,
+choose the target device, local port and protocol, and the device tags allowed to
+use it, and can disable or delete it (certificates are revoked). Status is honest:
+no serving-agent listener ships yet, so services show "Awaiting serving agent" (or
+"Certificate issued, not verified") and are never presented as reachable or
+published in DNS. The organisation service CA certificate and fingerprint can be
+viewed and downloaded; trusting it on clients is manual.
 
 Device details list overlay file shares published by `blaktaild share enable`.
 The coordinator stores the path and label only; file bytes never leave the node
