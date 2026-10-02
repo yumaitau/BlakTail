@@ -8,12 +8,21 @@ import {
   listWebhookDeliveriesAction,
   replayWebhookDeliveryAction,
 } from "@/app/actions";
+import { setWebhookSubscriptionsAction } from "@/app/settings/actions";
 import type { WebhookDelivery, WebhookDestination } from "@/lib/coord";
+import type { EventKind } from "@/lib/coord-events";
+
+function subscriptionSummary(eventTypes: string[] | undefined): string {
+  if (!eventTypes || eventTypes.includes("*")) return "All events";
+  return eventTypes.join(", ");
+}
 
 export function WebhookManager({
   destinations,
+  catalogue,
 }: {
   destinations: WebhookDestination[];
+  catalogue: EventKind[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -21,15 +30,20 @@ export function WebhookManager({
   const [shownOnce, setShownOnce] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editing = destinations.find((destination) => destination.id === editingId);
 
   return (
     <div className="panel stack">
       <div>
         <h2>Webhook destinations</h2>
         <p className="muted">
-          HTTPS endpoints that receive signed policy and DNS events. The
-          signing secret is shown once and stored sealed. Production rejects
-          loopback, private, and metadata targets.
+          HTTPS endpoints that receive signed events from the catalogue below.
+          The signing secret is shown once and stored sealed. Loopback,
+          private, overlay and cloud metadata targets are rejected. Webhooks
+          are the only delivery channel: BlakTail does not send email or
+          Slack alerts. Delivery is best effort with bounded retries — not a
+          safety control.
         </p>
       </div>
       <form
@@ -83,6 +97,7 @@ export function WebhookManager({
                 <th>Name</th>
                 <th>URL</th>
                 <th>Prefix</th>
+                <th>Events</th>
                 <th>State</th>
                 <th />
               </tr>
@@ -93,6 +108,7 @@ export function WebhookManager({
                   <td>{destination.name}</td>
                   <td className="mono">{destination.url}</td>
                   <td className="mono">{destination.secret_prefix}</td>
+                  <td>{subscriptionSummary(destination.event_types)}</td>
                   <td>
                     <span
                       className={
@@ -133,6 +149,18 @@ export function WebhookManager({
                     {destination.enabled ? (
                       <button
                         type="button"
+                        className="secondary"
+                        disabled={pending}
+                        onClick={() =>
+                          setEditingId(editingId === destination.id ? null : destination.id)
+                        }
+                      >
+                        {editingId === destination.id ? "Close events" : "Choose events"}
+                      </button>
+                    ) : null}
+                    {destination.enabled ? (
+                      <button
+                        type="button"
                         className="danger"
                         disabled={pending}
                         onClick={() => {
@@ -158,6 +186,64 @@ export function WebhookManager({
           </table>
         </div>
       ) : null}
+      {editing ? (
+        <form
+          className="stack"
+          aria-label={`Events sent to ${editing.name}`}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            form.set("destinationId", editing.id);
+            setError(null);
+            startTransition(async () => {
+              const result = await setWebhookSubscriptionsAction(form);
+              if (!result.ok) {
+                setError(result.error);
+                return;
+              }
+              setEditingId(null);
+              router.refresh();
+            });
+          }}
+        >
+          <h3>Events sent to {editing.name}</h3>
+          <label className="row">
+            <input
+              type="checkbox"
+              name="all"
+              defaultChecked={!editing.event_types || editing.event_types.includes("*")}
+            />
+            All events, including types added in later releases
+          </label>
+          {catalogue.length === 0 ? (
+            <p className="muted">The event catalogue could not be loaded.</p>
+          ) : (
+            <fieldset>
+              <legend>Or only these events</legend>
+              {catalogue.map((kind) => (
+                <label key={kind.event_type} className="row">
+                  <input
+                    type="checkbox"
+                    name="event_types"
+                    value={kind.event_type}
+                    defaultChecked={editing.event_types?.includes(kind.event_type)}
+                  />
+                  <span className="mono">{kind.event_type}</span>
+                  <span className={kind.severity === "warning" ? "badge warn" : "badge"}>
+                    {kind.severity}
+                  </span>
+                  <span className="muted">{kind.summary}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
+          <div>
+            <button type="submit" disabled={pending}>
+              {pending ? "Saving…" : "Save events"}
+            </button>
+          </div>
+        </form>
+      ) : null}
       {openId && deliveries.length ? (
         <div className="table-wrap">
           <table className="table">
@@ -178,7 +264,7 @@ export function WebhookManager({
                     {delivery.delivered_at
                       ? "Delivered"
                       : delivery.dead_lettered_at
-                        ? "Dead-lettered"
+                        ? `Dead-lettered${delivery.last_error ? `: ${delivery.last_error}` : ""}`
                         : delivery.last_error ?? "Pending"}
                   </td>
                   <td>

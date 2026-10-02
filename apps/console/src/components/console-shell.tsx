@@ -31,7 +31,10 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
   { label: "Services", links: [{ href: "/services", label: "Private services" }] },
   {
     label: "Events",
-    links: [{ href: "/audit", label: "Audit log" }],
+    links: [
+      { href: "/audit", label: "Audit log" },
+      { href: "/traffic", label: "Traffic" },
+    ],
   },
   {
     label: "Settings",

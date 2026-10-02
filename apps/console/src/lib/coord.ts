@@ -75,6 +75,8 @@ export type WebhookDestination = {
   secret_prefix: string;
   enabled: boolean;
   created_at: number;
+  /** Catalogued event types, or ["*"] for every event. */
+  event_types?: string[];
   secret?: string | null;
 };
 
@@ -417,22 +419,28 @@ export async function listWebhookDeliveries(
 
 export async function emitMembershipUpdated(
   ctx: ConsoleContext,
-  payload: { membership_id: string; role: string; status: string },
+  payload: { membership_id: string; role: string; status: string; previous_role?: string },
 ): Promise<void> {
   if (!can(ctx.role, "manage_security")) {
     return;
   }
+  const events = ["membership.updated"];
+  if (payload.previous_role && payload.previous_role !== payload.role) {
+    events.push("membership.role_changed");
+  }
   try {
-    const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks/events`, {
-      method: "POST",
-      ctx,
-      body: JSON.stringify({
-        event_type: "membership.updated",
-        payload,
-      }),
-    });
-    if (!res.ok) {
-      console.warn(`membership webhook enqueue failed: ${await readError(res)}`);
+    for (const eventType of events) {
+      const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks/events`, {
+        method: "POST",
+        ctx,
+        body: JSON.stringify({
+          event_type: eventType,
+          payload,
+        }),
+      });
+      if (!res.ok) {
+        console.warn(`membership webhook enqueue failed: ${await readError(res)}`);
+      }
     }
   } catch (error) {
     console.warn(

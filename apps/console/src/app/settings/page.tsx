@@ -9,6 +9,7 @@ import { ScimManager } from "@/components/scim-manager";
 import { PageHeader } from "@/components/page-header";
 import { WebhookManager } from "@/components/webhook-manager";
 import { listApiClients, listWebhooks } from "@/lib/coord";
+import { listEventCatalogue } from "@/lib/coord-events";
 import { listPendingInvitations } from "@/lib/invitations";
 import { listIdentitySettings } from "@/lib/identity-links";
 import { listIdentityProviders, listMemberships } from "@/lib/oidc";
@@ -30,6 +31,7 @@ export default async function SettingsPage() {
     identitySettings,
     apiClients,
     webhooks,
+    catalogue,
     providers,
     memberships,
     signInPolicy,
@@ -40,6 +42,7 @@ export default async function SettingsPage() {
     listIdentitySettings(ctx),
     canApiClients ? listApiClients(ctx).catch(() => []) : Promise.resolve([]),
     canIntegrations ? listWebhooks(ctx).catch(() => []) : Promise.resolve([]),
+    canIntegrations ? listEventCatalogue(ctx).catch(() => []) : Promise.resolve([]),
     canSecurity
       ? listIdentityProviders(ctx.organisationId)
       : Promise.resolve([]),
@@ -160,7 +163,7 @@ export default async function SettingsPage() {
         </div>
         {canIntegrations ? (
           <div id="webhooks">
-            <WebhookManager destinations={webhooks} />
+            <WebhookManager destinations={webhooks} catalogue={catalogue} />
           </div>
         ) : null}
         {canApiClients ? (

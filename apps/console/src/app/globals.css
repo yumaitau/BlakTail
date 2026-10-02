@@ -1393,3 +1393,10 @@ button.quiet-danger:hover:not(:disabled),
 .dns-diff-removed {
   color: var(--destructive);
 }
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+}
