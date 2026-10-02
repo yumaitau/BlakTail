@@ -272,7 +272,9 @@ function ExplainResultView({ result }: { result: ExplainResult }) {
               : "badge pending"
           }
         >
-          Device: {ENFORCEMENT[result.enforcement.state]}
+          {result.dst_host
+            ? `Routing peer: ${result.enforcement.state === "device_enforced" ? "forwarding enforced" : result.enforcement.state === "peer_map" ? "no route distributed" : "forwarding not enforced — upgrade agent"}`
+            : `Device: ${ENFORCEMENT[result.enforcement.state]}`}
         </span>
       </div>
       <dl className="details">

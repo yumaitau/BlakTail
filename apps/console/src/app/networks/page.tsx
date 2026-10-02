@@ -86,7 +86,14 @@ export default async function NetworksPage() {
                         <td>
                           <span className={`badge ${state.badge}`}>{state.label}</span>
                         </td>
-                        <td>{peerName(resource.status.selected_routing_peer)}</td>
+                        <td>
+                          {peerName(resource.status.selected_routing_peer)}
+                          {resource.status.forwarding === "not_enforced" ? (
+                            <div>
+                              <span className="badge offline">Forwarding not enforced — upgrade agent</span>
+                            </div>
+                          ) : null}
+                        </td>
                         <td>
                           {resource.status.clients.filter((client) => client.receives).length}
                         </td>
@@ -121,6 +128,7 @@ export default async function NetworksPage() {
                     <th>Advertised</th>
                     <th>Approved on device</th>
                     <th>Not approved</th>
+                    <th>Forwarding</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -138,6 +146,15 @@ export default async function NetworksPage() {
                       <td className="mono">{device.advertised_routes.join(", ") || "None"}</td>
                       <td className="mono">{device.approved_routes.join(", ") || "None"}</td>
                       <td className="mono">{device.unapproved_routes.join(", ") || "None"}</td>
+                      <td>
+                        {device.forwarding === "enforced" ? (
+                          <span className="badge online">Enforced</span>
+                        ) : (
+                          <span className="badge offline" title={device.forwarding_detail}>
+                            Not enforced — upgrade agent
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

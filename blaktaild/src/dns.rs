@@ -1291,6 +1291,7 @@ mod tests {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            forward_filter: None,
         }
     }
 

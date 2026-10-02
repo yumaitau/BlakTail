@@ -77,10 +77,32 @@ Rerunning `up` resumes the existing enrollment; no join key is needed. Use
 withdraw all advertisements. When changing routes, pass the complete desired
 list; the new list replaces the previous one.
 
-On a router, BlakTail enables `net.ipv4.ip_forward`, installs destination-limited
-`FORWARD` rules, and masquerades tailnet sources leaving non-BlakTail interfaces.
-`down` removes those exact rules and restores forwarding when BlakTail originally
-enabled it. On an exit client, policy routing preserves local/subnet routes and
+On a router, BlakTail enables `net.ipv4.ip_forward`, filters what it forwards,
+and masquerades tailnet sources leaving non-BlakTail interfaces. `down` and
+`pause` remove those exact rules and restore forwarding when BlakTail originally
+enabled it.
+
+### Forward filter
+
+The agent reports the `forward-filter` capability. When the coordinator answers
+with a `forward_filter` allow-list, forwarded overlay traffic goes through the
+`BLAKTAIL-FWD` chain (jumped to from `FORWARD -i blaktail0`, comment
+`blaktail-forward`) in both `iptables` and `ip6tables`:
+
+1. established and related flows;
+2. every deny entry (`REJECT`), for example a policy host carve-out;
+3. every allow entry: `-s <client overlay address> -d <prefix>`, limited to the
+   entry's TCP/UDP ports or ICMP, IPv4 and IPv6 rules split by family;
+4. reject everything else (default deny, including anything not advertised).
+
+Each update builds `BLAKTAIL-FWD-NEW`, jumps to it at `FORWARD` position 1,
+removes the old jump and chain, then renames the new chain, so there is never a
+moment with no filter; if any command fails the previous chain stays in force
+and the error is logged. Reapplying the same list is a no-op in effect. The
+last list is kept in `state.json` and reinstalled before routing restarts. When
+the coordinator predates forward filtering (no `forward_filter` field), the
+agent keeps the legacy per-route `ACCEPT` rules. Inspect with
+`sudo iptables -S BLAKTAIL-FWD`. On an exit client, policy routing preserves local/subnet routes and
 WireGuard's marked transport packets while sending the remaining IPv4 default
 through the selected peer. Existing conflicting kernel routes fail closed instead
 of being overwritten. macOS peers can consume approved private subnet routes, but

@@ -32,6 +32,41 @@ A device receives a resource prefix only when all of these hold:
 The detail page lists every active device with the reason it does or does not
 receive the route.
 
+## Router forwarding enforcement
+
+Receiving a route is not the security boundary: a modified client paired with
+a routing peer could send to any destination behind it. Routing peers whose
+agent reports the `forward-filter` capability (Linux `blaktaild` from this
+release) therefore get a **forward allow-list** in their own peer map and
+reject every other packet they would forward from the overlay:
+
+- one entry per authorised client, from that client's overlay addresses to
+  each prefix it receives through this router (exactly the rules above);
+- the resource's ports and protocols on that entry: none means everything,
+  ports without protocols mean TCP and UDP, ICMP takes no ports;
+- routes approved on the device (not resources) keep their behaviour: every
+  client policy lets reach the router may use the whole prefix;
+- policy `hosts` inside a prefix the client receives: matching `deny` rules
+  become carve-outs that win over everything, and matching `allow` rules add
+  their ports for that host;
+- `0.0.0.0/0` only for clients that currently select this router as their exit
+  node, and those clients are explicitly denied the router's other subnets
+  they were not given.
+
+The coordinator recompiles the list on every control revision (resource,
+policy, device or capability change, or a client changing its exit node).
+Exit-node selections are held in coordinator memory: after a coordinator
+restart, or behind a second coordinator replica, an exit client is denied
+until its next poll (at most ~25 seconds), never wrongly allowed.
+
+Routing peers that do **not** report `forward-filter` still receive and
+distribute routes, so upgrades never cut off a site, but the risk is shown:
+the resource's `port_enforcement` and `status.forwarding` are `not_enforced`,
+each routing peer and each device route row carries
+`forwarding: not_enforced`, the console shows **Forwarding not enforced —
+upgrade agent**, and policy explain reports `not_enforced` for named hosts
+behind that router. Upgrade the routing peer's agent to close it.
+
 ## Routing peers, metric and failover
 
 Each routing peer has a metric (1–9999, default 100). Clients use the online
@@ -62,11 +97,11 @@ Admins and automation clients cannot confirm them.
 
 ## Current limits
 
-- **Ports and protocols are recorded, not enforced.** The Linux routing peer
-  forwards the whole advertised subnet, and its firewall filters only traffic
-  addressed to the peer itself. A modified client that policy lets reach the
-  routing peer could still send traffic to the subnet. Restrict services with
-  access policy on destination devices or the site firewall.
+- **Older routing peers forward everything.** Without `forward-filter` the
+  routing peer forwards the whole advertised subnet to any paired client (see
+  [Router forwarding enforcement](#router-forwarding-enforcement)). Enforcement
+  depends on the source overlay address, which WireGuard binds to each peer's
+  key; it does not inspect application traffic.
 - **Masquerade is always on.** `blaktaild` masquerades overlay sources on the
   routing peer; forwarding without NAT is not supported, so the console shows
   it as fixed rather than offering a toggle.

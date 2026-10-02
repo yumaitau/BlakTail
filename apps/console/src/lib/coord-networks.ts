@@ -15,6 +15,9 @@ export type ResourceAccess = {
 
 export type RoutingPeer = { node_id: string; metric: number };
 
+/** Whether a routing peer filters what it forwards (`forward-filter`). */
+export type ForwardingState = "enforced" | "not_enforced";
+
 export type RoutingPeerState =
   | "primary"
   | "standby"
@@ -41,7 +44,7 @@ export type NetworkResource = {
   dns_resolution: "not_resolved" | null;
   ports: string[];
   protocols: ResourceProtocol[];
-  port_enforcement: "not_enforced";
+  port_enforcement: ForwardingState;
   routing_peers: RoutingPeer[];
   access: ResourceAccess;
   enabled: boolean;
@@ -55,6 +58,8 @@ export type NetworkResource = {
   status: {
     state: ResourceState;
     selected_routing_peer: string | null;
+    forwarding: ForwardingState | "no_routing_peer";
+    forwarding_detail: string;
     routing_peers: {
       node_id: string;
       name: string | null;
@@ -63,6 +68,7 @@ export type NetworkResource = {
       online: boolean;
       last_seen_at: number | null;
       covering_route: string | null;
+      forwarding: ForwardingState;
     }[];
     clients: {
       node_id: string;
@@ -83,6 +89,8 @@ export type DeviceRoutes = {
   advertised_routes: string[];
   approved_routes: string[];
   unapproved_routes: string[];
+  forwarding: ForwardingState;
+  forwarding_detail: string;
 };
 
 export type NetworksOverview = {
