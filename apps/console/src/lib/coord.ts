@@ -27,6 +27,7 @@ export type CoordNode = {
   expired: boolean;
   expires_soon: boolean;
   revoked: boolean;
+  suspended?: boolean;
   deleted?: boolean;
   online?: boolean;
   last_seen_at?: number | null;

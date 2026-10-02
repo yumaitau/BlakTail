@@ -17,3 +17,40 @@ NetBird setup keys offer reusable/one-off enrollment, expiry, auto-groups and ep
 Two concurrent enroll attempts against a one-use key yield one node; revoked/expired key cannot enroll, including restart. Wrong-org key fails. CLI, console and mobile flows expose no secret in process argv or browser analytics. Fresh-host install/enroll/restart drill validates claimed platforms; until release exists, UI says build from source.
 
 **Evidence:** `apps/console/src/app/join-keys/page.tsx`, `docs/getting-started.md`, `docs/releases.md`; https://docs.netbird.io/manage/peers/register-machines-using-setup-keys, https://docs.netbird.io/manage/peers/approve-peers.
+
+## Status (2 October 2026)
+
+**Done:**
+- Join-key schema (slot 25) adds `name`, `description`, `max_uses`, `use_count` and `last_used_at`. Existing one-use keys are backfilled to `max_uses=1`, and used keys to `use_count=1`.
+- Mint (`POST /v1/orgs/{org}/join-keys`) takes a name, description, expiry, tags, and either one-use or reusable with optional `max_uses` (1..10000). Tag ownership is still checked.
+- Inventory `GET` and revoke `DELETE /v1/orgs/{org}/join-keys/{id}` live in `blaktail-coord/src/peer_lifecycle.rs` (ManageJoinKeys; revoke is audited as `join_key.revoked`). The inventory never returns the secret or its hash, and leaves out browser-approval grants.
+- Concurrency: every enrolment and reauth consumes one use through a single conditional `UPDATE ... WHERE revoked_at IS NULL AND expires_at>now AND use_count<max_uses` inside the registration transaction. Neither backend can overspend a key, and a failed node insert rolls the use back.
+- Wrong-org: a key only ever enrols into its own organisation, and reauth requires the key's org to match the node's (`k.org_id=$2`).
+- Secret handling:
+  - Verified that only `SHA-256(secret)` is stored (`key_hash`).
+  - `blaktaild` previously accepted `--join-key` on argv. That argument is removed; keys now come only from stdin or `BLAKTAIL_JOIN_KEY`.
+  - The macOS app already used stdin, and the iPhone app registers itself.
+- Console `/join-keys` enrolment workspace:
+  - Mint form, and a show-once secret with copy and hide.
+  - Inventory showing name, description, creator, one-use or reusable, uses and uses left, expiry, tags, last use, and revoked/expired/used-up state, with revoke behind a confirmation.
+  - Linux and macOS install steps; the key itself fixes the network. The steps read the key with `read -rs` and pipe it on stdin, so it never appears in argv, history, URLs or QR codes.
+  - Labelled "build from source" because no signed release exists. iPhone points at in-app enrolment.
+
+**Proven by tests:**
+- `one_use_and_reusable_keys_hold_their_limits_under_concurrency`:
+  - Two concurrent enrolments on a one-use key create exactly one node.
+  - Eight concurrent enrolments on a `max_uses=3` key create exactly three.
+  - The inventory counts and `used_up` state are correct, and the output contains no secret or hash.
+- `key_validation_revocation_member_and_wrong_org`: input validation; member 403 on mint, list and revoke; wrong-org revoke 404; revoked key rejected; no cross-org listing.
+- `revoked_and_expired_keys_stay_rejected_after_restart`: file-backed SQLite is reopened, and the stored value is the hash only.
+- Agent: `join_key_is_never_a_command_line_argument`.
+- The existing env-gated Postgres replica test still covers cross-replica single-use races. The new reusable-limit race runs on SQLite only, where the pool has a single connection, so requests are serialised.
+
+**Still needs live/field proof or a decision:**
+- A Postgres run of the reusable-key race.
+- **Not done:** "require device approval for key enrolments". It needs a pending-approval node state and an approval UI, and must not be folded into suspend, because a pending device has never been trusted.
+- Ephemeral-by-key policy.
+- A per-key enrolment history view.
+- MDM profiles.
+- A signed installer and the fresh-host install/enrol/restart drill.
+- Separate labels for service-account, user-linked and server peers; they stay as they are today.

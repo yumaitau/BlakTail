@@ -6,6 +6,7 @@ pub mod https_services;
 pub mod ipam;
 mod metrics;
 mod org_dns;
+mod peer_lifecycle;
 mod permissions;
 mod shares;
 pub mod tailnet_lock;
@@ -1408,6 +1409,7 @@ pub fn app_with_relays_console_and_metrics(
             "/v1/orgs/:org_id/webhooks/deliveries/:delivery_id/replay",
             post(webhooks::replay_delivery_console),
         )
+        .merge(peer_lifecycle::routes())
         .merge(admin::api_routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
@@ -1541,6 +1543,8 @@ pub(crate) enum ApiError {
     CredentialExpired,
     #[error("permission denied")]
     Forbidden,
+    #[error("node is suspended by an organisation administrator")]
+    Suspended,
     #[error("resource not found")]
     NotFound,
     #[error("device authorization expired; run blaktaild up again")]
@@ -1564,7 +1568,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::CredentialExpired => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::Suspended => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Gone => StatusCode::GONE,
             Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
@@ -1577,6 +1581,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized | Self::CredentialExpired => "unauthorized",
             Self::Forbidden => "forbidden",
+            Self::Suspended => "suspended",
             Self::NotFound => "not_found",
             Self::Gone => "gone",
             Self::PreconditionFailed => "precondition_failed",
@@ -2332,6 +2337,13 @@ struct MintJoinKey {
     single_use: bool,
     #[serde(default)]
     tags: Vec<DeviceTag>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    /// Reusable keys only; omitted means unlimited until expiry or revoke.
+    #[serde(default)]
+    max_uses: Option<i64>,
 }
 fn default_expiry() -> i64 {
     3600
@@ -2345,6 +2357,10 @@ struct JoinKeyResponse {
     key: String,
     expires_at: i64,
     single_use: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    max_uses: Option<i64>,
 }
 async fn mint_join_key(
     State(s): State<AppState>,
@@ -2353,9 +2369,13 @@ async fn mint_join_key(
     Json(input): Json<MintJoinKey>,
 ) -> Result<(StatusCode, Json<JoinKeyResponse>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    permissions::require(&session, permissions::Permission::ManageJoinKeys)?;
+    let metadata = peer_lifecycle::JoinKeyMetadata::validate(
+        &input.name,
+        &input.description,
+        input.single_use,
+        input.max_uses,
+    )?;
     if !(1..=2_592_000).contains(&input.expires_in_seconds) {
         return Err(ApiError::BadRequest(
             "expires_in_seconds must be between 1 and 2592000".into(),
@@ -2368,7 +2388,7 @@ async fn mint_join_key(
     let acl = load_org_acl(&s.store, org_id).await?;
     authorize_tag_assignment(&acl, &session, &tags)?;
     let mut tx = s.store.pool.begin().await?;
-    let changed = sqlx::query("INSERT INTO join_keys(id,org_id,key_hash,expires_at,single_use,created_at,user_id,user_role,tags_json) SELECT $1,id,$2,$3,$4,$5,$6,$7,$8 FROM orgs WHERE id=$9")
+    let changed = sqlx::query("INSERT INTO join_keys(id,org_id,key_hash,expires_at,single_use,created_at,user_id,user_role,tags_json,name,description,max_uses) SELECT $1,id,$2,$3,$4,$5,$6,$7,$8,$10,$11,$12 FROM orgs WHERE id=$9")
         .bind(id.to_string())
         .bind(hash(&key))
         .bind(expires_at)
@@ -2378,6 +2398,9 @@ async fn mint_join_key(
         .bind(session.role.as_str())
         .bind(serde_json::to_string(&tags).unwrap())
         .bind(org_id.to_string())
+        .bind(&metadata.name)
+        .bind(&metadata.description)
+        .bind(metadata.max_uses)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -2394,6 +2417,8 @@ async fn mint_join_key(
         &serde_json::json!({
             "expires_at": expires_at,
             "single_use": input.single_use,
+            "max_uses": metadata.max_uses,
+            "name": metadata.name,
             "source": "console",
             "tags": tags,
         }),
@@ -2407,6 +2432,8 @@ async fn mint_join_key(
             key,
             expires_at,
             single_use: input.single_use,
+            name: metadata.name,
+            max_uses: metadata.max_uses,
         }),
     ))
 }
@@ -2584,6 +2611,7 @@ async fn register_node(
     if grant.single_use && grant.used {
         return Err(ApiError::Unauthorized);
     }
+    peer_lifecycle::claim_join_key(&mut tx, &grant.key_id).await?;
     if grant
         .bound_name
         .as_deref()
@@ -2630,13 +2658,6 @@ async fn register_node(
         .execute(&mut *tx)
         .await
         .map_err(conflict("node name, DNS name, public key, or address already exists in org"))?;
-    if grant.single_use {
-        sqlx::query("UPDATE join_keys SET used_at=$1 WHERE id=$2")
-            .bind(now())
-            .bind(&grant.key_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     sqlx::query("UPDATE device_authorizations SET consumed_at=$1 WHERE device_code_hash=$2")
         .bind(now())
         .bind(input_key_hash)
@@ -2900,14 +2921,19 @@ async fn reauth_node(
 ) -> Result<Json<ReauthResponse>, ApiError> {
     let old_token_hash = bearer(&headers)?;
     let mut tx = s.store.pool.begin().await?;
-    let org_id: String = sqlx::query_scalar(
-        "SELECT org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+    let (org_id, suspended) = sqlx::query(
+        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(old_token_hash)
     .fetch_optional(&mut *tx)
     .await?
+    .map(|row| Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)? != 0)))
+    .transpose()?
     .ok_or(ApiError::Unauthorized)?;
+    if suspended {
+        return Err(ApiError::Suspended);
+    }
     let reauth_query = match s.store.backend {
         DatabaseBackend::Sqlite => "SELECT k.id,k.single_use,CASE WHEN k.used_at IS NULL THEN 0 ELSE 1 END,k.user_id,k.user_role,k.tags_json,o.node_key_ttl_seconds FROM join_keys k JOIN orgs o ON o.id=k.org_id WHERE k.key_hash=$1 AND k.org_id=$2 AND k.revoked_at IS NULL AND k.expires_at>$3 AND NOT EXISTS(SELECT 1 FROM device_authorizations d WHERE d.device_code_hash=k.key_hash)",
         DatabaseBackend::Postgres => "SELECT k.id,k.single_use,CASE WHEN k.used_at IS NULL THEN 0 ELSE 1 END,k.user_id,k.user_role,k.tags_json,o.node_key_ttl_seconds FROM join_keys k JOIN orgs o ON o.id=k.org_id WHERE k.key_hash=$1 AND k.org_id=$2 AND k.revoked_at IS NULL AND k.expires_at>$3 AND NOT EXISTS(SELECT 1 FROM device_authorizations d WHERE d.device_code_hash=k.key_hash) FOR UPDATE OF k",
@@ -2935,6 +2961,7 @@ async fn reauth_node(
     if single_use && used {
         return Err(ApiError::Unauthorized);
     }
+    peer_lifecycle::claim_join_key(&mut tx, &join_id).await?;
     let node_token = secret("btn");
     let credential_expires_at = now() + ttl;
     sqlx::query(
@@ -2948,13 +2975,6 @@ async fn reauth_node(
     .bind(node_id.to_string())
     .execute(&mut *tx)
     .await?;
-    if single_use {
-        sqlx::query("UPDATE join_keys SET used_at=$1 WHERE id=$2")
-            .bind(now())
-            .bind(join_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     tx.commit().await?;
     info!(%node_id, "node credential renewed");
     Ok(Json(ReauthResponse {
@@ -3046,6 +3066,8 @@ struct PeerSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    #[serde(default)]
+    transport: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -3062,6 +3084,8 @@ struct UpdateSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    #[serde(default)]
+    transport: Option<String>,
 }
 
 async fn list_peers(
@@ -3071,7 +3095,7 @@ async fn list_peers(
     headers: HeaderMap,
 ) -> Result<Json<PeersResponse>, ApiError> {
     let token = bearer(&headers)?;
-    let source_row = sqlx::query("SELECT n.org_id,n.user_id,n.user_role,n.tags_json,o.acl_json,n.credential_expires_at,n.dns_name,n.allowed_ips_json,o.dns_json,o.dns_revision FROM nodes n JOIN orgs o ON o.id=n.org_id WHERE n.id=$1 AND n.token_hash=$2 AND n.revoked_at IS NULL AND n.deleted_at IS NULL")
+    let source_row = sqlx::query("SELECT n.org_id,n.user_id,n.user_role,n.tags_json,o.acl_json,n.credential_expires_at,n.dns_name,n.allowed_ips_json,o.dns_json,o.dns_revision,CASE WHEN n.suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes n JOIN orgs o ON o.id=n.org_id WHERE n.id=$1 AND n.token_hash=$2 AND n.revoked_at IS NULL AND n.deleted_at IS NULL")
         .bind(node_id.to_string())
         .bind(token)
         .fetch_optional(&s.store.pool)
@@ -3087,9 +3111,13 @@ async fn list_peers(
     let source_addresses: String = source_row.try_get(7)?;
     let org_dns_json: String = source_row.try_get(8).unwrap_or_default();
     let org_dns_revision: i64 = source_row.try_get(9).unwrap_or(0);
+    if source_row.try_get::<i64, _>(10)? != 0 {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
+    peer_lifecycle::record_transport(&s.store, node_id, selection.transport.as_deref()).await?;
     sqlx::query("UPDATE nodes SET last_seen_at=$1,dns_applied_revision=CASE WHEN $3>=0 THEN $3 ELSE dns_applied_revision END WHERE id=$2")
         .bind(now())
         .bind(node_id.to_string())
@@ -3109,7 +3137,7 @@ async fn list_peers(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let rows = sqlx::query("SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CASE WHEN relay_endpoint_updated_at>$3 THEN relay_endpoint ELSE NULL END,approved_routes_json,shares_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL AND deleted_at IS NULL AND credential_expires_at>$4 ORDER BY name")
+    let rows = sqlx::query("SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CASE WHEN relay_endpoint_updated_at>$3 THEN relay_endpoint ELSE NULL END,approved_routes_json,shares_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL AND deleted_at IS NULL AND suspended_at IS NULL AND credential_expires_at>$4 ORDER BY name")
         .bind(org.clone())
         .bind(node_id.to_string())
         .bind(now() - RELAY_ENDPOINT_FRESH_SECS)
@@ -3256,14 +3284,19 @@ async fn list_updates(
         ));
     }
     let token = bearer(&headers)?;
-    let org: String = sqlx::query_scalar(
-        "SELECT org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+    let (org, suspended) = sqlx::query(
+        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
+    .map(|row| Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)? != 0)))
+    .transpose()?
     .ok_or(ApiError::Unauthorized)?;
+    if suspended {
+        return Err(ApiError::Suspended);
+    }
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
@@ -3285,6 +3318,7 @@ async fn list_updates(
                     exit_node: selection.exit_node,
                     ipv6: selection.ipv6,
                     dns_revision: selection.dns_revision,
+                    transport: selection.transport,
                 }),
                 headers,
             )
@@ -3660,6 +3694,8 @@ pub(crate) struct NodeRow {
     shares: Vec<shares::NodeShare>,
     #[serde(default)]
     dns_applied_revision: i64,
+    #[serde(default)]
+    suspended: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -3692,7 +3728,7 @@ pub(crate) async fn load_nodes(
     let limit = i64::from(query.limit.unwrap_or(200).clamp(1, 200));
     let current_time = now();
     let rows = sqlx::query(
-        "SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CAST(created_at AS BIGINT),credential_expires_at,CASE WHEN credential_expires_at<=$2 THEN 1 ELSE 0 END,CASE WHEN credential_expires_at<=$3 THEN 1 ELSE 0 END,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,advertised_routes_json,approved_routes_json,display_name,last_seen_at,os,os_version,agent_version,hostname,capabilities_json,ephemeral,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END,shares_json,dns_applied_revision FROM nodes WHERE org_id=$1 ORDER BY LOWER(COALESCE(NULLIF(TRIM(display_name),''),name)),name",
+        "SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CAST(created_at AS BIGINT),credential_expires_at,CASE WHEN credential_expires_at<=$2 THEN 1 ELSE 0 END,CASE WHEN credential_expires_at<=$3 THEN 1 ELSE 0 END,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,advertised_routes_json,approved_routes_json,display_name,last_seen_at,os,os_version,agent_version,hostname,capabilities_json,ephemeral,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END,shares_json,dns_applied_revision,CASE WHEN suspended_at IS NOT NULL THEN 1 ELSE 0 END FROM nodes WHERE org_id=$1 ORDER BY LOWER(COALESCE(NULLIF(TRIM(display_name),''),name)),name",
     )
     .bind(org_id.to_string())
     .bind(current_time)
@@ -3758,6 +3794,7 @@ pub(crate) async fn load_nodes(
                     &row.try_get::<String, _>(25).unwrap_or_else(|_| "[]".into()),
                 ),
                 dns_applied_revision: row.try_get::<i64, _>(26).unwrap_or(0),
+                suspended: row.try_get::<i64, _>(27)? != 0,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -3767,7 +3804,8 @@ pub(crate) async fn load_nodes(
         }
         if let Some(state) = state.as_deref() {
             let matches = match state {
-                "active" => !node.revoked && !node.deleted && !node.expired,
+                "active" => !node.revoked && !node.deleted && !node.expired && !node.suspended,
+                "suspended" => node.suspended && !node.revoked && !node.deleted,
                 "online" => node.online,
                 "offline" => !node.online && !node.deleted && !node.revoked,
                 "revoked" => node.revoked && !node.deleted,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   approveNodeRoutesAction,
@@ -25,6 +26,7 @@ function nodeState(node: NetworkNode): {
 } {
   if (node.deleted) return { label: "Deleted", className: "revoked" };
   if (node.revoked) return { label: "Revoked", className: "revoked" };
+  if (node.suspended) return { label: "Suspended", className: "warn" };
   if (node.expired) return { label: "Expired", className: "warn" };
   if (node.expires_soon) return { label: "Expires soon", className: "pending" };
   if (node.online) return { label: "Online", className: "online" };
@@ -35,6 +37,7 @@ function needsAttention(node: NetworkNode): boolean {
   return (
     !node.deleted &&
     (node.revoked ||
+      node.suspended ||
       node.expired ||
       node.expires_soon ||
       node.advertised_routes.some((route) => !node.approved_routes.includes(route)))
@@ -293,7 +296,13 @@ function DeviceRow({
     <>
       <tr className={open ? "device-row open" : "device-row"}>
         <td>
-          <div className="device-primary">{nodeLabel(node)}</div>
+          <div className="device-primary">
+            <Link
+              href={`/devices/${node.id}?organisation=${encodeURIComponent(node.organisation_id)}`}
+            >
+              {nodeLabel(node)}
+            </Link>
+          </div>
           <div className="device-sub">
             {node.dns_name || node.name}
             {node.display_name ? ` · ${node.name}` : ""}
