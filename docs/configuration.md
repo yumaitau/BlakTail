@@ -51,7 +51,7 @@ value. Defaults apply when a section or field is absent.
 | `coordinator.tls_key` | Required | Secret file reference |
 | `coordinator.auth_hmac_secret` | Required | Console assertion secret, at least 32 bytes |
 | `coordinator.relay_auth_secret` | Required when relays exist | Relay capability secret, at least 32 bytes |
-| `coordinator.relays` | Empty list | UDP host/IP and non-zero port entries |
+| `coordinator.relays` | Empty list | UDP host/IP and non-zero port entries in priority order; optional `#region` suffix (for example `relay-a.example.org.au:3478#australiaeast`) must be an approved Australian region, untagged entries inherit `coordinator.region` |
 | `coordinator.console_url` | Required | HTTPS URL, except loopback development |
 | `relay.region` | Required | Approved Australian region |
 | `relay.bind` | `0.0.0.0:3478` | UDP IP socket, non-zero port |
@@ -224,6 +224,7 @@ Lists are comma-separated. Boolean values accept `true`/`false`, `yes`/`no`, or
 | `BLAKTAIL_AUTH_HMAC_SECRET` / `BLAKTAIL_AUTH_HMAC_SECRET_FILE` | coordinator/console assertion secret | Secret pair |
 | `BLAKTAIL_RELAY_AUTH_SECRET` / `BLAKTAIL_RELAY_AUTH_SECRET_FILE` | coordinator/relay capability secret | Secret pair |
 | `BLAKTAIL_RELAYS` | `coordinator.relays` | Comma-separated UDP endpoints |
+| `BLAKTAIL_BACKUP_PROOF_FILE` | (coordinator environment only) | Optional path to the operator's backup marker JSON shown on Operator health; see [upgrades.md](upgrades.md#record-the-backup-proof) |
 | `BLAKTAIL_CONSOLE_URL` | `coordinator.console_url` | HTTPS except loopback |
 | `BLAKTAIL_RELAY_BIND` | `relay.bind` | UDP IP socket |
 | `BLAKTAIL_RELAY_METRICS_BIND` | `relay.metrics_bind` | Loopback by default |

@@ -99,6 +99,10 @@ drop_direct_udp agent-store "$office_lan"
 relay_advertise="$(awk -F= '$1=="BLAKTAIL_RELAY_ENDPOINT" { print substr($0, index($0, "=")+1) }' "$ENV_FILE")"
 relay_advertise="${relay_advertise//\"/}"
 relay_advertise="${relay_advertise//$'\r'/}"
+# Multi-relay lists (prove-relay-failover.sh): use the first entry, without
+# its declared region.
+relay_advertise="${relay_advertise%%,*}"
+relay_advertise="${relay_advertise%%#*}"
 relay_host="${relay_advertise%%:*}"
 relay_port="${relay_advertise##*:}"
 relay_id="$("${COMPOSE[@]}" ps -q relay)"

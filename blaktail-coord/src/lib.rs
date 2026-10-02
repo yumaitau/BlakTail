@@ -8,6 +8,7 @@ pub mod https_fallback;
 pub mod https_services;
 pub mod ipam;
 mod metrics;
+mod operations;
 mod org_dns;
 mod peer_lifecycle;
 mod permissions;
@@ -481,6 +482,12 @@ async fn validate_schema_version(
 }
 
 async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
+    apply_sqlite_migrations_to(pool, CURRENT_SCHEMA_VERSION).await
+}
+
+/// Applies SQLite migrations up to `target`. Only upgrade tests stop short of
+/// the current version, to build a database exactly as an older release left it.
+async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), StoreError> {
     let found: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
         .await?;
@@ -494,7 +501,7 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
     let mut applied = found;
     for migration in MIGRATIONS
         .iter()
-        .filter(|migration| migration.version > found)
+        .filter(|migration| migration.version > found && migration.version <= target)
     {
         let expected = applied + 1;
         if migration.version != expected {
@@ -578,9 +585,9 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
         );
         applied = migration.version;
     }
-    if applied != CURRENT_SCHEMA_VERSION {
+    if applied != target {
         return Err(StoreError::InvalidMigrationPlan {
-            expected: CURRENT_SCHEMA_VERSION,
+            expected: target,
             found: applied,
         });
     }
@@ -1270,6 +1277,9 @@ pub(crate) struct AppState {
     relay_auth_secret: Arc<[u8]>,
     /// Advertised relay endpoints (host:port, UDP) handed to nodes.
     relays: Arc<Vec<String>>,
+    /// The same relays with their declared Australian region, in priority order.
+    relay_directory: Arc<Vec<operations::RelayEntry>>,
+    region: Arc<String>,
     console_url: Arc<String>,
     api_rate: ApiRateLimiter,
     control_views: Arc<Mutex<ControlViewMap>>,
@@ -1321,19 +1331,27 @@ pub fn app_with_relays_and_console(
 
 pub fn app_with_relays_console_and_metrics(
     store: Store,
-    _region: String,
+    region: String,
     auth_hmac_secret: impl Into<Vec<u8>>,
     relay_auth_secret: impl Into<Vec<u8>>,
     relays: Vec<String>,
     console_url: String,
     metrics: Arc<CoordMetrics>,
 ) -> Router {
+    let relay_directory = operations::relay_directory(&relays, &region);
     let state = AppState {
         store,
         metrics,
         auth_hmac_secret: auth_hmac_secret.into().into(),
         relay_auth_secret: relay_auth_secret.into().into(),
-        relays: Arc::new(relays),
+        relays: Arc::new(
+            relay_directory
+                .iter()
+                .map(|relay| relay.endpoint.clone())
+                .collect(),
+        ),
+        relay_directory: Arc::new(relay_directory),
+        region: Arc::new(region),
         console_url: Arc::new(console_url.trim_end_matches('/').to_owned()),
         api_rate: ApiRateLimiter::default(),
         control_views: Arc::new(Mutex::new(HashMap::new())),
@@ -1429,6 +1447,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(private_services::routes())
         .merge(topology::routes())
         .merge(change_drafts::routes())
+        .merge(operations::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -2587,6 +2606,9 @@ struct RegisterResponse {
     /// Advertised relay endpoints plus a capability token for them.
     #[serde(default)]
     relays: Vec<String>,
+    /// `relays` with declared regions, for agents that select by region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relay_endpoints: Vec<operations::RelayEntry>,
     #[serde(default)]
     relay_token: String,
     #[serde(default)]
@@ -2716,6 +2738,7 @@ async fn register_node(
             dns_name,
             credential_expires_at,
             relays: s.relays.as_ref().clone(),
+            relay_endpoints: s.relay_directory.as_ref().clone(),
             relay_token,
             relay_expires_at,
         }),
@@ -3059,6 +3082,8 @@ struct PeersResponse {
     /// Advertised relay endpoints plus a refreshed capability token.
     #[serde(default)]
     relays: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relay_endpoints: Vec<operations::RelayEntry>,
     #[serde(default)]
     relay_token: String,
     #[serde(default)]
@@ -3369,6 +3394,7 @@ async fn list_peers(
         credential_expires_at,
         exit_node_active,
         relays: s.relays.as_ref().clone(),
+        relay_endpoints: s.relay_directory.as_ref().clone(),
         relay_token,
         relay_expires_at,
         dns,
@@ -5952,6 +5978,7 @@ mod tests {
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
     mod forwarding;
+    mod operations;
     mod policy_posture;
 
     #[test]

@@ -36,6 +36,9 @@ pub(crate) enum Permission {
     ManageApiClients,
     /// Organisation security settings, SSO, SCIM, sign-in policy and roles.
     ManageSecurity,
+    /// Read the protected operator health view (versions, schema, relays,
+    /// outbox, expiry counts, backup proof). Read-only, never key material.
+    ViewOperations,
 }
 
 impl Role {
@@ -43,7 +46,10 @@ impl Role {
         use Permission::*;
         match self {
             Role::Owner => true,
-            Role::Admin => !matches!(permission, ManageSecurity | ManageApiClients),
+            Role::Admin => !matches!(
+                permission,
+                ManageSecurity | ManageApiClients | ViewOperations
+            ),
             Role::NetworkAdmin => matches!(
                 permission,
                 ViewNetwork
@@ -55,7 +61,10 @@ impl Role {
                     | ManageServices
                     | ViewAudit
             ),
-            Role::Auditor => matches!(permission, ViewNetwork | ViewAudit | ExportAudit),
+            Role::Auditor => matches!(
+                permission,
+                ViewNetwork | ViewAudit | ExportAudit | ViewOperations
+            ),
             // Members could already read the audit log before this matrix existed.
             Role::Member => matches!(permission, ViewNetwork | ViewAudit),
         }
@@ -82,7 +91,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 12] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 13] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -95,6 +104,7 @@ pub(crate) mod tests {
         (Permission::ManageIntegrations, "manage_integrations"),
         (Permission::ManageApiClients, "manage_api_clients"),
         (Permission::ManageSecurity, "manage_security"),
+        (Permission::ViewOperations, "view_operations"),
     ];
 
     #[test]
@@ -159,7 +169,10 @@ pub(crate) mod tests {
         for (permission, _) in ALL_PERMISSIONS {
             let read_only = matches!(
                 permission,
-                Permission::ViewNetwork | Permission::ViewAudit | Permission::ExportAudit
+                Permission::ViewNetwork
+                    | Permission::ViewAudit
+                    | Permission::ExportAudit
+                    | Permission::ViewOperations
             );
             assert_eq!(Role::Auditor.can(permission), read_only);
         }

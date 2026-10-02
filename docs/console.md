@@ -44,6 +44,11 @@ authorisation.
   the organisation service CA (owner/admin write)
 - `/audit` — latest actor-attributed security and administration changes
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics
+- `/operations` — **Operator health** (owners and auditors only, enforced by the
+  coordinator): console, coordinator and schema versions, relay reachability
+  probed from the coordinator, this organisation's webhook outbox depth and
+  dead letters, credential and certificate expiry counts, SSO provider counts,
+  and the operator-recorded last backup. No keys, tokens or webhook addresses
 - `/settings` — separate **Network accounts** and **Ways to sign in**, secure
   login linking/unlinking, owner conflict decisions, invitations, and account details
 - `/invite?token=…` — one-use invitation acceptance; public account creation remains disabled

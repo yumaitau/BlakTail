@@ -1,4 +1,5 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
+use blaktaild::relay_select::{eligible_relays, RelaySelector};
 use blaktaild::{
     apply_peer_map, configure_system_dns, disable_share, dns_domain, enable_share,
     ensure_private_key, load_shares, organisation_dns_managed, organisation_resolver_suffixes,
@@ -78,7 +79,11 @@ enum Command {
     /// Pipe the key on stdin or set BLAKTAIL_JOIN_KEY; it is never an argument.
     Reauth,
     /// Show persisted node and peer status without exposing credentials.
-    Status,
+    Status {
+        /// Print one JSON object for local tools such as the Linux tray.
+        #[arg(long)]
+        json: bool,
+    },
     /// Publish or withdraw a read-only HTTP/WebDAV folder on the overlay.
     Share {
         #[command(subcommand)]
@@ -155,7 +160,7 @@ impl AgentOverrides {
             }
             Command::Run { poll_seconds } => overrides.poll_seconds = *poll_seconds,
             Command::Reauth
-            | Command::Status
+            | Command::Status { .. }
             | Command::Share { .. }
             | Command::Pause
             | Command::Down => {}
@@ -403,6 +408,7 @@ async fn sync_loop(
     exit_after_join: bool,
 ) -> Result<(), blaktaild::Error> {
     let mut mesh: Option<RelayMesh> = None;
+    let mut relays = RelaySelector::default();
     let mut dns: Option<MagicDns> = None;
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
@@ -416,8 +422,16 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
-        let transport = manage_paths(network, &mut mesh, state, &mut paths).await;
+        let transport = manage_paths(network, &mut mesh, &mut relays, state, &mut paths).await;
         coordinator.set_transport(transport);
+        let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
+        if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
+            state.active_relay = active_relay;
+            state.relay_failovers = relays.failovers();
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist relay selection");
+            }
+        }
         report_relay_endpoint(coordinator, mesh.as_ref(), state, state_dir).await;
         if exit_after_join {
             if let Some(active) = mesh.take() {
@@ -720,12 +734,13 @@ fn transport_summary(direct: usize, relayed: usize) -> Option<&'static str> {
 async fn manage_paths(
     network: &mut dyn Network,
     mesh: &mut Option<RelayMesh>,
+    selector: &mut RelaySelector,
     state: &blaktaild::NodeState,
     paths: &mut HashMap<Uuid, PeerPath>,
 ) -> Option<&'static str> {
     let now_unix = blaktaild_now();
-    if state.relays.is_empty() || state.relay_token.is_empty() || state.relay_expires_at <= now_unix
-    {
+    let relays = eligible_relays(&state.relays, &state.relay_endpoints);
+    if relays.is_empty() || state.relay_token.is_empty() || state.relay_expires_at <= now_unix {
         disable_relay(network, mesh, state, paths);
         // Without a relay every working path is native WireGuard UDP.
         let handshakes = network
@@ -743,20 +758,44 @@ async fn manage_paths(
         return transport_summary(fresh, 0);
     }
     let interface = &state.interface;
-    let failed_relay = mesh.as_ref().and_then(|active| {
-        (!active.relay_healthy()).then(|| {
-            let address = active.relay_addr();
-            warn!(%address, "relay health probe expired; trying another endpoint");
-            address
-        })
-    });
-    if failed_relay.is_some() {
-        if let Some(active) = mesh.take() {
-            active.stop();
+    let candidates = selector.candidates(&relays).await;
+    let now = Instant::now();
+    if let Some(active) = mesh.as_ref() {
+        let address = active.relay_addr();
+        if !active.relay_healthy() {
+            let cooldown = selector.record_failure(address, now);
+            selector.note_failover();
+            warn!(
+                %address,
+                cooldown_secs = cooldown.as_secs(),
+                failovers = selector.failovers(),
+                "relay health probe expired; failing over to the next Australian relay"
+            );
+            if let Some(active) = mesh.take() {
+                active.stop();
+            }
+        } else if active.observed_endpoint().is_some() {
+            selector.record_healthy(address);
+            if let Some(preferred) = selector.failback_target(address, &candidates, now) {
+                if probe_relay(preferred, state).await {
+                    selector.note_failback();
+                    info!(
+                        from = %address,
+                        to = %preferred,
+                        failbacks = selector.failbacks(),
+                        "higher-priority relay answered; failing back"
+                    );
+                    if let Some(active) = mesh.take() {
+                        active.stop();
+                    }
+                } else {
+                    selector.record_failure(preferred, now);
+                }
+            }
         }
     }
     if mesh.is_none() {
-        let Some(relay_addr) = resolve_relay(&state.relays, failed_relay).await else {
+        let Some(relay_addr) = selector.choose(&candidates, now) else {
             warn!("could not resolve any advertised relay; direct paths only");
             return None;
         };
@@ -1027,22 +1066,24 @@ fn disable_relay(
     paths.clear();
 }
 
-async fn resolve_relay(
-    relays: &[String],
-    excluded: Option<std::net::SocketAddr>,
-) -> Option<std::net::SocketAddr> {
-    let mut fallback = None;
-    for relay in relays {
-        if let Ok(mut addresses) = tokio::net::lookup_host(relay).await {
-            for address in &mut addresses {
-                fallback.get_or_insert(address);
-                if Some(address) != excluded {
-                    return Some(address);
-                }
-            }
-        }
-    }
-    fallback
+/// Authenticated reachability check before failing back to a preferred
+/// relay. Uses this node's own capability, so it proves the relay would
+/// accept the real registration.
+async fn probe_relay(relay: std::net::SocketAddr, state: &blaktaild::NodeState) -> bool {
+    let Some(token) = blaktaild::relay_client::hex_decode(&state.relay_token)
+        .and_then(|raw| <[u8; blaktail_relay::TOKEN_LEN]>::try_from(raw).ok())
+    else {
+        return false;
+    };
+    blaktail_relay::probe(
+        relay,
+        state.node_id.as_bytes(),
+        state.relay_expires_at,
+        &token,
+        Duration::from_secs(2),
+    )
+    .await
+    .is_ok()
 }
 
 fn blaktaild_now() -> u64 {
@@ -1278,7 +1319,14 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 credential_status(state.credential_expires_at, blaktaild_now() as i64)
             );
         }
-        Command::Status => {
+        Command::Status { json: true } => {
+            let summary = match read_state(state_dir) {
+                Ok(state) => status_json(&state, blaktaild_now() as i64),
+                Err(_) => serde_json::json!({ "joined": false }),
+            };
+            println!("{summary}");
+        }
+        Command::Status { json: false } => {
             let state = read_state(state_dir)?;
             println!(
                 "joined\nnode: {}\ninterface: {}\naddress: {}\nipv6 address: {}\ndns: {}\ncoordinator: {}\ncredential: {}\nadvertised routes: {}\nexit node: {}\npeers: {}",
@@ -1428,6 +1476,35 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
     Ok(())
 }
 
+/// Machine-readable status for local tools. Carries no node token, relay
+/// capability, private key or join secret.
+fn status_json(state: &blaktaild::NodeState, now: i64) -> serde_json::Value {
+    serde_json::json!({
+        "joined": true,
+        "node_id": state.node_id,
+        "interface": state.interface,
+        "address": state.assigned_ip,
+        "ipv6_address": state.ipv6_address(),
+        "dns_name": state.dns_name,
+        "coordinator": state.coord,
+        "credential_expires_at": state.credential_expires_at,
+        "credential": credential_status(state.credential_expires_at, now),
+        "credential_expired": state.credential_expires_at != 0 && state.credential_expires_at <= now,
+        "advertised_routes": state.advertised_routes,
+        "exit_node": state.exit_node,
+        "exit_node_active": state.exit_node_active,
+        "dns_health": state.dns_degraded.as_deref().map_or("ok", |_| "degraded"),
+        "relays": eligible_relays(&state.relays, &state.relay_endpoints),
+        "active_relay": state.active_relay,
+        "relay_failovers": state.relay_failovers,
+        "peers": state.peers.iter().map(|peer| serde_json::json!({
+            "name": peer.name,
+            "endpoint": peer.endpoint,
+            "allowed_ips": peer.allowed_ips,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn credential_status(expires_at: i64, now: i64) -> String {
     if expires_at == 0 {
         return "expiry unknown; run the agent to refresh status".into();
@@ -1567,13 +1644,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_resolution_rotates_away_from_failed_address() {
+    async fn relay_selection_rotates_away_from_failed_address() {
         let first = std::net::SocketAddr::from(([127, 0, 0, 1], 3478));
         let second = std::net::SocketAddr::from(([127, 0, 0, 2], 3478));
         let relays = vec![first.to_string(), second.to_string()];
-        assert_eq!(resolve_relay(&relays, None).await, Some(first));
-        assert_eq!(resolve_relay(&relays, Some(first)).await, Some(second));
-        assert_eq!(resolve_relay(&relays[..1], Some(first)).await, Some(first));
+        let mut selector = RelaySelector::default();
+        let candidates = selector.candidates(&relays).await;
+        let now = Instant::now();
+        assert_eq!(selector.choose(&candidates, now), Some(first));
+        selector.record_failure(first, now);
+        assert_eq!(selector.choose(&candidates, now), Some(second));
+        assert_eq!(selector.choose(&candidates[..1], now), Some(first));
+    }
+
+    #[test]
+    fn status_json_reports_relay_selection_without_credentials() {
+        let state: blaktaild::NodeState = serde_json::from_value(serde_json::json!({
+            "node_id": Uuid::from_u128(7),
+            "node_token": "btn_node-token-secret",
+            "coord": "https://coord.example.org.au",
+            "interface": "blaktail0",
+            "assigned_ip": "100.64.0.7/32",
+            "credential_expires_at": 1_000,
+            "relays": ["relay-b:3478", "relay-x:3478"],
+            "relay_endpoints": [
+                {"endpoint": "relay-b:3478", "region": "australiaeast"},
+                {"endpoint": "relay-x:3478", "region": "us-east-1"}
+            ],
+            "relay_token": "ab".repeat(32),
+            "active_relay": "192.0.2.2:3478",
+            "relay_failovers": 2
+        }))
+        .unwrap();
+        let summary = status_json(&state, 2_000);
+        assert_eq!(summary["joined"], true);
+        assert_eq!(summary["credential_expired"], true);
+        assert_eq!(summary["relays"], serde_json::json!(["relay-b:3478"]));
+        assert_eq!(summary["active_relay"], "192.0.2.2:3478");
+        assert_eq!(summary["relay_failovers"], 2);
+        let text = summary.to_string();
+        assert!(!text.contains("node-token-secret"));
+        assert!(!text.contains(&"ab".repeat(32)));
     }
 
     #[test]

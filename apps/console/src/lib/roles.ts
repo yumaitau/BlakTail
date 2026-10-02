@@ -23,7 +23,8 @@ export type Permission =
   | "export_audit"
   | "manage_integrations"
   | "manage_api_clients"
-  | "manage_security";
+  | "manage_security"
+  | "view_operations";
 
 const NETWORK_WRITE: readonly Permission[] = [
   "manage_peers",
@@ -45,6 +46,7 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "manage_integrations",
     "manage_api_clients",
     "manage_security",
+    "view_operations",
   ],
   admin: [
     "view_network",
@@ -54,7 +56,7 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "manage_integrations",
   ],
   network_admin: ["view_network", ...NETWORK_WRITE, "view_audit"],
-  auditor: ["view_network", "view_audit", "export_audit"],
+  auditor: ["view_network", "view_audit", "export_audit", "view_operations"],
   member: ["view_network", "view_audit"],
 };
 
@@ -85,6 +87,7 @@ const PERMISSION_TASK: Record<Permission, string> = {
   manage_integrations: "manage webhooks and integrations",
   manage_api_clients: "manage automation credentials",
   manage_security: "change people, sign-in and security settings",
+  view_operations: "read operator health",
 };
 
 const HOLDERS: Record<Permission, string> = Object.fromEntries(
@@ -128,7 +131,7 @@ export function roleImpact(role: OrgRole): string {
     case "network_admin":
       return "Runs the network only: devices, join keys, routes, policy, DNS and services. Cannot manage people, security, integrations, automation credentials or export audit.";
     case "auditor":
-      return "Read-only: sees the network and the audit log and can export audit records. Cannot change anything.";
+      return "Read-only: sees the network, the audit log and operator health, and can export audit records. Cannot change anything.";
     case "member":
       return "Uses the network: sees devices and the audit log and can enrol their own devices. Cannot change shared settings.";
     default:

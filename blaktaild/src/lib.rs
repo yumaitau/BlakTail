@@ -19,6 +19,7 @@ pub mod acl_filter;
 pub mod dns;
 pub mod forward_filter;
 pub mod relay_client;
+pub mod relay_select;
 pub mod share;
 pub mod sshd;
 pub use dns::{
@@ -248,6 +249,15 @@ pub struct NodeState {
     pub relay_endpoint: Option<String>,
     #[serde(default)]
     pub relay_endpoint_reported_at: u64,
+    /// `relays` with declared regions; only Australian ones are used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_endpoints: Vec<relay_select::RelayEndpoint>,
+    /// Relay socket address the running agent last selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_relay: Option<String>,
+    /// Relay failovers since the agent last started.
+    #[serde(default)]
+    pub relay_failovers: u64,
     #[serde(default)]
     pub dns_mode: Option<String>,
     #[serde(default)]
@@ -392,6 +402,8 @@ struct RegisterResponse {
     #[serde(default)]
     relays: Vec<String>,
     #[serde(default)]
+    relay_endpoints: Vec<relay_select::RelayEndpoint>,
+    #[serde(default)]
     relay_token: String,
     #[serde(default)]
     relay_expires_at: u64,
@@ -416,6 +428,8 @@ struct PeersResponse {
     exit_node_active: bool,
     #[serde(default)]
     relays: Vec<String>,
+    #[serde(default)]
+    relay_endpoints: Vec<relay_select::RelayEndpoint>,
     #[serde(default)]
     relay_token: String,
     #[serde(default)]
@@ -601,6 +615,9 @@ impl Coordinator {
             router_previous_ipv4_forward: None,
             peers: vec![],
             relays: r.relays,
+            relay_endpoints: r.relay_endpoints,
+            active_relay: None,
+            relay_failovers: 0,
             relay_token: r.relay_token,
             relay_expires_at: r.relay_expires_at,
             relay_endpoint: None,
@@ -693,6 +710,7 @@ impl Coordinator {
         state.credential_expires_at = body.credential_expires_at;
         state.exit_node_active = body.exit_node_active;
         state.relays = body.relays;
+        state.relay_endpoints = body.relay_endpoints;
         state.relay_token = body.relay_token;
         state.relay_expires_at = body.relay_expires_at;
         apply_org_dns_snapshot(state, body.dns);
@@ -2581,6 +2599,9 @@ mod tests {
             relay_expires_at: 0,
             relay_endpoint: None,
             relay_endpoint_reported_at: 0,
+            relay_endpoints: vec![],
+            active_relay: None,
+            relay_failovers: 0,
             dns_mode: None,
             org_dns: None,
             dns_degraded: None,
@@ -2646,6 +2667,9 @@ mod tests {
             relay_expires_at: 0,
             relay_endpoint: None,
             relay_endpoint_reported_at: 0,
+            relay_endpoints: vec![],
+            active_relay: None,
+            relay_failovers: 0,
             dns_mode: None,
             org_dns: Some(OrgDnsSnapshot {
                 revision: 4,
@@ -2743,6 +2767,7 @@ mod tests {
             credential_expires_at: 0,
             exit_node_active: false,
             relays: vec![],
+            relay_endpoints: vec![],
             relay_token: String::new(),
             relay_expires_at: 0,
             dns: None,

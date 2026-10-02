@@ -83,6 +83,21 @@ curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$download_root/SHA256SUMS" --output "$work/SHA256SUMS"
 
+# Sigstore keyless signature over SHA256SUMS, bound to the release workflow at
+# this tag. Verified whenever cosign is installed; required with
+# BLAKTAIL_REQUIRE_SIGNATURE=1.
+if command -v cosign >/dev/null 2>&1 || [ "${BLAKTAIL_REQUIRE_SIGNATURE:-0}" = 1 ]; then
+  command -v cosign >/dev/null 2>&1 || die "BLAKTAIL_REQUIRE_SIGNATURE=1 needs cosign on PATH"
+  [ "$tag" != latest ] || die "signature verification needs a pinned BLAKTAIL_VERSION"
+  curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    "$download_root/SHA256SUMS.sigstore.json" --output "$work/SHA256SUMS.sigstore.json"
+  cosign verify-blob \
+    --bundle "$work/SHA256SUMS.sigstore.json" \
+    --certificate-identity "https://github.com/$repository/.github/workflows/agent-release.yml@refs/tags/$tag" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$work/SHA256SUMS" >/dev/null 2>&1 || die "Sigstore signature on SHA256SUMS did not verify"
+fi
+
 expected=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1 }' "$work/SHA256SUMS")
 [ -n "$expected" ] || die "$asset is missing from SHA256SUMS"
 [ "${#expected}" -eq 64 ] || die "invalid SHA-256 entry for $asset"

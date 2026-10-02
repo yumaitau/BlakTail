@@ -13,6 +13,10 @@ Each agent release uses one tag and these fixed asset names:
 - `blaktaild-aarch64-unknown-linux-gnu.rpm`
 - `blaktaild-x86_64-unknown-linux-gnu.rpm`
 - `SHA256SUMS`
+- `SHA256SUMS.sigstore.json` (Sigstore keyless signature bundle over `SHA256SUMS`)
+
+See [compatibility.md](compatibility.md) for which console, coordinator, relay
+and agent versions work together and what a rollback can undo.
 
 Build on the matching native operating system. Linux binaries must be built on the
 oldest glibc baseline supported by that release; do not relabel a binary built for a
@@ -85,6 +89,37 @@ packages with:
 gh attestation verify blaktaild-aarch64-unknown-linux-gnu.deb \
   --repo jusso-dev/BlakTail
 ```
+
+## Signatures and reproducibility
+
+The publish job signs `SHA256SUMS` with Sigstore keyless signing (`cosign
+sign-blob`). The certificate in `SHA256SUMS.sigstore.json` names the release
+workflow at the exact tag through GitHub OIDC, so there is no long-lived
+signing key to store, leak or rotate. The job verifies the bundle before upload
+and again after re-downloading the published bytes. Verify by hand with:
+
+```sh
+VERSION=0.1.0
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/jusso-dev/BlakTail/.github/workflows/agent-release.yml@refs/tags/v${VERSION}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+`scripts/install-agent.sh` performs the same check whenever `cosign` is on
+`PATH`, and refuses to install without it when `BLAKTAIL_REQUIRE_SIGNATURE=1`
+(that mode needs a pinned `BLAKTAIL_VERSION`). The signature is recorded in the
+public Rekor transparency log; that log is operated outside Australia and
+contains only the checksum digest, certificate and workflow identity, never
+package contents or customer data.
+
+Builds pin the reproducibility inputs: `--locked` dependencies, the pinned
+toolchain, `SOURCE_DATE_EPOCH` set to the tagged commit time, `CARGO_INCREMENTAL=0`
+and `--remap-path-prefix` for build paths. Bit-for-bit reproduction by an
+independent builder has **not** been demonstrated yet; until it is, treat the
+signature and provenance attestation as the trust anchor, not a rebuild.
 
 Before calling the release usable, install the pinned tag on clean Debian/Ubuntu,
 RPM-family Linux, Apple silicon macOS, and Intel macOS hosts. Confirm the displayed
