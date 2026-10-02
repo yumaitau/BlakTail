@@ -149,6 +149,34 @@ an environment file. Optional file configuration is selected by setting
 [configuration.md](configuration.md). See the
 [upgrade/version-skew policy](upgrades.md) before replacing a running agent.
 
+## SSH user policy
+
+The agent always installs the inbound overlay filter compiled by the
+coordinator and reports `acl-filter`. TCP 22 is rejected from sources with
+no SSH grant on destinations that SSH rules select. Per-user limits
+(`users: ["deploy"]`, or `*` with a denied user) need sshd to cooperate, so
+they are opt-in and fail closed:
+
+1. Add one line at the **end** of `/etc/ssh/sshd_config`:
+   `Include /var/lib/blaktail/sshd_policy.conf`
+2. Set `BLAKTAIL_SSHD_DROPIN=/var/lib/blaktail/sshd_policy.conf` in
+   `/etc/blaktail/agent.env` and restart `blaktaild`.
+
+On every peer-map apply the agent writes `Match Address` blocks there
+(ending with `Match all`), then requires `sshd -t` to pass, `sshd -T -C` to
+show the expected `allowusers`/`denyusers` for each limited source and none
+of them for an unrelated address, and a running sshd to reload
+(`systemctl reload ssh|sshd`, or `HUP` via `/run/sshd.pid`). Only then does
+it report `ssh-users`, and only then does the coordinator open TCP 22 for
+user-limited sources. Any failure restores the previous file, logs a
+warning and keeps TCP 22 closed to those sources. Logins that are not plain
+names become `DenyUsers *` for that source.
+
+The agent never edits `sshd_config`. To revert, remove the `Include` line,
+unset the variable, and reload sshd. The hardened systemd unit only allows
+writes under `/var/lib/blaktail`, which is why the drop-in lives there.
+The SSH port is fixed at 22.
+
 ## Linux tray (scaffold, issue #12)
 
 `apps/linux-tray/` holds an honest scaffold for a GTK/AppIndicator tray

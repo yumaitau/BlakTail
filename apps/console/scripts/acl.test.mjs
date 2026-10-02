@@ -119,6 +119,7 @@ test("ACL drafts keep SSH rules across a round trip", () => {
       dst_groups: [],
       users: ["ubuntu", "deploy"],
       check_period_secs: "3600",
+      posture: [],
     },
   ]);
   assert.deepEqual(serializeAclPolicy(policy), {
@@ -164,4 +165,27 @@ test("ACL drafts keep deny defaults and generated legacy rules", () => {
     groups: {},
     rules: [],
   });
+});
+
+test("ACL drafts keep posture on allow rules and drop it from denies", () => {
+  const policy = parseAclPolicy({
+    defaults: "deny",
+    rules: [
+      { action: "allow", src_tags: ["ranger"], posture: ["baseline"] },
+      { action: "deny", src_tags: ["office"], posture: ["baseline"] },
+    ],
+    ssh: [
+      { action: "check", src_tags: ["ranger"], users: ["deploy"], posture: ["baseline"] },
+      { action: "deny", src_tags: ["office"], users: ["root"], posture: ["baseline"] },
+    ],
+  });
+  const serialized = serializeAclPolicy(policy);
+  assert.deepEqual(serialized.rules, [
+    { action: "allow", src_tags: ["ranger"], posture: ["baseline"] },
+    { action: "deny", src_tags: ["office"] },
+  ]);
+  assert.deepEqual(serialized.ssh, [
+    { action: "check", src_tags: ["ranger"], users: ["deploy"], posture: ["baseline"] },
+    { action: "deny", src_tags: ["office"], users: ["root"] },
+  ]);
 });

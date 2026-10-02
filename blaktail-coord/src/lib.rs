@@ -7,6 +7,8 @@ pub mod ipam;
 mod metrics;
 mod org_dns;
 mod permissions;
+mod policy_explain;
+mod posture;
 mod shares;
 pub mod tailnet_lock;
 mod webhooks;
@@ -1408,6 +1410,8 @@ pub fn app_with_relays_console_and_metrics(
             "/v1/orgs/:org_id/webhooks/deliveries/:delivery_id/replay",
             post(webhooks::replay_delivery_console),
         )
+        .merge(posture::routes())
+        .merge(policy_explain::routes())
         .merge(admin::api_routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
@@ -2938,7 +2942,7 @@ async fn reauth_node(
     let node_token = secret("btn");
     let credential_expires_at = now() + ttl;
     sqlx::query(
-        "UPDATE nodes SET token_hash=$1,credential_expires_at=$2,user_id=$3,user_role=$4,tags_json=$5 WHERE id=$6",
+        "UPDATE nodes SET token_hash=$1,credential_expires_at=$2,user_id=$3,user_role=$4,tags_json=$5,credential_issued_at=$7 WHERE id=$6",
     )
     .bind(hash(&node_token))
     .bind(credential_expires_at)
@@ -2946,6 +2950,7 @@ async fn reauth_node(
     .bind(user_role)
     .bind(tags_json)
     .bind(node_id.to_string())
+    .bind(now())
     .execute(&mut *tx)
     .await?;
     if single_use {
@@ -2955,6 +2960,8 @@ async fn reauth_node(
             .execute(&mut *tx)
             .await?;
     }
+    // Renewal can satisfy credential-age posture and SSH check rules again.
+    bump_control_revision(&mut tx, &org_id).await?;
     tx.commit().await?;
     info!(%node_id, "node credential renewed");
     Ok(Json(ReauthResponse {
@@ -2997,6 +3004,8 @@ struct PeerIngress {
     deny_icmp: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ssh_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ssh_deny_users: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct PeersResponse {
@@ -3046,6 +3055,13 @@ struct PeerSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    /// Comma-separated capabilities the agent currently provides.
+    #[serde(default)]
+    capabilities: Option<String>,
+    #[serde(default)]
+    agent_version: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -3062,6 +3078,12 @@ struct UpdateSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    #[serde(default)]
+    capabilities: Option<String>,
+    #[serde(default)]
+    agent_version: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
 }
 
 async fn list_peers(
@@ -3098,11 +3120,25 @@ async fn list_peers(
         .await?;
     expire_ephemeral_nodes(&s.store, &org).await?;
     wg_only::expire_overlaps(&s.store.pool, &org).await?;
-    let source = Subject::new(
+    let source_capabilities = posture::record_report(
+        &s.store,
+        &org,
+        node_id,
+        selection.capabilities.as_deref(),
+        selection.agent_version.clone(),
+        selection.os_version.clone(),
+    )
+    .await?;
+    let ssh_users_enforced = source_capabilities
+        .iter()
+        .any(|capability| capability == posture::CAP_SSH_USERS);
+    let posture = posture::PostureContext::load(&s.store.pool, &org).await?;
+    let mut source = Subject::new(
         source_role.parse().map_err(|_| ApiError::CorruptData)?,
         serde_json::from_str(&source_tags).unwrap_or_default(),
     )
     .with_user(source_user_id);
+    posture.apply(node_id, &mut source);
     let acl: Acl = serde_json::from_str(&acl_json).map_err(|_| ApiError::CorruptData)?;
     let requested_exit = selection
         .exit_node
@@ -3127,26 +3163,29 @@ async fn list_peers(
                 serde_json::from_str(&row.try_get::<String, _>(10)?).unwrap_or_default();
             let dest_shares =
                 shares::parse_shares(&row.try_get::<String, _>(11).unwrap_or_else(|_| "[]".into()));
+            let id = Uuid::parse_str(&id).map_err(|_| ApiError::CorruptData)?;
+            let mut subject = Subject::new(
+                row.try_get::<String, _>(7)?
+                    .parse()
+                    .map_err(|_| ApiError::CorruptData)?,
+                tags.clone(),
+            )
+            .with_user(row.try_get::<String, _>(6)?);
+            posture.apply(id, &mut subject);
             Ok::<_, ApiError>((
                 Peer {
-                    id: Uuid::parse_str(&id).map_err(|_| ApiError::CorruptData)?,
+                    id,
                     name: row.try_get(1)?,
                     wg_public_key: row.try_get(2)?,
                     endpoint: row.try_get(3)?,
                     allowed_ips: serde_json::from_str(&ips).map_err(|_| ApiError::CorruptData)?,
                     dns_name: row.try_get(5)?,
-                    tags: tags.clone(),
+                    tags,
                     relay_endpoint: row.try_get(9)?,
                     kind: String::new(),
                     ingress: None,
                 },
-                Subject::new(
-                    row.try_get::<String, _>(7)?
-                        .parse()
-                        .map_err(|_| ApiError::CorruptData)?,
-                    tags,
-                )
-                .with_user(row.try_get::<String, _>(6)?),
+                subject,
                 approved,
                 dest_shares,
             ))
@@ -3159,7 +3198,7 @@ async fn list_peers(
             if !acl.allows(&source, &destination) {
                 return None;
             }
-            let mut ingress = acl.peer_ingress(&destination, &source);
+            let mut ingress = acl.peer_ingress_for(&destination, &source, ssh_users_enforced);
             shares::grant_share_ports(
                 &mut ingress.tcp,
                 &ingress.deny_tcp,
@@ -3211,7 +3250,7 @@ async fn list_peers(
             tags,
             relay_endpoint: None,
             kind: wg_only::KIND.into(),
-            ingress: Some(acl.peer_ingress(&destination, &source)),
+            ingress: Some(acl.peer_ingress_for(&destination, &source, ssh_users_enforced)),
         });
     }
     let mut assigned_ips: Vec<String> = serde_json::from_str(&source_addresses).unwrap_or_default();
@@ -3222,6 +3261,7 @@ async fn list_peers(
     let dns = org_dns::parse_settings(&org_dns_json)
         .ok()
         .map(|settings| settings.agent_view(&org, org_dns_revision));
+    posture::record_deadline(&s.store.pool, &org, posture.next_deadline(&acl)).await?;
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
@@ -3264,9 +3304,21 @@ async fn list_updates(
     .fetch_optional(&s.store.pool)
     .await?
     .ok_or(ApiError::Unauthorized)?;
+    // Record reported capabilities before waiting: a change bumps the
+    // revision so this same request returns the recompiled snapshot.
+    posture::record_report(
+        &s.store,
+        &org,
+        node_id,
+        selection.capabilities.as_deref(),
+        selection.agent_version.clone(),
+        selection.os_version.clone(),
+    )
+    .await?;
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
+        posture::due(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
@@ -3285,6 +3337,9 @@ async fn list_updates(
                     exit_node: selection.exit_node,
                     ipv6: selection.ipv6,
                     dns_revision: selection.dns_revision,
+                    capabilities: selection.capabilities,
+                    agent_version: selection.agent_version,
+                    os_version: selection.os_version,
                 }),
                 headers,
             )
@@ -4759,6 +4814,9 @@ struct AclTest {
     protocol: Option<AclProtocol>,
     #[serde(default)]
     ssh_user: String,
+    /// Posture checks the simulated source passes. Omitted means none.
+    #[serde(default)]
+    src_posture: Vec<String>,
     allow: bool,
 }
 
@@ -4802,6 +4860,9 @@ struct AclRule {
     dst_ports: Vec<String>,
     #[serde(default)]
     protocols: Vec<AclProtocol>,
+    /// Posture checks the source device must pass for this allow rule.
+    #[serde(default)]
+    posture: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4823,6 +4884,8 @@ struct AclSshRule {
     users: Vec<String>,
     #[serde(default)]
     check_period_secs: Option<u64>,
+    #[serde(default)]
+    posture: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -4839,7 +4902,7 @@ enum Action {
     Deny,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum AclProtocol {
     Tcp,
@@ -4851,6 +4914,10 @@ struct Subject {
     tags: Vec<DeviceTag>,
     user_id: String,
     email: String,
+    /// Posture checks this source currently passes. Empty fails closed.
+    passed_posture: BTreeSet<String>,
+    /// Last credential issuance, used by SSH `check` rules. None fails closed.
+    authenticated_at: Option<i64>,
 }
 impl Subject {
     fn new(role: Role, tags: Vec<DeviceTag>) -> Self {
@@ -4859,6 +4926,8 @@ impl Subject {
             tags,
             user_id: String::new(),
             email: String::new(),
+            passed_posture: BTreeSet::new(),
+            authenticated_at: None,
         }
     }
     fn with_user(mut self, user_id: impl Into<String>) -> Self {
@@ -5017,6 +5086,7 @@ impl Acl {
                     "ACL ICMP rules cannot name destination ports".into(),
                 ));
             }
+            validate_posture_refs(&rule.posture, rule.action == Action::Allow)?;
         }
         if self.ssh.len() > 32 {
             return Err(ApiError::BadRequest(
@@ -5048,6 +5118,7 @@ impl Acl {
                     "ACL SSH rules must name 1-16 operating-system users".into(),
                 ));
             }
+            validate_posture_refs(&rule.posture, rule.action != AclSshAction::Deny)?;
             for user in &rule.users {
                 if !valid_ssh_os_user(user) {
                     return Err(ApiError::BadRequest(format!(
@@ -5102,8 +5173,13 @@ impl Acl {
                     test.ssh_user
                 )));
             }
+            validate_posture_refs(&test.src_posture, true)?;
+            // A simulated source has just authenticated and passes only the
+            // posture checks the test names.
             let src = Subject {
                 email: test.src_email.clone(),
+                passed_posture: test.src_posture.iter().cloned().collect(),
+                authenticated_at: Some(now()),
                 ..Subject::new(test.src_role.unwrap_or(Role::Member), test.src_tags.clone())
                     .with_user(test.src_user.clone())
             };
@@ -5138,7 +5214,9 @@ impl Acl {
         Ok(())
     }
     fn allows(&self, s: &Subject, d: &Subject) -> bool {
-        let ingress = self.peer_ingress(s, d);
+        // Pairing follows policy intent. Whether TCP 22 opens also depends on
+        // the destination agent and is decided by `peer_ingress_for`.
+        let ingress = self.peer_ingress_for(s, d, true);
         ingress.all || ingress.icmp || !ingress.tcp.is_empty() || !ingress.udp.is_empty()
     }
 
@@ -5156,6 +5234,14 @@ impl Acl {
             .filter(|r| self.rule_matches(r, s, d, port, protocol, host))
             .collect();
         if matching.iter().any(|r| r.action == Action::Deny) {
+            return false;
+        }
+        if host.is_none()
+            && port == Some(SSH_PORT)
+            && matches!(protocol, None | Some(AclProtocol::Tcp))
+            && self.ssh_governed(s, d)
+            && self.ssh_grant(s, d).0.is_empty()
+        {
             return false;
         }
         if matching.iter().any(|r| r.action == Action::Allow) {
@@ -5190,7 +5276,8 @@ impl Acl {
             &rule.src_groups,
             s,
             &self.groups,
-        ) {
+        ) || !posture_satisfied(&rule.posture, s)
+        {
             return false;
         }
         match host {
@@ -5243,8 +5330,20 @@ impl Acl {
             .any(|rule| matches!(rule.action, AclSshAction::Allow | AclSshAction::Check))
     }
 
+    #[cfg(test)]
     fn peer_ingress(&self, s: &Subject, d: &Subject) -> PeerIngress {
-        let ssh_users = self.ssh_users_for(s, d);
+        self.peer_ingress_for(s, d, false)
+    }
+
+    /// Compiles what `s` may send to `d`. `ssh_users_enforced` says whether
+    /// the destination agent proved it enforces per-user SSH limits; without
+    /// it, any user-limited SSH grant keeps TCP 22 closed (fail closed).
+    fn peer_ingress_for(&self, s: &Subject, d: &Subject, ssh_users_enforced: bool) -> PeerIngress {
+        let (ssh_users, ssh_deny_users) = self.ssh_grant(s, d);
+        let ssh_restricted =
+            !(ssh_users.len() == 1 && ssh_users[0] == "*" && ssh_deny_users.is_empty());
+        let ssh_open = !ssh_users.is_empty() && (ssh_users_enforced || !ssh_restricted);
+        let close_ssh = self.ssh_governed(s, d) && !ssh_open;
         let matching: Vec<_> = self
             .rules
             .iter()
@@ -5257,6 +5356,7 @@ impl Acl {
         {
             return PeerIngress {
                 ssh_users,
+                ssh_deny_users,
                 ..PeerIngress::default()
             };
         }
@@ -5287,8 +5387,11 @@ impl Acl {
         if deny_icmp {
             icmp = false;
         }
-        if !all && !ssh_users.is_empty() && !specs_cover(&deny_tcp, 22) && !specs_cover(&tcp, 22) {
-            tcp.insert("22".into());
+        if close_ssh && !specs_cover(&deny_tcp, SSH_PORT) {
+            deny_tcp.insert(SSH_PORT.to_string());
+        }
+        if !all && ssh_open && !specs_cover(&deny_tcp, SSH_PORT) && !specs_cover(&tcp, SSH_PORT) {
+            tcp.insert(SSH_PORT.to_string());
         }
         PeerIngress {
             all,
@@ -5299,6 +5402,7 @@ impl Acl {
             deny_udp: deny_udp.into_iter().collect(),
             deny_icmp,
             ssh_users,
+            ssh_deny_users,
         }
     }
 
@@ -5344,13 +5448,15 @@ impl Acl {
         }
     }
 
-    fn ssh_users_for(&self, s: &Subject, d: &Subject) -> Vec<String> {
+    /// Allowed and denied operating-system users for `s` on `d`. A `*`
+    /// allow keeps explicit denies so agents can write `DenyUsers`.
+    fn ssh_grant(&self, s: &Subject, d: &Subject) -> (Vec<String>, Vec<String>) {
         let mut allow = BTreeSet::new();
         let mut deny = BTreeSet::new();
         let mut allow_star = false;
         let mut deny_star = false;
         for rule in &self.ssh {
-            if !self.ssh_subjects_match(rule, s, d) {
+            if !self.ssh_subjects_match(rule, s, d) || !ssh_source_eligible(rule, s) {
                 continue;
             }
             let star = rule.users.iter().any(|user| user == "*");
@@ -5376,12 +5482,33 @@ impl Acl {
             }
         }
         if deny_star {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         if allow_star {
-            return vec!["*".into()];
+            return (vec!["*".into()], deny.into_iter().collect());
         }
-        allow.difference(&deny).cloned().collect()
+        (allow.difference(&deny).cloned().collect(), Vec::new())
+    }
+
+    /// SSH rules are authoritative for TCP 22 on destinations they select:
+    /// any allow/check rule naming `d`, or a deny rule naming both sides.
+    fn ssh_governed(&self, s: &Subject, d: &Subject) -> bool {
+        self.ssh.iter().any(|rule| {
+            selector(
+                &rule.dst_roles,
+                &rule.dst_tags,
+                &rule.dst_groups,
+                d,
+                &self.groups,
+            ) && (rule.action != AclSshAction::Deny
+                || selector(
+                    &rule.src_roles,
+                    &rule.src_tags,
+                    &rule.src_groups,
+                    s,
+                    &self.groups,
+                ))
+        })
     }
 
     fn ssh_subjects_match(&self, rule: &AclSshRule, s: &Subject, d: &Subject) -> bool {
@@ -5419,10 +5546,56 @@ impl Acl {
         ) {
             return false;
         }
-        rule.users
-            .iter()
-            .any(|allowed| allowed == "*" || allowed == user)
+        ssh_source_eligible(rule, s)
+            && rule
+                .users
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == user)
     }
+}
+
+const SSH_PORT: u16 = 22;
+/// `check` rules without an explicit period require renewal within 12 hours.
+pub(crate) const DEFAULT_SSH_CHECK_PERIOD_SECS: u64 = 12 * 60 * 60;
+
+fn posture_satisfied(required: &[String], s: &Subject) -> bool {
+    required.iter().all(|name| s.passed_posture.contains(name))
+}
+
+fn ssh_source_eligible(rule: &AclSshRule, s: &Subject) -> bool {
+    if !posture_satisfied(&rule.posture, s) {
+        return false;
+    }
+    if rule.action != AclSshAction::Check {
+        return true;
+    }
+    let period = rule
+        .check_period_secs
+        .unwrap_or(DEFAULT_SSH_CHECK_PERIOD_SECS) as i64;
+    s.authenticated_at
+        .is_some_and(|issued| now().saturating_sub(issued) <= period)
+}
+
+fn validate_posture_refs(names: &[String], allowed: bool) -> Result<(), ApiError> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    if !allowed {
+        return Err(ApiError::BadRequest(
+            "ACL posture checks only apply to allow and check rules".into(),
+        ));
+    }
+    if names.len() > 8 {
+        return Err(ApiError::BadRequest(
+            "ACL rules may reference at most 8 posture checks".into(),
+        ));
+    }
+    if let Some(name) = names.iter().find(|name| !valid_acl_group_name(name)) {
+        return Err(ApiError::BadRequest(format!(
+            "ACL posture check name {name:?} must be 1-32 lowercase letters, digits, or hyphens"
+        )));
+    }
+    Ok(())
 }
 
 fn valid_ssh_os_user(user: &str) -> bool {
@@ -5651,6 +5824,7 @@ mod tests {
     use tower::ServiceExt;
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
+    mod policy_posture;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {
@@ -7624,7 +7798,13 @@ mod tests {
         }))
         .unwrap();
         let ranger = Subject::new(Role::Member, vec![]).with_user("alice-user");
-        let ingress = restricted.peer_ingress(&ranger, &store);
+        // A destination that has not proven per-user sshd limits keeps the
+        // user-limited SSH grant closed at port level.
+        let closed = restricted.peer_ingress(&ranger, &store);
+        assert_eq!(closed.tcp, vec!["8080"]);
+        assert_eq!(closed.deny_tcp, vec!["22", "8081"]);
+        assert_eq!(closed.ssh_users, vec!["blaktail"]);
+        let ingress = restricted.peer_ingress_for(&ranger, &store, true);
         assert!(!ingress.all);
         assert_eq!(ingress.tcp, vec!["22", "8080"]);
         assert!(ingress.udp.is_empty());
@@ -9108,9 +9288,27 @@ mod tests {
         assert_eq!(from_office.peers[0].name, "store-1");
         let ingress = from_office.peers[0].ingress.as_ref().expect("ingress");
         assert!(!ingress.all);
-        assert_eq!(ingress.tcp, vec!["22", "8080"]);
+        assert_eq!(ingress.tcp, vec!["8080"]);
+        assert_eq!(ingress.deny_tcp, vec!["22"]);
         assert_eq!(ingress.ssh_users, vec!["blaktail"]);
         assert!(!ingress.icmp);
+        let enforced: PeersResponse = body(
+            call(
+                &router,
+                Method::GET,
+                &format!(
+                    "/v1/nodes/{}/peers?capabilities=acl-filter,ssh-users&agent_version=0.1.0",
+                    office.id
+                ),
+                serde_json::Value::Null,
+                Some(&office.node_token),
+            )
+            .await,
+        )
+        .await;
+        let ingress = enforced.peers[0].ingress.as_ref().expect("ingress");
+        assert_eq!(ingress.tcp, vec!["22", "8080"]);
+        assert!(ingress.deny_tcp.is_empty());
     }
 
     #[tokio::test]

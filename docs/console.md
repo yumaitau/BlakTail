@@ -12,7 +12,11 @@ authorisation.
 - `/devices` — device inventory across linked networks; each row shows its
   network and expands for rename, routes, tags, and revocation
 - `/join-keys` — mint join keys (owner/admin)
-- `/acls` — people groups and access rules (owner/admin write)
+- `/acls` — people groups and access rules (owner/admin write), plus
+  **Explain access** for any member: matched rule, deny precedence, posture,
+  pairing and whether the destination device actually enforces the result
+- `/posture` — versioned posture checks (owner/admin write) and each
+  device's current assessment; self-reported data is labelled as such
 - `/audit` — latest actor-attributed security and administration changes
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics
 - `/settings` — separate **Network accounts** and **Ways to sign in**, secure
