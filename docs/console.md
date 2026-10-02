@@ -42,7 +42,13 @@ authorisation.
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
-- `/audit` — latest actor-attributed security and administration changes
+- `/audit` — actor-attributed administration changes from the coordinator and
+  console, filterable by actor, action, target and UTC date, paged with one
+  cursor across both stores, redacted details, integrity-chain status, and
+  CSV/JSON export for roles with `export_audit` ([audit-and-traffic.md](audit-and-traffic.md))
+- `/traffic` — opt-in aggregate traffic diagnostics (owner turns on; off by
+  default) with disabled, no-data and stale states; current agents do not
+  report traffic yet
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics
 - `/operations` — **Operator health** (owners and auditors only, enforced by the
   coordinator): console, coordinator and schema versions, relay reachability
@@ -304,6 +310,13 @@ minting, browser enrollment approval, friendly-name changes, route approval, ACL
 updates, node-key lifetime updates, and console revocation are recorded with actor,
 source, and result. Raw bootstrap credentials, invitation tokens, passwords,
 sessions, join keys, node tokens, and browser device codes are never included.
+Details are also redacted by key name and value shape when displayed or
+exported. Exports are audited as `audit.exported`.
+
+Settings → Webhooks lets owners and admins choose which catalogued events
+each destination receives, inspect deliveries (including dead-lettered ones
+and their last error) and replay them. Webhooks are the only alert channel;
+there is no email or Slack delivery ([notifications.md](notifications.md)).
 
 ## Local development
 

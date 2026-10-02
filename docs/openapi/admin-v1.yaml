@@ -99,6 +99,14 @@ paths:
       responses:
         "204": { description: Updated }
   /api/v1/keys:
+    get:
+      summary: List join-key metadata (never the secret or its hash)
+      description: Browser-approval grants are excluded. Requires keys:read or keys:write.
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      responses:
+        "200": { description: "Envelope of keys with name, use counts, expiry and state" }
+        "403": { description: Missing keys:read }
     post:
       summary: Mint an enrolment key
       parameters:
@@ -229,11 +237,30 @@ paths:
         "200": { description: Envelope of destinations without secrets }
     post:
       summary: Create a signed HTTPS webhook destination
+      description: |
+        Optional `event_types` (catalogued types or "*", the default) limits
+        what the destination receives. Rejected targets: non-HTTPS, embedded
+        credentials, loopback, private, link-local, CGNAT/overlay (100.64/10),
+        multicast, reserved, IPv4-mapped forms of those, `.internal`/`.local`
+        names and cloud metadata addresses. Delivery re-resolves the host,
+        re-checks every address and connects only to a checked address.
       parameters:
         - $ref: "#/components/parameters/Organisation"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url]
+              additionalProperties: false
+              properties:
+                name: { type: string, maxLength: 64 }
+                url: { type: string, format: uri }
+                event_types: { type: array, items: { type: string } }
       responses:
         "201": { description: Destination plus shown-once signing secret }
-        "400": { description: SSRF or invalid URL }
+        "400": { description: SSRF, invalid URL or unknown event type }
   /api/v1/webhooks/{destination_id}:
     delete:
       summary: Disable a webhook destination
@@ -269,17 +296,30 @@ paths:
         "204": { description: Requeued }
   /api/v1/audit:
     get:
-      summary: List audit events
+      summary: List audit events, newest first, with keyset pagination and filters
+      description: |
+        Pass `next_cursor` back as `before` for the next page. Detail keys
+        that name secrets (token, secret, password, signature and similar)
+        and values shaped like BlakTail credentials, JWTs or PEM blocks are
+        returned as `[redacted]`. Requires `audit:read`.
       parameters:
         - $ref: "#/components/parameters/Organisation"
         - in: query
           name: limit
-          schema: { type: integer }
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
         - in: query
           name: before
           schema: { type: string, description: "created_at:id cursor" }
+        - $ref: "#/components/parameters/AuditActor"
+        - $ref: "#/components/parameters/AuditAction"
+        - $ref: "#/components/parameters/AuditTargetType"
+        - $ref: "#/components/parameters/AuditTargetId"
+        - $ref: "#/components/parameters/AuditSince"
+        - $ref: "#/components/parameters/AuditUntil"
       responses:
-        "200": { description: Envelope of events }
+        "200": { description: Envelope of events with next_cursor }
+        "400": { description: Invalid cursor or filter }
+        "403": { description: Missing audit:read }
   /api/v1/network-resources:
     get:
       summary: List network resources with routing-peer health and effective distribution
@@ -357,6 +397,169 @@ paths:
         "403": { description: Missing routes:write }
         "404": { description: Not found }
         "412": { description: Stale If-Match etag }
+  /api/v1/audit/export:
+    get:
+      summary: Export matching audit events as JSON or CSV (at most 10000 rows)
+      description: |
+        Requires `audit:export` (people: the export_audit permission —
+        owner, admin, auditor). The export itself is recorded as an
+        `audit.exported` audit event with its format, filters and row count.
+        `X-BlakTail-Export-Truncated: true` means the cap was reached; narrow
+        the date range. CSV cells beginning with = + - @ are prefixed with '.
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - in: query
+          name: format
+          schema: { type: string, enum: [json, csv], default: json }
+        - $ref: "#/components/parameters/AuditActor"
+        - $ref: "#/components/parameters/AuditAction"
+        - $ref: "#/components/parameters/AuditTargetType"
+        - $ref: "#/components/parameters/AuditTargetId"
+        - $ref: "#/components/parameters/AuditSince"
+        - $ref: "#/components/parameters/AuditUntil"
+      responses:
+        "200": { description: "JSON {data, truncated} or text/csv attachment" }
+        "400": { description: Unknown format or invalid filter }
+        "403": { description: Missing audit:export }
+  /api/v1/audit/verify:
+    get:
+      summary: Verify the organisation's audit hash chain inside the retention window
+      description: |
+        Each coordinator audit row written since schema 27 records its
+        sequence, the previous row's hash and its own hash. The report lists
+        edited rows, gaps and a missing tail. Rows written before the chain
+        existed are counted as `unchained_events`. Requires `audit:read`.
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      responses:
+        "200": { description: "Envelope of {intact, chained_events, unchained_events, first_seq, last_seq, head_seq, problems, note}" }
+        "403": { description: Missing audit:read }
+  /api/v1/events/catalogue:
+    get:
+      summary: List the webhook event types with severity and meaning
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      responses:
+        "200": { description: "Envelope of [{event_type, severity, summary}]" }
+        "403": { description: Missing webhooks:read }
+  /api/v1/webhooks/{destination_id}/subscriptions:
+    put:
+      summary: Choose which catalogued event types a destination receives
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - in: path
+          name: destination_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_types]
+              additionalProperties: false
+              properties:
+                event_types:
+                  type: array
+                  minItems: 1
+                  items: { type: string, description: 'A catalogued event type, or "*" for all' }
+      responses:
+        "200": { description: "Envelope of {destination_id, event_types}" }
+        "400": { description: Empty list or unknown event type }
+        "403": { description: Missing webhooks:write }
+        "404": { description: Destination not in this organisation }
+  /api/v1/posture-checks:
+    get:
+      summary: List posture checks with the policy rules that reference them
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      responses:
+        "200": { description: Envelope of posture checks }
+        "403": { description: Missing devices:read }
+    post:
+      summary: Create a posture check (same validation as the console)
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, definition]
+              additionalProperties: false
+              properties:
+                name: { type: string, description: "1-32 lowercase letters, digits or hyphens" }
+                definition: { $ref: "#/components/schemas/PostureDefinition" }
+      responses:
+        "201": { description: "Envelope of {id, name, version}" }
+        "400": { description: Invalid name or definition }
+        "403": { description: Missing policy:write }
+        "409": { description: Name already exists }
+  /api/v1/posture-checks/{check_id}:
+    put:
+      summary: Replace a posture check definition (optimistic concurrency on version)
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - $ref: "#/components/parameters/CheckId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, definition]
+              additionalProperties: false
+              properties:
+                version: { type: integer, description: The version you read }
+                definition: { $ref: "#/components/schemas/PostureDefinition" }
+      responses:
+        "200": { description: "Envelope of {id, name, version}" }
+        "403": { description: Missing policy:write }
+        "404": { description: Not found }
+        "412": { description: Someone else changed it; re-read and retry }
+    delete:
+      summary: Delete a posture check that no policy rule references
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - $ref: "#/components/parameters/CheckId"
+      responses:
+        "204": { description: Deleted }
+        "403": { description: Missing policy:write }
+        "404": { description: Not found }
+        "409": { description: Still referenced by policy }
+  /api/v1/keys/{key_id}:
+    delete:
+      summary: Revoke a join key (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - in: path
+          name: key_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Revoked or already revoked }
+        "403": { description: Missing keys:write }
+        "404": { description: Not a join key in this organisation }
+  /api/v1/dns/validate:
+    post:
+      summary: Validate and canonicalise a DNS draft without publishing it
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dns]
+              properties:
+                dns: { type: object, description: Same document as PUT /api/v1/dns `dns` }
+      responses:
+        "200": { description: "Envelope of {dns, warnings}" }
+        "400": { description: Invalid DNS document }
+        "403": { description: Missing devices:read }
 components:
   securitySchemes:
     bearerAuth:
@@ -388,7 +591,49 @@ components:
       name: resource_id
       required: true
       schema: { type: string, format: uuid }
+    CheckId:
+      in: path
+      name: check_id
+      required: true
+      schema: { type: string, format: uuid }
+    AuditActor:
+      in: query
+      name: actor
+      schema: { type: string, maxLength: 200, description: "Actor user id, email (case-insensitive) or name" }
+    AuditAction:
+      in: query
+      name: action
+      schema: { type: string, maxLength: 200, description: "Exact action, or a prefix ending in . or * (node.*)" }
+    AuditTargetType:
+      in: query
+      name: target_type
+      schema: { type: string, maxLength: 200 }
+    AuditTargetId:
+      in: query
+      name: target_id
+      schema: { type: string, maxLength: 200 }
+    AuditSince:
+      in: query
+      name: since
+      schema: { type: integer, description: "Inclusive Unix seconds" }
+    AuditUntil:
+      in: query
+      name: until
+      schema: { type: integer, description: "Exclusive Unix seconds" }
   schemas:
+    PostureDefinition:
+      type: object
+      additionalProperties: false
+      description: At least one requirement is needed. Inventory is self-reported by devices, not attested.
+      properties:
+        description: { type: string, maxLength: 200 }
+        min_agent_version: { type: string, example: "0.2.0" }
+        os_families: { type: array, items: { type: string, enum: [linux, macos, ios, android, windows] } }
+        min_os_versions: { type: object, additionalProperties: { type: string } }
+        max_credential_age_secs: { type: integer, minimum: 60, maximum: 31536000 }
+        max_report_age_secs: { type: integer, minimum: 60, maximum: 31536000 }
+        require_approved_peer: { type: boolean }
+        on_missing_data: { type: string, enum: [fail, pass], default: fail }
     NetworkResourceInput:
       type: object
       required: [name, access]

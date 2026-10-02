@@ -70,7 +70,13 @@ See [console.md](console.md).
 - Explain access, and SSH rules enforced at Linux destinations (per-user
   limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials
-- Prometheus metrics and an actor-attributed audit log
+- Prometheus metrics and an actor-attributed, paged, filterable audit log with
+  audited export and a per-organisation hash chain (tamper-evident, not
+  tamper-proof)
+- Signed HTTPS webhooks with an event catalogue and per-destination
+  subscriptions (no email or chat delivery)
+- Owner opt-in traffic diagnostics endpoint and page; current agents do not
+  report traffic yet
 - Single-host SQLite or concurrent PostgreSQL coordinator storage
 - A disposable Sydney AWS proof harness, not a production SaaS
 - An iPhone client that joins a network as a WireGuard node and still administers All networks

@@ -9,6 +9,7 @@ import {
   verifyDomain,
 } from "@/lib/auth-policy";
 import { parseStepUpMinutes } from "@/lib/auth-policy-core";
+import { setWebhookSubscriptions } from "@/lib/coord-events";
 import { rotateApiClient, setApiClientSuspended } from "@/lib/coord-identity";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
@@ -99,5 +100,25 @@ export async function removeDomainAction(formData: FormData): Promise<Result> {
     return { ok: true, data: undefined };
   } catch (error) {
     return failure(error, "Could not remove the domain.");
+  }
+}
+
+export async function setWebhookSubscriptionsAction(formData: FormData): Promise<Result> {
+  try {
+    const ctx = await requireConsoleContext();
+    const denied = permissionReason(ctx.role, "manage_integrations");
+    if (denied) return { ok: false, error: denied };
+    const destinationId = String(formData.get("destinationId") ?? "");
+    if (!destinationId) return { ok: false, error: "Choose a destination." };
+    const eventTypes =
+      formData.get("all") === "on" ? ["*"] : formData.getAll("event_types").map(String);
+    if (eventTypes.length === 0) {
+      return { ok: false, error: "Choose at least one event, or all events." };
+    }
+    await setWebhookSubscriptions(ctx, destinationId, eventTypes);
+    revalidatePath("/settings");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return failure(error, "Could not save the event subscriptions.");
   }
 }

@@ -682,6 +682,7 @@ export async function changeMembershipAction(
       membership_id: membershipId,
       role: next.role,
       status: next.status,
+      previous_role: next.previousRole,
     });
     revalidatePath("/settings");
     return { ok: true, data: undefined };

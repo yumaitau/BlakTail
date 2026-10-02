@@ -545,7 +545,7 @@ export async function changeMembership(input: {
   actorUserId: string;
   actorEmail: string;
   actorRole: OrgRole;
-}): Promise<{ role: OrgRole; status: string }> {
+}): Promise<{ role: OrgRole; status: string; previousRole: OrgRole }> {
   const reason = permissionReason(input.actorRole, "manage_security");
   if (reason) {
     throw new OidcError(reason);
@@ -622,6 +622,5 @@ export async function changeMembership(input: {
     previous_role: outcome.previous.role,
     previous_status: outcome.previous.status,
   });
-  const next = outcome.next;
-  return next;
+  return { ...outcome.next, previousRole: outcome.previous.role };
 }

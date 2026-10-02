@@ -38,6 +38,7 @@ export async function PATCH(request: Request) {
       membership_id: body.membershipId,
       role: next.role,
       status: next.status,
+      previous_role: next.previousRole,
     });
     return NextResponse.json({ ok: true });
   } catch (error) {

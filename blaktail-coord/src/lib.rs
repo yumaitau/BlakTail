@@ -1,6 +1,8 @@
 mod address_pool;
 mod admin;
 mod app_connectors;
+mod audit_log;
+mod automation;
 mod change_drafts;
 pub mod connectors;
 mod dns_workspace;
@@ -10,6 +12,7 @@ pub mod https_fallback;
 pub mod https_services;
 pub mod ipam;
 mod metrics;
+mod notifications;
 mod operations;
 mod org_dns;
 mod peer_lifecycle;
@@ -22,6 +25,7 @@ mod service_users;
 mod shares;
 pub mod tailnet_lock;
 mod topology;
+mod traffic;
 mod webhooks;
 mod wg_only;
 
@@ -1452,6 +1456,9 @@ pub fn app_with_relays_console_and_metrics(
         .merge(topology::routes())
         .merge(change_drafts::routes())
         .merge(operations::routes())
+        .merge(audit_log::routes())
+        .merge(traffic::routes())
+        .merge(notifications::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -2735,6 +2742,20 @@ async fn register_node(
         }),
     )
     .await?;
+    if grant.bound_name.is_none() {
+        // Browser approvals are bound to a device; this was a join key.
+        webhooks::enqueue(
+            &mut tx,
+            org_id,
+            "join_key.used",
+            &serde_json::json!({
+                "join_key_id": grant.key_id,
+                "device_id": id,
+                "name": input.name.trim(),
+            }),
+        )
+        .await?;
+    }
     tx.commit().await?;
     info!(node_id=%id, org_id=%grant.org_id, "node registered");
     let (relay_token, relay_expires_at) = relay_credentials(&s, id);
@@ -4554,10 +4575,28 @@ async fn put_security_policy(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize, Clone)]
 pub(crate) struct AuditQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     limit: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     before: Option<String>,
+    /// Actor user id, email (case-insensitive) or display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    /// Exact action, or a prefix when it ends in `.` or `*` (`node.*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_id: Option<String>,
+    /// Inclusive lower bound, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<i64>,
+    /// Exclusive upper bound, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -4592,63 +4631,7 @@ pub(crate) async fn load_audit_events(
     query: &AuditQuery,
 ) -> Result<Vec<AuditEvent>, ApiError> {
     let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 200));
-    let before = query
-        .before
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let (before_created_at, before_id) = match before {
-        Some(cursor) => {
-            let (created_at, id) = cursor
-                .split_once(':')
-                .ok_or_else(|| ApiError::BadRequest("before must be created_at:id".into()))?;
-            let created_at = created_at
-                .parse::<i64>()
-                .map_err(|_| ApiError::BadRequest("before created_at is invalid".into()))?;
-            if id.is_empty() {
-                return Err(ApiError::BadRequest("before id is required".into()));
-            }
-            (Some(created_at), Some(id.to_owned()))
-        }
-        None => (None, None),
-    };
-    let rows = if let (Some(created_at), Some(id)) = (before_created_at, before_id) {
-        sqlx::query(
-            "SELECT id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at FROM audit_events WHERE org_id=$1 AND (created_at<$2 OR (created_at=$2 AND id<$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
-        )
-        .bind(org_id.to_string())
-        .bind(created_at)
-        .bind(id)
-        .bind(limit)
-        .fetch_all(&store.pool)
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at FROM audit_events WHERE org_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2",
-        )
-        .bind(org_id.to_string())
-        .bind(limit)
-        .fetch_all(&store.pool)
-        .await?
-    };
-    rows.into_iter()
-        .map(|row| {
-            let details_json: String = row.try_get(8)?;
-            Ok::<_, sqlx::Error>(AuditEvent {
-                id: row.try_get(0)?,
-                actor_user_id: row.try_get(1)?,
-                actor_name: row.try_get(2)?,
-                actor_email: row.try_get(3)?,
-                actor_role: row.try_get(4)?,
-                action: row.try_get(5)?,
-                target_type: row.try_get(6)?,
-                target_id: row.try_get(7)?,
-                details: serde_json::from_str(&details_json).unwrap_or_default(),
-                created_at: row.try_get(9)?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ApiError::Database)
+    audit_log::query_events(store, org_id, query, limit).await
 }
 
 pub(crate) async fn purge_expired_tombstones(store: &Store, org_id: Uuid) -> Result<u64, ApiError> {
@@ -4688,29 +4671,27 @@ pub(crate) async fn append_audit(
     target_id: Option<&str>,
     details: &serde_json::Value,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO audit_events(id,org_id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(org_id.to_string())
-    .bind(&session.user_id)
-    .bind(&session.name)
-    .bind(&session.email)
-    // Service users act with a scope-limited admin session; never let their
-    // audit rows read as a human admin.
-    .bind(if session.user_id.starts_with("api:") {
-        "api_client"
-    } else {
-        session.role.as_str()
-    })
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(details.to_string())
-    .bind(now())
-    .execute(connection)
-    .await?;
-    Ok(())
+    let entry = audit_log::ChainEntry {
+        org_id: org_id.to_string(),
+        id: Uuid::new_v4().to_string(),
+        actor_user_id: session.user_id.clone(),
+        actor_name: session.name.clone(),
+        actor_email: session.email.clone(),
+        // Service users act with a scope-limited admin session; never let
+        // their audit rows read as a human admin.
+        actor_role: if session.user_id.starts_with("api:") {
+            "api_client".into()
+        } else {
+            session.role.as_str().into()
+        },
+        action: action.into(),
+        target_type: target_type.into(),
+        target_id: target_id.map(str::to_owned),
+        details_json: details.to_string(),
+        created_at: now(),
+    };
+    audit_log::insert_chained(connection, &entry).await?;
+    notifications::enqueue_for_audit(connection, org_id, &entry, details).await
 }
 
 pub(crate) async fn bump_control_revision(
@@ -5971,6 +5952,7 @@ mod tests {
     use tower::ServiceExt;
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
+    mod events_audit;
     mod forwarding;
     mod operations;
     mod policy_posture;
@@ -9185,7 +9167,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"too-many","url": format!("http://{addr}/too-many")}),
+                serde_json::json!({"name":"too-many","url": format!("http://{addr}/too-many"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,
@@ -9196,7 +9178,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"hang","url": format!("http://{addr}/hang")}),
+                serde_json::json!({"name":"hang","url": format!("http://{addr}/hang"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,
@@ -9207,7 +9189,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"redirect","url": format!("http://{addr}/redirect")}),
+                serde_json::json!({"name":"redirect","url": format!("http://{addr}/redirect"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,

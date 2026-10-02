@@ -1432,3 +1432,10 @@ button.quiet-danger:hover:not(:disabled),
   stroke: var(--blaktail-sand-100);
   stroke-width: 3;
 }
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+}

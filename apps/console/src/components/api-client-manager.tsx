@@ -15,11 +15,13 @@ import type { ApiClient } from "@/lib/coord";
 const SCOPES = [
   "devices:read",
   "devices:write",
+  "keys:read",
   "keys:write",
   "routes:write",
   "policy:write",
   "dns:write",
   "audit:read",
+  "audit:export",
   "status:read",
   "webhooks:read",
   "webhooks:write",

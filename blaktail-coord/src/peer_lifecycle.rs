@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::{
     append_audit, bump_control_revision, console_session, hash, load_audit_events, load_nodes, now,
     permissions::{require, Permission},
-    webhooks, ApiError, AppState, AuditEvent, AuditQuery, NodeListQuery, NodeRow, NODE_ONLINE_SECS,
+    webhooks, ApiError, AppState, AuditEvent, AuditQuery, NodeListQuery, NodeRow, Session,
+    NODE_ONLINE_SECS,
 };
 
 /// Oldest agent release this coordinator is known to work with. Raise it in
@@ -153,7 +154,16 @@ async fn list_join_keys(
     headers: HeaderMap,
 ) -> Result<Json<Vec<JoinKeySummary>>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManageJoinKeys)?;
+    list_join_keys_as(&s, org_id, &session).await
+}
+
+/// Shared by the console route and `/api/v1/keys`.
+pub(crate) async fn list_join_keys_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+) -> Result<Json<Vec<JoinKeySummary>>, ApiError> {
+    require(session, Permission::ManageJoinKeys)?;
     // Browser-approval grants share this table but are not operator keys. The
     // SQLite baseline declared the timestamp columns TEXT, hence the casts.
     let rows = sqlx::query(
@@ -214,7 +224,17 @@ async fn revoke_join_key(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManageJoinKeys)?;
+    revoke_join_key_as(&s, org_id, &session, key_id).await
+}
+
+/// Shared by the console route and `/api/v1/keys/{key_id}`.
+pub(crate) async fn revoke_join_key_as(
+    s: &AppState,
+    org_id: Uuid,
+    session: &Session,
+    key_id: Uuid,
+) -> Result<StatusCode, ApiError> {
+    require(session, Permission::ManageJoinKeys)?;
     let mut tx = s.store.pool.begin().await?;
     let name: String = sqlx::query_scalar(
         "SELECT k.name FROM join_keys k WHERE k.id=$1 AND k.org_id=$2 \
@@ -241,7 +261,7 @@ async fn revoke_join_key(
     append_audit(
         &mut tx,
         org_id,
-        &session,
+        session,
         "join_key.revoked",
         "join_key",
         Some(&key_id.to_string()),
@@ -357,19 +377,16 @@ async fn get_peer_detail(
     let server_time = now();
 
     let audit = if session.role.can(Permission::ViewAudit) {
-        let mut events = load_audit_events(
+        load_audit_events(
             &s.store,
             org_id,
             &AuditQuery {
-                limit: Some(200),
-                before: None,
+                limit: Some(20),
+                target_id: Some(node_id.to_string()),
+                ..AuditQuery::default()
             },
         )
-        .await?;
-        let target = node_id.to_string();
-        events.retain(|event| event.target_id.as_deref() == Some(target.as_str()));
-        events.truncate(20);
-        events
+        .await?
     } else {
         Vec::new()
     };

@@ -62,6 +62,13 @@ expired, and revoked invitation rows are not currently purged automatically. Log
 and backups follow deployment policy (the disposable AWS harness uses one-day
 CloudWatch retention; the legacy reference root uses 30 days).
 
+Traffic diagnostics are off by default. If an owner turns them on, devices
+may upload aggregate counters (bytes, packets, service class, port,
+transport, allow/deny per hour) — never payloads, URLs, DNS questions or host
+names — kept for 1–30 days as the owner chooses and deletable at any time
+from `/traffic`. Current agents do not upload them. See
+[audit-and-traffic.md](audit-and-traffic.md).
+
 Operators must choose and publish retention periods, test deletion across live
 databases and backups, and preserve audit data only as long as their security and
 legal needs require. Revoking a node stops tailnet access but is not a complete

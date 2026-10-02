@@ -32,6 +32,8 @@ pub(crate) enum Scope {
     DevicesWrite,
     #[serde(rename = "keys:write")]
     KeysWrite,
+    #[serde(rename = "keys:read")]
+    KeysRead,
     #[serde(rename = "routes:write")]
     RoutesWrite,
     #[serde(rename = "policy:write")]
@@ -40,6 +42,8 @@ pub(crate) enum Scope {
     DnsWrite,
     #[serde(rename = "audit:read")]
     AuditRead,
+    #[serde(rename = "audit:export")]
+    AuditExport,
     #[serde(rename = "status:read")]
     StatusRead,
     #[serde(rename = "webhooks:read")]
@@ -54,10 +58,12 @@ impl Scope {
             Self::DevicesRead => "devices:read",
             Self::DevicesWrite => "devices:write",
             Self::KeysWrite => "keys:write",
+            Self::KeysRead => "keys:read",
             Self::RoutesWrite => "routes:write",
             Self::PolicyWrite => "policy:write",
             Self::DnsWrite => "dns:write",
             Self::AuditRead => "audit:read",
+            Self::AuditExport => "audit:export",
             Self::StatusRead => "status:read",
             Self::WebhooksRead => "webhooks:read",
             Self::WebhooksWrite => "webhooks:write",
@@ -172,6 +178,37 @@ pub(crate) fn api_routes() -> Router<AppState> {
                 .put(crate::resources::api_update)
                 .delete(crate::resources::api_delete),
         )
+        // Drafts 17, 18 and 22: audit export and chain, event subscriptions,
+        // posture checks, join-key metadata and DNS draft validation.
+        .route("/api/v1/audit/export", get(crate::audit_log::api_export))
+        .route("/api/v1/audit/verify", get(crate::audit_log::api_verify))
+        .route(
+            "/api/v1/events/catalogue",
+            get(crate::notifications::api_catalogue),
+        )
+        .route(
+            "/api/v1/webhooks/:destination_id/subscriptions",
+            put(crate::notifications::api_subscriptions),
+        )
+        .route(
+            "/api/v1/posture-checks",
+            get(crate::automation::api_list_posture_checks)
+                .post(crate::automation::api_create_posture_check),
+        )
+        .route(
+            "/api/v1/posture-checks/:check_id",
+            put(crate::automation::api_update_posture_check)
+                .delete(crate::automation::api_delete_posture_check),
+        )
+        .route("/api/v1/keys", get(crate::automation::api_list_join_keys))
+        .route(
+            "/api/v1/keys/:key_id",
+            axum::routing::delete(crate::automation::api_revoke_join_key),
+        )
+        .route(
+            "/api/v1/dns/validate",
+            post(crate::automation::api_validate_dns),
+        )
         .layer(DefaultBodyLimit::max(ADMIN_API_MAX_BODY_BYTES))
 }
 
@@ -182,6 +219,7 @@ pub(crate) fn require_scope(caller: &ApiCaller, scope: Scope) -> Result<(), ApiE
     if caller.scopes.contains(&scope)
         || (scope == Scope::DevicesRead && caller.scopes.contains(&Scope::DevicesWrite))
         || (scope == Scope::WebhooksRead && caller.scopes.contains(&Scope::WebhooksWrite))
+        || (scope == Scope::KeysRead && caller.scopes.contains(&Scope::KeysWrite))
     {
         return Ok(());
     }
@@ -194,8 +232,9 @@ fn scope_permission(scope: Scope) -> Permission {
     match scope {
         Scope::DevicesRead | Scope::StatusRead | Scope::WebhooksRead => Permission::ViewNetwork,
         Scope::AuditRead => Permission::ViewAudit,
+        Scope::AuditExport => Permission::ExportAudit,
         Scope::DevicesWrite => Permission::ManagePeers,
-        Scope::KeysWrite => Permission::ManageJoinKeys,
+        Scope::KeysWrite | Scope::KeysRead => Permission::ManageJoinKeys,
         Scope::RoutesWrite => Permission::ManageNetworks,
         Scope::PolicyWrite => Permission::ManagePolicy,
         Scope::DnsWrite => Permission::ManageDns,
