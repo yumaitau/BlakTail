@@ -2802,7 +2802,7 @@ async fn update_advertised_routes(
 ) -> Result<StatusCode, ApiError> {
     let routes = validate_advertised_routes(input.advertised_routes)?;
     let token = bearer(&headers)?;
-    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL")
+    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json,suspended_at,org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL")
         .bind(node_id.to_string())
         .bind(token)
         .fetch_optional(&s.store.pool)
@@ -2812,10 +2812,12 @@ async fn update_advertised_routes(
                 row.try_get::<i64, _>(0)?,
                 row.try_get::<String, _>(1)?,
                 row.try_get::<Option<i64>, _>(2)?,
+                row.try_get::<String, _>(3)?,
             ))
         })
         .transpose()?;
-    let (credential_expires_at, approved_json, suspended_at) = row.ok_or(ApiError::Unauthorized)?;
+    let (credential_expires_at, approved_json, suspended_at, org_id) =
+        row.ok_or(ApiError::Unauthorized)?;
     if suspended_at.is_some() {
         return Err(ApiError::Suspended);
     }
@@ -2827,12 +2829,22 @@ async fn update_advertised_routes(
         .into_iter()
         .filter(|route| routes.contains(route))
         .collect();
-    sqlx::query("UPDATE nodes SET advertised_routes_json=$1,approved_routes_json=$2 WHERE id=$3")
-        .bind(serde_json::to_string(&routes).unwrap())
-        .bind(serde_json::to_string(&retained_approvals).unwrap())
+    let advertised_json = serde_json::to_string(&routes).unwrap();
+    let retained_json = serde_json::to_string(&retained_approvals).unwrap();
+    let mut tx = s.store.pool.begin().await?;
+    let changed = sqlx::query("UPDATE nodes SET advertised_routes_json=$1,approved_routes_json=$2 WHERE id=$3 AND (advertised_routes_json<>$1 OR approved_routes_json<>$2)")
+        .bind(&advertised_json)
+        .bind(&retained_json)
         .bind(node_id.to_string())
-        .execute(&s.store.pool)
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    // Advertisements feed route distribution and exit-node deny sets, so
+    // peers and routers must recompile rather than wait for an unrelated change.
+    if changed > 0 {
+        bump_control_revision(&mut tx, &org_id).await?;
+    }
+    tx.commit().await?;
     info!(%node_id, routes = routes.len(), "node route advertisements updated");
     Ok(StatusCode::NO_CONTENT)
 }

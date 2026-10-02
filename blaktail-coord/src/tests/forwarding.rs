@@ -604,3 +604,54 @@ fn resource_constraints_map_to_services() {
     assert!(udp_all.admits(Some(AclProtocol::Udp), Some(53)));
     assert!(!udp_all.admits(Some(AclProtocol::Tcp), Some(53)));
 }
+
+#[tokio::test]
+async fn changed_advertisements_bump_the_control_revision_once() {
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "advertise-revision-org").await;
+    let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let node = register_test_node(
+        &router,
+        org.id,
+        &owner,
+        "router-one",
+        "router-one-key",
+        &["10.5.0.0/24"],
+    )
+    .await;
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT control_revision FROM orgs WHERE id=$1")
+            .bind(org.id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+    };
+    let advertise = |routes: serde_json::Value| {
+        let router = router.clone();
+        let (id, token) = (node.id, node.node_token.clone());
+        async move {
+            call(
+                &router,
+                Method::PUT,
+                &format!("/v1/nodes/{id}/routes"),
+                serde_json::json!({ "advertised_routes": routes }),
+                Some(&token),
+            )
+            .await
+            .status()
+        }
+    };
+
+    let before = revision().await;
+    assert_eq!(
+        advertise(serde_json::json!(["10.5.0.0/24"])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(revision().await, before, "unchanged advertisement");
+    assert_eq!(
+        advertise(serde_json::json!(["10.5.0.0/24", "10.6.0.0/24"])).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(revision().await, before + 1, "changed advertisement");
+}

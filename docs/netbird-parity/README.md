@@ -37,3 +37,21 @@ Do not reopen or duplicate #5, #11, #12, #24, #27, #29, #31, #32, #36–#40, #43
 1. Refresh upstream docs/dashboard and the BlakTail checkout; source pages may change. Recheck open **and closed** GitHub issues by title and body.
 2. Review each issue for scope, dependencies, priority, cultural/product fit, edition/licensing, owner, and external exposure. Decide whether decision-gate issues should be posted.
 3. Fix GitHub authentication, then obtain immediate approval for the exact issue batch before submitting. Post bodies individually, verify every returned URL/title/body, and link dependencies using actual issue numbers. Do not apply labels or milestones that do not exist.
+
+## Implementation status (3 October 2026, branch `netbird-parity`)
+
+Each draft ends with its own **Status** section listing what is done, what tests prove, and what still needs live or field proof. Summary:
+
+| Draft | State |
+| --- | --- |
+| 01 navigation, 02 topology, 03 change drafts | Built and tested; browser/accessibility tests and Postgres-specific publish races not yet run |
+| 04 resources, 05 routing, 26 IPAM, 06 connectors | Built and tested, including router-side forwarding enforcement and persisted exit-node choice; no two-site, router or connector field run yet |
+| 07 explain and SSH, 08 posture | Built and tested; Linux only enforces port/SSH rules, real sshd and two-node checks not run; MDM/EDR adapters are design only (ADR 0005) |
+| 09 DNS, 10 private services | DNS built and tested; services reach certificate issuance, but no serving-agent listener exists yet |
+| 12 peer lifecycle, 16 enrolment | Built and tested; `--join-key` argument removed (stdin or `BLAKTAIL_JOIN_KEY` only) |
+| 13 browser access, 11 public ingress, 24 agent network, 25 post-quantum | Decision records only (ADRs 0006–0009); proposed, awaiting owner sign-off |
+| 14 roles, 15 sign-in | Built and tested, including Postgres; SCIM group-to-role mapping not built |
+| 17 audit and traffic, 18 notifications, 22 API and IaC | Built and tested; no agent sends traffic data yet; Terraform example validated, not applied |
+| 19 clients, 20 profiles, 21 relay, 23 operations | Operator health, signed-release path, multi-relay failover and tray built; no device, NAT-lab, release or failover drill run; iPhone and Android have no relay client |
+
+Three independent security reviews (coordinator authorisation, data-plane enforcement, console sign-in) ran after merging; every confirmed finding was fixed with a regression test.
