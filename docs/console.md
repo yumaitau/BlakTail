@@ -175,6 +175,11 @@ Owners and admins can also set or clear a 64-character friendly name. This label
 for people: the agent-provided name, MagicDNS hostname, WireGuard identity, routes,
 and persisted agent state do not change.
 
+The Networks page names private subnets as resources, picks routing peers with a
+failover metric, chooses which roles, tags or policy groups receive each route,
+and shows routing-peer health and effective distribution per device. Members can
+read it; owners and admins change it. See [network-resources.md](network-resources.md).
+
 Settings can publish organisation DNS: split suffixes, upstream resolvers, search
 domains, and extra A/AAAA records. Members are read-only. MagicDNS names stay
 coordinator-authoritative and cannot be impersonated from this form. The page

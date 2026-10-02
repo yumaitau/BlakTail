@@ -62,6 +62,7 @@ See [console.md](console.md).
 - Stable technical and MagicDNS identity, with editable audited friendly names
 - Tags, people groups, ACL rules, advertised-route approval, revoke, and tombstone
 - Linux subnet routers and opt-in IPv4 exit nodes
+- Named network resources with routing-peer failover, access selection and overlap checks ([limits](network-resources.md#current-limits))
 - Dual-stack overlay addresses (CGNAT IPv4 plus an organisation ULA `/64`)
 - Device posture: last-seen/online, OS, agent version, search
 - Owner-minted `/api/v1` automation credentials

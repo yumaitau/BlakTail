@@ -38,6 +38,10 @@ and their signing secrets are not OAuth credentials.
   revision.
 - `POST /api/v1/keys` honours `Idempotency-Key` (8–128 characters). Reusing a
   key with a different body returns `409`.
+- `/api/v1/network-resources` creates named routes: `POST` honours
+  `Idempotency-Key` and `dry_run`, `PUT` requires the current `etag` (`412`
+  when stale), and `DELETE` accepts `If-Match`. See
+  [network-resources.md](network-resources.md).
 - Request bodies are rejected above 64 KiB (`413`).
 - Each `bta_` client is limited to 120 requests per 60-second window (`429`).
 - Errors use `{ error, code, message, request_id }`.

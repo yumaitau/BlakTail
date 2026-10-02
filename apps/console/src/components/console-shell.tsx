@@ -17,6 +17,10 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     ],
   },
   {
+    label: "Networks",
+    links: [{ href: "/networks", label: "Networks" }],
+  },
+  {
     label: "Access",
     links: [{ href: "/acls", label: "Access policy" }],
   },

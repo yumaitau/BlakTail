@@ -7,6 +7,7 @@ pub mod ipam;
 mod metrics;
 mod org_dns;
 mod permissions;
+mod resources;
 mod shares;
 pub mod tailnet_lock;
 mod webhooks;
@@ -1408,6 +1409,7 @@ pub fn app_with_relays_console_and_metrics(
             "/v1/orgs/:org_id/webhooks/deliveries/:delivery_id/replay",
             post(webhooks::replay_delivery_console),
         )
+        .merge(resources::routes())
         .merge(admin::api_routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
@@ -2808,6 +2810,7 @@ async fn approve_node_routes(
             "approved routes must be a subset of the node's advertisements".into(),
         ));
     }
+    resources::ensure_routes_free(&mut tx, org_id, &approved).await?;
     let rows = sqlx::query(
         "SELECT id,credential_expires_at,approved_routes_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL",
     )
@@ -3104,6 +3107,7 @@ async fn list_peers(
     )
     .with_user(source_user_id);
     let acl: Acl = serde_json::from_str(&acl_json).map_err(|_| ApiError::CorruptData)?;
+    let resource_routes = resources::load_distribution(&s.store.pool, &org).await?;
     let requested_exit = selection
         .exit_node
         .as_deref()
@@ -3179,6 +3183,14 @@ async fn list_peers(
                         exit_node_active = true;
                     }
                 } else {
+                    peer.allowed_ips.push(route);
+                }
+            }
+            for route in resource_routes.routes_via(peer.id, node_id, &source, &acl, exit_matches) {
+                if route == "0.0.0.0/0" {
+                    exit_node_active = true;
+                }
+                if !peer.allowed_ips.contains(&route) {
                     peer.allowed_ips.push(route);
                 }
             }
