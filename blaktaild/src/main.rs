@@ -1,11 +1,13 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
 use blaktaild::{
-    apply_peer_map, configure_system_dns, disable_share, dns_domain, enable_share,
-    ensure_private_key, load_shares, organisation_dns_managed, organisation_resolver_suffixes,
-    overlay_ipv4, peer_key_hex, published_resolver_suffixes, put_share_file, read_state,
-    remove_system_dns, restore_peers, sync_once, validate_advertised_routes, validate_interface,
-    write_state, Coordinator, MagicDns, Network, Registration, RelayMesh, ShareServer,
-    DIRECT_GRACE_SECS, DIRECT_RETRY_SECS, HANDSHAKE_FRESH_SECS,
+    apply_peer_map, configure_system_dns,
+    connector::{self, ConnectorRuntime},
+    disable_share, dns_domain, enable_share, ensure_private_key, load_shares,
+    organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
+    published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
+    sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
+    Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
+    HANDSHAKE_FRESH_SECS,
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -68,6 +70,10 @@ enum Command {
         /// Delete this node automatically after it has been offline for 24 hours.
         #[arg(long)]
         ephemeral: bool,
+        /// Resolve and forward DNS network resources this Linux node is a
+        /// routing peer for. `--app-connector=false` turns it off again.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        app_connector: Option<bool>,
     },
     /// Resume the persisted enrollment and keep WireGuard peers synchronized.
     Run {
@@ -406,6 +412,7 @@ async fn sync_loop(
     let mut dns: Option<MagicDns> = None;
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
+    let mut connector = ConnectorRuntime::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -416,6 +423,11 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
+        if connector::manage(coordinator, network, state, &mut connector).await {
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist app connector routes");
+            }
+        }
         let transport = manage_paths(network, &mut mesh, state, &mut paths).await;
         coordinator.set_transport(transport);
         report_relay_endpoint(coordinator, mesh.as_ref(), state, state_dir).await;
@@ -1069,6 +1081,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             poll_seconds,
             exit_after_join,
             ephemeral,
+            app_connector,
         } => {
             let coord = coord
                 .or_else(|| operator_config.coordinator_url.clone())
@@ -1112,6 +1125,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 let value = value.trim();
                 (!value.is_empty() && !value.eq_ignore_ascii_case("none")).then(|| value.to_owned())
             });
+            if app_connector == Some(true) && !cfg!(target_os = "linux") {
+                return Err(blaktaild::Error::Message(
+                    "app connectors are currently supported on Linux only".into(),
+                ));
+            }
             #[cfg(target_os = "macos")]
             if !requested_routes.is_empty() || requested_exit_node.is_some() {
                 return Err(blaktaild::Error::Message(
@@ -1168,6 +1186,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
                 Err(error) => return Err(error),
             };
+            if let Some(enabled) = app_connector {
+                state.app_connector = enabled;
+            }
             let mut network = make_network();
             let interface_addresses = state.interface_addresses();
             if let Err(error) = network.setup(&interface, &key_path, &interface_addresses) {
@@ -1240,9 +1261,12 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             let mut network = make_network();
             network.setup(&state.interface, &key_path, &state.interface_addresses())?;
+            // Connector host routes are re-added after the first report.
+            let mut previous_routes = state.advertised_routes.clone();
+            previous_routes.append(&mut state.connector_routes);
             state.router_previous_ipv4_forward = network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &previous_routes,
                 &state.advertised_routes,
                 state.router_previous_ipv4_forward,
             )?;
@@ -1385,9 +1409,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 )?;
             }
             let mut network = make_network();
+            let mut forwarded = state.advertised_routes.clone();
+            forwarded.extend(state.connector_routes.iter().cloned());
             network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &forwarded,
                 &[],
                 state.router_previous_ipv4_forward,
             )?;
@@ -1410,9 +1436,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             }
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             let mut network = make_network();
+            let mut forwarded = state.advertised_routes.clone();
+            forwarded.extend(state.connector_routes.iter().cloned());
             network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &forwarded,
                 &[],
                 state.router_previous_ipv4_forward,
             )?;

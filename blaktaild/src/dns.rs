@@ -1291,6 +1291,8 @@ mod tests {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            app_connector: false,
+            connector_routes: Vec::new(),
         }
     }
 

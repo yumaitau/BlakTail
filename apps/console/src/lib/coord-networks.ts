@@ -20,6 +20,7 @@ export type RoutingPeerState =
   | "standby"
   | "offline"
   | "not_advertising"
+  | "not_connector"
   | "expired"
   | "missing";
 
@@ -28,7 +29,22 @@ export type ResourceState =
   | "stale"
   | "no_routing_peer"
   | "dns_not_resolved"
+  | "dns_blocked"
   | "disabled";
+
+export type ConnectorLease = {
+  route: string;
+  ttl: number;
+  resolved_at: number;
+  expires_at: number;
+};
+
+export type ConnectorReport = {
+  node_id: string;
+  state: "resolved" | "empty" | "blocked" | "error";
+  reason: string;
+  reported_at: number;
+};
 
 export type NetworkResource = {
   id: string;
@@ -38,7 +54,7 @@ export type NetworkResource = {
   cidr: string | null;
   dns_target: string | null;
   family: "ipv4" | "ipv6" | null;
-  dns_resolution: "not_resolved" | null;
+  dns_resolution: "resolved" | "blocked" | "not_resolved" | null;
   ports: string[];
   protocols: ResourceProtocol[];
   port_enforcement: "not_enforced";
@@ -52,6 +68,12 @@ export type NetworkResource = {
   etag: string;
   created_at: number;
   updated_at: number;
+  connector?: {
+    selected: string | null;
+    answers: ConnectorLease[];
+    reports: ConnectorReport[];
+    blocked_reason: string | null;
+  };
   status: {
     state: ResourceState;
     selected_routing_peer: string | null;

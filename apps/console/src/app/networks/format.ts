@@ -14,6 +14,7 @@ export const resourceStateLabel: Record<ResourceState, { label: string; badge: s
   stale: { label: "Routing peer offline", badge: "pending" },
   no_routing_peer: { label: "No routing peer", badge: "warn" },
   dns_not_resolved: { label: "DNS not resolved", badge: "pending" },
+  dns_blocked: { label: "Blocked: unsafe DNS answer", badge: "warn" },
   disabled: { label: "Disabled", badge: "offline" },
 };
 
@@ -22,6 +23,7 @@ export const peerStateLabel: Record<RoutingPeerState, string> = {
   standby: "Standby",
   offline: "Offline",
   not_advertising: "Does not advertise this subnet",
+  not_connector: "Not running an app connector",
   expired: "Credential expired",
   missing: "Removed from the organisation",
 };

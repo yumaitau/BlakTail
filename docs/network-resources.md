@@ -73,8 +73,10 @@ Admins and automation clients cannot confirm them.
 - **IPv6 resources** are validated and overlap-checked, but Linux agents can
   only advertise IPv4 RFC 1918 subnets and `0.0.0.0/0` today, so an IPv6
   resource shows **No routing peer** until IPv6 advertisement ships.
-- **DNS targets** are stored and validated but never resolved or routed; they
-  show **DNS not resolved** until domain connectors land.
+- **DNS targets** are resolved by a routing peer running
+  `blaktaild up --app-connector` (Linux) and routed as exact host routes; see
+  [app-connectors.md](app-connectors.md). Without such a peer they show
+  **No routing peer**.
 - Site-to-site, router-loss and packet-capture behaviour has not been proven on
   a two-site lab.
 

@@ -10,6 +10,7 @@
 
 use crate::{
     admin::{authenticate_org_header, idempotency_key, require_scope, Envelope, Scope},
+    app_connectors::{self, ConnectorReport, LeaseView, OrgLeases},
     append_audit, bump_control_revision, console_session, hash, ipam, now, org_ula_address,
     parse_acl_port_spec,
     permissions::{require, Permission},
@@ -159,7 +160,8 @@ pub(crate) struct NetworkResource {
     dns_target: Option<String>,
     /// `ipv4` or `ipv6` for CIDR resources.
     family: Option<String>,
-    /// DNS targets are modelled only; resolution belongs to connectors.
+    /// DNS targets only: resolved, blocked or not_resolved, from the
+    /// selected app connector's leases.
     dns_resolution: Option<String>,
     ports: Vec<String>,
     protocols: Vec<ResourceProtocol>,
@@ -184,7 +186,8 @@ pub(crate) struct RoutingPeerHealth {
     node_id: Uuid,
     name: Option<String>,
     metric: u16,
-    /// primary, standby, offline, not_advertising, expired or missing.
+    /// primary, standby, offline, not_advertising, not_connector, expired
+    /// or missing.
     state: String,
     online: bool,
     last_seen_at: Option<i64>,
@@ -201,7 +204,8 @@ pub(crate) struct ClientDistribution {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ResourceStatus {
-    /// distributing, stale, no_routing_peer, dns_not_resolved or disabled.
+    /// distributing, stale, no_routing_peer, dns_not_resolved, dns_blocked
+    /// or disabled.
     pub(crate) state: String,
     pub(crate) selected_routing_peer: Option<Uuid>,
     pub(crate) routing_peers: Vec<RoutingPeerHealth>,
@@ -213,6 +217,22 @@ pub(crate) struct ResourceDetail {
     #[serde(flatten)]
     pub(crate) resource: NetworkResource,
     pub(crate) status: ResourceStatus,
+    /// DNS targets only: what the connectors resolved and reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) connector: Option<ConnectorState>,
+}
+
+/// Effective app-connector state for a DNS resource.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ConnectorState {
+    /// The connector whose answers clients route through.
+    pub(crate) selected: Option<Uuid>,
+    /// Unexpired host-route leases from the selected connector.
+    pub(crate) answers: Vec<LeaseView>,
+    /// Latest report from every connector that has reported.
+    pub(crate) reports: Vec<ConnectorReport>,
+    /// Why nothing is routed, when nothing is.
+    pub(crate) blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -244,6 +264,7 @@ struct OrgNode {
     last_seen_at: Option<i64>,
     credential_expires_at: i64,
     subject: Subject,
+    app_connector: bool,
 }
 
 impl OrgNode {
@@ -464,7 +485,7 @@ async fn load_resource(
 
 async fn load_org_nodes(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<OrgNode>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,display_name,advertised_routes_json,approved_routes_json,last_seen_at,credential_expires_at,user_id,user_role,tags_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY name",
+        "SELECT id,name,display_name,advertised_routes_json,approved_routes_json,last_seen_at,credential_expires_at,user_id,user_role,tags_json,capabilities_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY name",
     )
     .bind(org_id)
     .fetch_all(&mut *conn)
@@ -487,6 +508,10 @@ async fn load_org_nodes(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<Or
                     json_column(row, 9).unwrap_or_default(),
                 )
                 .with_user(row.try_get::<String, _>(7)?),
+                app_connector: json_column::<Vec<String>>(row, 10)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|capability| capability == app_connectors::CAP_APP_CONNECTOR),
             })
         })
         .collect()
@@ -503,9 +528,10 @@ async fn load_acl(conn: &mut AnyConnection, org_id: &str) -> Result<Acl, ApiErro
 
 // ---------- evaluation ----------
 
-/// Picks the routing peer that carries a CIDR resource: the lowest-metric
-/// peer that is active, unexpired and advertises a covering prefix,
-/// preferring online peers so an offline primary fails over to a standby.
+/// Picks the routing peer that carries a resource: the lowest-metric peer
+/// that is active, unexpired and advertises a covering prefix (CIDR) or runs
+/// an app connector (DNS), preferring online peers so an offline primary
+/// fails over to a standby.
 fn evaluate_peers(
     resource: &NetworkResource,
     nodes: &[OrgNode],
@@ -538,6 +564,9 @@ fn evaluate_peers(
             Some(_) if resource.kind == ResourceKind::Cidr && covering.is_none() => {
                 "not_advertising"
             }
+            Some(node) if resource.kind == ResourceKind::Dns && !node.app_connector => {
+                "not_connector"
+            }
             Some(_) => {
                 candidates.push((peer.node_id, online));
                 if online {
@@ -562,29 +591,51 @@ fn evaluate_peers(
         .find(|(_, online)| *online)
         .or_else(|| candidates.first())
         .map(|(id, _)| *id);
-    if resource.kind == ResourceKind::Cidr {
-        if let Some(entry) = health
-            .iter_mut()
-            .find(|entry| Some(entry.node_id) == selected)
-        {
-            entry.state = "primary".into();
-        }
+    if let Some(entry) = health
+        .iter_mut()
+        .find(|entry| Some(entry.node_id) == selected)
+    {
+        entry.state = "primary".into();
     }
-    (
-        selected.filter(|_| resource.kind == ResourceKind::Cidr),
-        health,
-    )
+    (selected, health)
 }
 
-fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) -> ResourceDetail {
+fn evaluate(
+    mut resource: NetworkResource,
+    nodes: &[OrgNode],
+    acl: &Acl,
+    leases: &OrgLeases,
+    at: i64,
+) -> ResourceDetail {
     let (selected, routing_peers) = evaluate_peers(&resource, nodes, at);
+    let dns = resource.kind == ResourceKind::Dns;
+    let answers = selected
+        .filter(|_| dns)
+        .map(|id| leases.leases(resource.id, id).to_vec())
+        .unwrap_or_default();
+    let blocked_reason = selected
+        .and_then(|id| leases.report(resource.id, id))
+        .filter(|report| dns && answers.is_empty() && report.state == "blocked")
+        .map(|report| report.reason.clone());
+    if dns {
+        resource.dns_resolution = Some(
+            if !answers.is_empty() {
+                "resolved"
+            } else if blocked_reason.is_some() {
+                "blocked"
+            } else {
+                "not_resolved"
+            }
+            .into(),
+        );
+    }
     let state = if !resource.enabled {
         "disabled"
-    } else if resource.kind == ResourceKind::Dns {
-        "dns_not_resolved"
     } else {
         match selected.and_then(|id| nodes.iter().find(|node| node.id == id)) {
             None => "no_routing_peer",
+            Some(_) if dns && blocked_reason.is_some() => "dns_blocked",
+            Some(_) if dns && answers.is_empty() => "dns_not_resolved",
             Some(node) if node.online(at) => "distributing",
             Some(_) => "stale",
         }
@@ -602,6 +653,14 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
                 (false, "resource is disabled".to_owned())
             } else if !resource.access.matches(&node.subject, &acl.groups) {
                 (false, "outside the resource's access selection".to_owned())
+            } else if dns && router.is_some() && answers.is_empty() {
+                (
+                    false,
+                    blocked_reason.as_ref().map_or_else(
+                        || "DNS target is not resolved yet".to_owned(),
+                        |reason| format!("blocked: {reason}"),
+                    ),
+                )
             } else if let Some(router) = router {
                 if node.credential_expires_at <= at {
                     (false, "device credential expired".to_owned())
@@ -618,8 +677,8 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
                 } else {
                     (true, format!("via {}", router.label()))
                 }
-            } else if resource.kind == ResourceKind::Dns {
-                (false, "DNS target is not resolved yet".to_owned())
+            } else if dns {
+                (false, "no routing peer runs an app connector".to_owned())
             } else {
                 (false, "no routing peer can carry it".to_owned())
             };
@@ -631,6 +690,12 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
             }
         })
         .collect();
+    let connector = dns.then(|| ConnectorState {
+        selected,
+        answers,
+        reports: leases.reports(resource.id),
+        blocked_reason,
+    });
     ResourceDetail {
         status: ResourceStatus {
             state: state.into(),
@@ -639,11 +704,14 @@ fn evaluate(resource: NetworkResource, nodes: &[OrgNode], acl: &Acl, at: i64) ->
             clients,
         },
         resource,
+        connector,
     }
 }
 
-/// The enabled CIDR resources an organisation currently distributes, each
-/// pinned to its selected routing peer. Built once per peer-map request.
+/// The enabled resources an organisation currently distributes, each pinned
+/// to its selected routing peer: CIDR prefixes, plus the host routes the
+/// selected app connector leased for DNS targets. Built once per peer-map
+/// request.
 pub(crate) struct Distribution {
     routes: Vec<ActiveRoute>,
 }
@@ -665,20 +733,57 @@ pub(crate) async fn load_distribution(
         return Ok(Distribution { routes: Vec::new() });
     }
     let nodes = load_org_nodes(&mut conn, org_id).await?;
+    let leases = if resources
+        .iter()
+        .any(|resource| resource.enabled && resource.kind == ResourceKind::Dns)
+    {
+        OrgLeases::load(&mut conn, org_id).await?
+    } else {
+        OrgLeases::default()
+    };
     let at = now();
-    let routes = resources
-        .into_iter()
-        .filter(|resource| resource.enabled && resource.kind == ResourceKind::Cidr)
-        .filter_map(|resource| {
-            let (selected, _) = evaluate_peers(&resource, &nodes, at);
-            Some(ActiveRoute {
-                cidr: resource.cidr?,
-                router: selected?,
-                routing_peers: resource.routing_peers.iter().map(|p| p.node_id).collect(),
+    let mut routes: Vec<ActiveRoute> = Vec::new();
+    let mut host_routes = Vec::new();
+    for resource in resources.into_iter().filter(|resource| resource.enabled) {
+        let (selected, _) = evaluate_peers(&resource, &nodes, at);
+        let Some(router) = selected else { continue };
+        let routing_peers: Vec<Uuid> = resource.routing_peers.iter().map(|p| p.node_id).collect();
+        match resource.kind {
+            ResourceKind::Cidr => routes.extend(resource.cidr.map(|cidr| ActiveRoute {
+                cidr,
+                router,
+                routing_peers,
                 access: resource.access,
-            })
-        })
+            })),
+            ResourceKind::Dns => {
+                for lease in leases.leases(resource.id, router) {
+                    host_routes.push(ActiveRoute {
+                        cidr: lease.route.clone(),
+                        router,
+                        routing_peers: routing_peers.clone(),
+                        access: resource.access.clone(),
+                    });
+                }
+            }
+        }
+    }
+    // WireGuard cannot give one prefix to two peers (and blaktaild drops a
+    // peer whose AllowedIPs collide), so a host route already carried by a
+    // different router stays with the first claimant.
+    let mut claimed: BTreeMap<String, Uuid> = routes
+        .iter()
+        .map(|route| (route.cidr.clone(), route.router))
         .collect();
+    for node in &nodes {
+        for route in &node.approved {
+            claimed.entry(route.clone()).or_insert(node.id);
+        }
+    }
+    for route in host_routes {
+        if *claimed.entry(route.cidr.clone()).or_insert(route.router) == route.router {
+            routes.push(route);
+        }
+    }
     Ok(Distribution { routes })
 }
 
@@ -1009,6 +1114,7 @@ async fn create_in_tx(
     let nodes = load_org_nodes(tx, &org).await?;
     let prepared = prepare(input, &org, session, &acl, &nodes, None)?;
     check_overlaps(tx, &org, &prepared, &nodes, None).await?;
+    let leases = OrgLeases::load(tx, &org).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM network_resources WHERE org_id=$1")
         .bind(&org)
         .fetch_one(&mut **tx)
@@ -1032,7 +1138,7 @@ async fn create_in_tx(
         &audit_details(&resource, via),
     )
     .await?;
-    Ok(evaluate(resource, &nodes, &acl, at))
+    Ok(evaluate(resource, &nodes, &acl, &leases, at))
 }
 
 async fn update_in_tx(
@@ -1057,6 +1163,7 @@ async fn update_in_tx(
     let nodes = load_org_nodes(tx, &org).await?;
     let prepared = prepare(input, &org, session, &acl, &nodes, Some(&current))?;
     check_overlaps(tx, &org, &prepared, &nodes, Some(id)).await?;
+    let leases = OrgLeases::load(tx, &org).await?;
     let at = now();
     write_resource(tx, &org, id, &prepared, at, Some(current.revision)).await?;
     let resource = load_resource(tx, &org, id).await?;
@@ -1074,7 +1181,7 @@ async fn update_in_tx(
         &details,
     )
     .await?;
-    Ok(evaluate(resource, &nodes, &acl, at))
+    Ok(evaluate(resource, &nodes, &acl, &leases, at))
 }
 
 async fn write_resource(
@@ -1165,11 +1272,12 @@ async fn overview(state: &AppState, org_id: Uuid) -> Result<NetworksOverview, Ap
     let mut conn = state.store.pool.acquire().await?;
     let acl = load_acl(&mut conn, &org).await?;
     let nodes = load_org_nodes(&mut conn, &org).await?;
+    let leases = OrgLeases::load(&mut conn, &org).await?;
     let at = now();
     let resources = load_resources(&mut conn, &org)
         .await?
         .into_iter()
-        .map(|resource| evaluate(resource, &nodes, &acl, at))
+        .map(|resource| evaluate(resource, &nodes, &acl, &leases, at))
         .collect();
     let device_routes = nodes
         .iter()
@@ -1203,7 +1311,8 @@ async fn detail(state: &AppState, org_id: Uuid, id: Uuid) -> Result<ResourceDeta
     let resource = load_resource(&mut conn, &org, id).await?;
     let acl = load_acl(&mut conn, &org).await?;
     let nodes = load_org_nodes(&mut conn, &org).await?;
-    Ok(evaluate(resource, &nodes, &acl, now()))
+    let leases = OrgLeases::load(&mut conn, &org).await?;
+    Ok(evaluate(resource, &nodes, &acl, &leases, now()))
 }
 
 /// Runs a mutation; `dry_run` validates everything then rolls back.
@@ -1761,7 +1870,8 @@ mod tests {
             Some("files.example.org.au")
         );
         assert_eq!(dns.resource.dns_resolution.as_deref(), Some("not_resolved"));
-        assert_eq!(dns.status.state, "dns_not_resolved");
+        // No routing peer runs an app connector, so nothing can resolve it.
+        assert_eq!(dns.status.state, "no_routing_peer");
         for body in [
             serde_json::json!({"name":"Wild","dns_target":"*.example.org","access":everyone}),
             serde_json::json!({"name":"Both","cidr":"10.99.0.0/24","dns_target":"a.example.org","access":everyone}),

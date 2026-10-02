@@ -16,6 +16,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 pub mod acl_filter;
+pub mod connector;
 pub mod dns;
 pub mod relay_client;
 pub mod share;
@@ -260,6 +261,12 @@ pub struct NodeState {
     /// Last peer-map apply proved sshd enforces per-user SSH limits.
     #[serde(default)]
     pub ssh_users_enforced: bool,
+    /// Operator opted this Linux node in as an app connector.
+    #[serde(default)]
+    pub app_connector: bool,
+    /// Host routes currently forwarded for app-connector resources.
+    #[serde(default)]
+    pub connector_routes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -604,6 +611,8 @@ impl Coordinator {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            app_connector: false,
+            connector_routes: Vec::new(),
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -864,11 +873,12 @@ pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
 }
 
 fn inventory_query(state: &NodeState) -> [(&'static str, String); 3] {
+    let mut capabilities = agent_capabilities(state.ssh_users_enforced);
+    if cfg!(target_os = "linux") && state.app_connector {
+        capabilities.push(connector::CAPABILITY.into());
+    }
     [
-        (
-            "capabilities",
-            agent_capabilities(state.ssh_users_enforced).join(","),
-        ),
+        ("capabilities", capabilities.join(",")),
         ("agent_version", env!("CARGO_PKG_VERSION").to_string()),
         ("os_version", os_version()),
     ]
@@ -2489,6 +2499,8 @@ mod tests {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            app_connector: false,
+            connector_routes: Vec::new(),
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2553,6 +2565,8 @@ mod tests {
             control_revision: 3,
             published_shares: vec![],
             ssh_users_enforced: false,
+            app_connector: false,
+            connector_routes: Vec::new(),
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));
