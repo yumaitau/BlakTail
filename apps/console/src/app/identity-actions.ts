@@ -1,17 +1,19 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import {
   beginIdentityLink,
   completeIdentityLink,
   IdentityLinkError,
   recoverIdentity,
   resolveIdentityRoleConflict,
+  roleConflictOrganisationId,
   suspendIdentity,
   unlinkIdentity,
 } from "@/lib/identity-links";
 import { isOrgRole, type OrgRole } from "@/lib/roles";
-import { requirePersonSessionContext } from "@/lib/session";
+import { organisationContext, requirePersonSessionContext } from "@/lib/session";
 
 type IdentityActionResult<T = void> =
   | { ok: true; data: T }
@@ -24,7 +26,9 @@ function refreshIdentityViews() {
 }
 
 function message(error: unknown, fallback: string) {
-  return error instanceof IdentityLinkError ? error.message : fallback;
+  return error instanceof IdentityLinkError || error instanceof AssuranceError
+    ? error.message
+    : fallback;
 }
 
 export async function beginIdentityLinkAction(): Promise<
@@ -152,9 +156,20 @@ export async function resolveIdentityRoleConflictAction(
     if (!resolvedRole) {
       return { ok: false, error: "Choose one of the existing roles." };
     }
+    const conflictId = String(formData.get("conflictId") ?? "");
+    const organisationId = await roleConflictOrganisationId(conflictId);
+    // Unreachable organisations fall through to the audited owner check.
+    if (
+      organisationId &&
+      ctx.organisations.some(
+        (organisation) => organisation.organisationId === organisationId,
+      )
+    ) {
+      await requireSecurityAssurance(organisationContext(ctx, organisationId));
+    }
     const result = await resolveIdentityRoleConflict(
       ctx,
-      String(formData.get("conflictId") ?? ""),
+      conflictId,
       resolvedRole,
     );
     refreshIdentityViews();

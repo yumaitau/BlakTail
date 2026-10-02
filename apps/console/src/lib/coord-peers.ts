@@ -1,7 +1,11 @@
 import "server-only";
 
-import { signCoordAssertion } from "./coord-assertion";
-import type { AuditEvent, CoordNode, DeviceTag } from "./coord";
+import {
+  coordFetch,
+  type AuditEvent,
+  type CoordNode,
+  type DeviceTag,
+} from "./coord";
 import { can } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -80,14 +84,6 @@ export class CoordRequestError extends Error {
   }
 }
 
-function coordBaseUrl(): string {
-  const url = process.env.COORD_BASE_URL;
-  if (!url) {
-    throw new Error("COORD_BASE_URL is required (HTTPS coordinator URL).");
-  }
-  return url.replace(/\/$/, "");
-}
-
 /** Coordinator URL shown in install instructions; never carries a secret. */
 export function agentCoordinatorUrl(): string | null {
   return process.env.COORD_BASE_URL?.replace(/\/$/, "") ?? null;
@@ -98,14 +94,10 @@ async function coordRequest<T>(
   path: string,
   init: { method: string; body?: unknown },
 ): Promise<T> {
-  const res = await fetch(`${coordBaseUrl()}/v1/orgs/${ctx.coordOrgId}${path}`, {
+  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}${path}`, {
     method: init.method,
-    headers: {
-      Authorization: `Bearer ${signCoordAssertion(ctx)}`,
-      "content-type": "application/json",
-    },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
-    cache: "no-store",
+    ctx,
   });
   if (!res.ok) {
     let message = `Coordinator returned ${res.status}`;

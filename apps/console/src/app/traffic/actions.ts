@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { requireSecurityAssurance } from "@/lib/auth-policy";
 import { deleteTrafficRecords, putTrafficSettings } from "@/lib/coord-events";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
@@ -11,6 +12,7 @@ async function ownerContext() {
   const ctx = await requireConsoleContext();
   const denied = permissionReason(ctx.role, "manage_security");
   if (denied) throw new Error(denied);
+  await requireSecurityAssurance(ctx);
   return ctx;
 }
 

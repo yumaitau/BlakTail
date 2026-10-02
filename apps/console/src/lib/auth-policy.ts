@@ -8,6 +8,7 @@ import {
   domainTxtName,
   domainTxtValue,
   jitDomainRefusal,
+  type IdentityAssurance,
   mfaRefusal,
   normaliseDomain,
   stepUpRefusal,
@@ -36,7 +37,7 @@ export async function getSignInPolicy(organisationId: string): Promise<SignInPol
 
 export async function identityAssurance(
   userId: string,
-): Promise<{ hasPassword: boolean; twoFactorEnabled: boolean }> {
+): Promise<IdentityAssurance> {
   const sql = rawSqlClient();
   const [row] = await sql`
     SELECT
@@ -54,11 +55,33 @@ export async function identityAssurance(
   };
 }
 
+/** The other identities whose memberships merge into this organisation role. */
+async function linkedAssurance(
+  ctx: Pick<ConsoleContext, "userId" | "identityUserIds">,
+): Promise<IdentityAssurance[]> {
+  return Promise.all(
+    ctx.identityUserIds
+      .filter((userId) => userId !== ctx.userId)
+      .map((userId) => identityAssurance(userId)),
+  );
+}
+
+async function personMfaRefusal(
+  policy: SignInPolicy,
+  ctx: ConsoleContext,
+): Promise<string | null> {
+  if (!policy.requireMfaForPrivileged) return null;
+  const [identity, linked] = await Promise.all([
+    identityAssurance(ctx.userId),
+    linkedAssurance(ctx),
+  ]);
+  return mfaRefusal(policy, ctx.role, identity, linked);
+}
+
 /** MFA policy for any coordinator write made by a privileged role. */
 export async function requireWriteAssurance(ctx: ConsoleContext): Promise<void> {
   const policy = await getSignInPolicy(ctx.organisationId);
-  if (!policy.requireMfaForPrivileged) return;
-  const refusal = mfaRefusal(policy, ctx.role, await identityAssurance(ctx.userId));
+  const refusal = await personMfaRefusal(policy, ctx);
   if (refusal) throw new AssuranceError(refusal, "mfa_required");
 }
 
@@ -69,7 +92,7 @@ export async function requireWriteAssurance(ctx: ConsoleContext): Promise<void> 
  */
 export async function requireSecurityAssurance(ctx: ConsoleContext): Promise<void> {
   const policy = await getSignInPolicy(ctx.organisationId);
-  const mfa = mfaRefusal(policy, ctx.role, await identityAssurance(ctx.userId));
+  const mfa = await personMfaRefusal(policy, ctx);
   if (mfa) throw new AssuranceError(mfa, "mfa_required");
   const stepUp = stepUpRefusal(policy, ctx.sessionCreatedAt);
   if (stepUp) {
@@ -102,7 +125,7 @@ export async function saveSignInPolicy(
   await requireSecurityAssurance(ctx);
   if (next.requireMfaForPrivileged) {
     // Do not let an owner lock themselves out of security changes.
-    const refusal = mfaRefusal(next, ctx.role, await identityAssurance(ctx.userId));
+    const refusal = await personMfaRefusal(next, ctx);
     if (refusal) {
       throw new Error(
         "Turn on two-step verification for your own sign-in before requiring it for owners and admins.",
@@ -318,6 +341,7 @@ export async function jitDomainCheck(
   transaction: (strings: TemplateStringsArray, ...values: unknown[]) => PromiseLike<unknown>,
   organisationId: string,
   email: string | undefined,
+  emailVerified: unknown,
 ): Promise<string | null> {
   const rows = (await transaction`
     SELECT organisation_id, domain FROM organisation_domain
@@ -328,6 +352,7 @@ export async function jitDomainCheck(
     email,
     rows.filter((row) => row.organisation_id === organisationId).map((row) => row.domain),
     rows.filter((row) => row.organisation_id !== organisationId).map((row) => row.domain),
+    emailVerified,
   );
 }
 

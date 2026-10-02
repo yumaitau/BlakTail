@@ -1,6 +1,6 @@
 import "server-only";
 
-import { signCoordAssertion } from "./coord-assertion";
+import { coordFetch } from "./coord";
 import type { ConsoleContext } from "./session";
 
 export type IpamPool = {
@@ -68,26 +68,14 @@ export type ReservationInput = {
   reason: string;
 };
 
-function coordBaseUrl(): string {
-  const url = process.env.COORD_BASE_URL;
-  if (!url) {
-    throw new Error("COORD_BASE_URL is required (HTTPS coordinator URL).");
-  }
-  return url.replace(/\/$/, "");
-}
-
 async function ipamFetch(
   ctx: ConsoleContext,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${signCoordAssertion(ctx)}`);
-  if (init.body) headers.set("content-type", "application/json");
-  return fetch(`${coordBaseUrl()}/v1/orgs/${ctx.coordOrgId}/ipam${path}`, {
+  return coordFetch(`/v1/orgs/${ctx.coordOrgId}/ipam${path}`, {
     ...init,
-    headers,
-    cache: "no-store",
+    ctx,
   });
 }
 

@@ -1,8 +1,7 @@
 import "server-only";
 
-import { signCoordAssertion } from "./coord-assertion";
 import type { ConsoleContext } from "./session";
-import type { DeviceTag } from "./coord";
+import { coordFetch, type DeviceTag } from "./coord";
 import type { OrgRole } from "./roles";
 
 export type ResourceProtocol = "tcp" | "udp" | "icmp";
@@ -136,26 +135,14 @@ export type NetworkResourceInput = {
   dry_run?: boolean;
 };
 
-function coordBaseUrl(): string {
-  const url = process.env.COORD_BASE_URL;
-  if (!url) {
-    throw new Error("COORD_BASE_URL is required (HTTPS coordinator URL).");
-  }
-  return url.replace(/\/$/, "");
-}
-
 async function networksFetch(
   ctx: ConsoleContext,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${signCoordAssertion(ctx)}`);
-  if (init.body) headers.set("content-type", "application/json");
-  return fetch(`${coordBaseUrl()}/v1/orgs/${ctx.coordOrgId}/networks${path}`, {
+  return coordFetch(`/v1/orgs/${ctx.coordOrgId}/networks${path}`, {
     ...init,
-    headers,
-    cache: "no-store",
+    ctx,
   });
 }
 

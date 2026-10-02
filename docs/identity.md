@@ -16,10 +16,11 @@ Each organisation may enable one HTTPS OpenID Connect issuer. The console:
 Just-in-time membership is off unless an owner enables it. Domain allow-lists
 require a verified email. Once the organisation verifies a sign-in domain by
 DNS TXT, just-in-time membership only accepts that organisation's verified
-domains, and a domain verified by another organisation is never accepted; see
+domains with `email_verified: true`, and a domain verified by another organisation is never accepted; see
 [roles.md](roles.md#verified-sign-in-domains). Two providers that return the same email do not merge
 accounts; an already-signed-in person can explicitly link an issuer+subject from
-the callback.
+the callback if their session was created within the last 15 minutes (or the
+organisation's tighter re-authentication window).
 
 ## Membership
 

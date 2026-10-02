@@ -660,6 +660,17 @@ export async function listIdentitySettings(ctx: PersonSessionContext): Promise<{
   };
 }
 
+/** The organisation a role conflict belongs to, for its security checks. */
+export async function roleConflictOrganisationId(
+  conflictId: string,
+): Promise<string | null> {
+  const sql = rawSqlClient();
+  const [row] = await sql`
+    SELECT organisation_id FROM identity_link_conflict WHERE id = ${conflictId}
+  `;
+  return row?.organisation_id ?? null;
+}
+
 export async function resolveIdentityRoleConflict(
   ctx: PersonSessionContext,
   conflictId: string,

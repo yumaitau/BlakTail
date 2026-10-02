@@ -3,10 +3,12 @@ import { emitMembershipUpdated } from "@/lib/coord";
 import { changeMembership, OidcError } from "@/lib/oidc";
 import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { isOrgRole, permissionReason } from "@/lib/roles";
+import { assertSameOrigin, RequestSecurityError } from "@/lib/request-security";
 import { requireConsoleContext } from "@/lib/session";
 
 export async function PATCH(request: Request) {
   try {
+    assertSameOrigin(request);
     const ctx = await requireConsoleContext();
     const body = (await request.json()) as {
       membershipId?: string;
@@ -43,7 +45,13 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     const status =
-      error instanceof AssuranceError ? 403 : error instanceof OidcError ? 400 : 500;
+      error instanceof RequestSecurityError
+        ? error.status
+        : error instanceof AssuranceError
+          ? 403
+          : error instanceof OidcError
+            ? 400
+            : 500;
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "membership update failed" },
       { status },

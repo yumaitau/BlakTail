@@ -24,7 +24,7 @@ import {
   type DeviceTag,
   type WebhookDelivery,
 } from "@/lib/coord";
-import { requireSecurityAssurance } from "@/lib/auth-policy";
+import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { can, isOrgRole, permissionReason } from "@/lib/roles";
 import {
   ORGANISATION_COOKIE,
@@ -560,7 +560,7 @@ export async function createInvitationAction(
     return {
       ok: false,
       error:
-        error instanceof InvitationError
+        error instanceof InvitationError || error instanceof AssuranceError
           ? error.message
           : "Could not create invitation.",
     };
@@ -576,6 +576,7 @@ export async function revokeInvitationAction(
     if (!invitationId) {
       return { ok: false, error: "Choose an invitation to revoke." };
     }
+    await requireSecurityAssurance(ctx);
     await revokeInvitation(ctx, invitationId);
     revalidatePath("/settings");
     revalidatePath("/audit");
@@ -584,7 +585,7 @@ export async function revokeInvitationAction(
     return {
       ok: false,
       error:
-        error instanceof InvitationError
+        error instanceof InvitationError || error instanceof AssuranceError
           ? error.message
           : "Could not revoke invitation.",
     };

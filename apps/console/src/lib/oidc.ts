@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { auth } from "./auth";
-import { jitDomainCheck } from "./auth-policy";
+import { getSignInPolicy, jitDomainCheck } from "./auth-policy";
+import { linkFreshnessRefusal } from "./auth-policy-core";
 import { writeConsoleAudit } from "./console-audit";
 import { db, rawSqlClient } from "./db/client";
 import { identityProvider, oidcLoginState } from "./db/schema";
@@ -245,6 +246,7 @@ export async function completeOidcLogin(input: {
   state: string;
   code: string;
   linkingUserId?: string;
+  linkingSessionCreatedAt?: Date;
 }): Promise<CompletedOidcLogin> {
   const [login] = await db()
     .select()
@@ -326,6 +328,12 @@ export async function completeOidcLogin(input: {
       "That identity is not in an allowed organisation group.",
     );
   }
+  const linkRefusal = input.linkingUserId
+    ? linkFreshnessRefusal(
+        await getSignInPolicy(login.organisationId),
+        input.linkingSessionCreatedAt ?? new Date(0),
+      )
+    : null;
   const sql = rawSqlClient();
   const outcome = await sql.begin("isolation level serializable", async (transaction) => {
     const [bound] = await transaction`
@@ -342,6 +350,7 @@ export async function completeOidcLogin(input: {
       }
       userId = bound.user_id;
     } else if (input.linkingUserId) {
+      if (linkRefusal) throw new OidcError(linkRefusal);
       userId = input.linkingUserId;
       await transaction`
         INSERT INTO external_identity (
@@ -372,6 +381,7 @@ export async function completeOidcLogin(input: {
         transaction,
         login.organisationId,
         claims.email,
+        claims.email_verified,
       );
       if (domainRefusal) {
         throw new OidcError(domainRefusal);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import {
   ORG_ROLES,
   PERMISSION_MATRIX,
@@ -14,6 +14,7 @@ import {
   domainTxtName,
   domainTxtValue,
   jitDomainRefusal,
+  linkFreshnessRefusal,
   mfaRefusal,
   normaliseDomain,
   parseStepUpMinutes,
@@ -158,6 +159,30 @@ describe("step-up and MFA policy", () => {
     expect(mfaRefusal({ ...policy, requireMfaForPrivileged: false }, "owner", password)).toBeNull();
   });
 
+  test("MFA counts every linked identity behind the merged role", () => {
+    const sso = { hasPassword: false, twoFactorEnabled: false };
+    const password = { hasPassword: true, twoFactorEnabled: false };
+    const strong = { hasPassword: true, twoFactorEnabled: true };
+    // Single sign-on is exempt only while no linked identity has a password.
+    expect(mfaRefusal(policy, "owner", sso, [sso])).toBeNull();
+    expect(mfaRefusal(policy, "owner", sso, [strong])).toContain("linked password");
+    expect(mfaRefusal(policy, "admin", sso, [password])).toContain("linked password");
+    // The TOTP-protected sign-in itself is always enough.
+    expect(mfaRefusal(policy, "owner", strong, [sso, password])).toBeNull();
+    expect(mfaRefusal(policy, "owner", password, [strong])).toContain("two-step");
+    expect(mfaRefusal(policy, "network_admin", sso, [strong])).toBeNull();
+  });
+
+  test("linking an identity needs a fresh sign-in", () => {
+    const lax = { stepUpMaxAgeMinutes: null, requireMfaForPrivileged: false };
+    expect(linkFreshnessRefusal(lax, signedIn, at(14))).toBeNull();
+    expect(linkFreshnessRefusal(lax, signedIn, at(16))).toContain("15 minutes");
+    // A tighter organisation window wins; a looser one does not widen it.
+    expect(linkFreshnessRefusal({ ...lax, stepUpMaxAgeMinutes: 5 }, signedIn, at(6))).toContain("5 minutes");
+    expect(linkFreshnessRefusal({ ...lax, stepUpMaxAgeMinutes: 60 }, signedIn, at(30))).not.toBeNull();
+    expect(linkFreshnessRefusal(lax, at(5), signedIn)).not.toBeNull();
+  });
+
   test("re-authentication window is bounded", () => {
     expect(parseStepUpMinutes("")).toBeNull();
     expect(parseStepUpMinutes("0")).toBeNull();
@@ -187,9 +212,28 @@ describe("sign-in domains", () => {
 
   test("JIT never claims a domain verified by another organisation", () => {
     expect(jitDomainRefusal("a@other.org", [], ["other.org"])).toContain("another organisation");
-    expect(jitDomainRefusal("a@mine.org", ["mine.org"], [])).toBeNull();
-    expect(jitDomainRefusal("a@gmail.com", ["mine.org"], [])).toContain("verified domains");
+    expect(jitDomainRefusal("a@mine.org", ["mine.org"], [], true)).toBeNull();
+    expect(jitDomainRefusal("a@gmail.com", ["mine.org"], [], true)).toContain("verified domains");
     // No verified domains yet: the provider allow-list applies as before.
     expect(jitDomainRefusal("a@anything.org", [], [])).toBeNull();
+  });
+
+  test("JIT into a verified domain needs a provider-verified email", () => {
+    for (const unverified of [undefined, false, "true", 1]) {
+      expect(jitDomainRefusal("a@mine.org", ["mine.org"], [], unverified)).toContain("verified");
+    }
+    expect(jitDomainRefusal("a@mine.org", ["mine.org"], [], true)).toBeNull();
+  });
+});
+
+describe("coordinator writes", () => {
+  test("only coord.ts signs coordinator requests, so every write passes the MFA gate", () => {
+    const src = new URL("../src/", import.meta.url);
+    const signers = readdirSync(src, { recursive: true })
+      .filter((name) => /\.tsx?$/.test(name))
+      .filter((name) => /signCoordAssertion\(/.test(readFileSync(new URL(name, src), "utf8")));
+    expect(signers.sort()).toEqual(["lib/coord-assertion.ts", "lib/coord.ts"]);
+    const coord = readFileSync(new URL("lib/coord.ts", src), "utf8");
+    expect(coord).toMatch(/method !== "GET" && method !== "HEAD"[\s\S]*requireWriteAssurance\(ctx\)/);
   });
 });

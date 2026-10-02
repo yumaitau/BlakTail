@@ -45,20 +45,59 @@ export function stepUpRefusal(
   return `This organisation requires a sign-in within the last ${policy.stepUpMaxAgeMinutes} minutes for security changes. Sign out and sign in again, then retry.`;
 }
 
+export type IdentityAssurance = { hasPassword: boolean; twoFactorEnabled: boolean };
+
 /**
  * MFA applies to password sign-ins of privileged roles. Single sign-on
  * identities authenticate at the organisation's identity provider, whose own
  * MFA policy applies; BlakTail cannot add a second factor to that flow.
+ *
+ * The role is merged across the person's linked identities, so `linked` (the
+ * other identities with a membership in this organisation) counts too: a
+ * single sign-on session is exempt only while no linked identity has a
+ * password. Otherwise the person must use a sign-in with two-step
+ * verification, so a weaker linked identity cannot borrow a privileged role.
  */
 export function mfaRefusal(
   policy: SignInPolicy,
   role: OrgRole,
-  identity: { hasPassword: boolean; twoFactorEnabled: boolean },
+  identity: IdentityAssurance,
+  linked: readonly IdentityAssurance[] = [],
 ): string | null {
   if (!policy.requireMfaForPrivileged) return null;
   if (!MFA_PRIVILEGED_ROLES.includes(role)) return null;
-  if (!identity.hasPassword || identity.twoFactorEnabled) return null;
-  return "This organisation requires two-step verification for owners and admins. Turn it on under Settings, Account security, then retry.";
+  if (identity.twoFactorEnabled) return null;
+  if (identity.hasPassword) {
+    return "This organisation requires two-step verification for owners and admins. Turn it on under Settings, Account security, then retry.";
+  }
+  if (linked.some((other) => other.hasPassword)) {
+    return "This organisation requires two-step verification for owners and admins, and your linked password sign-in needs it. Sign in with that password and two-step verification, then retry.";
+  }
+  return null;
+}
+
+/** Linking a new sign-in identity always needs a recent sign-in. */
+export const LINK_MAX_AGE_MINUTES = 15;
+
+/**
+ * Linking a single sign-on identity to the signed-in account grants it the
+ * account's roles, so a stale or stolen session must not be able to do it.
+ * The organisation's step-up window applies when it is tighter.
+ */
+export function linkFreshnessRefusal(
+  policy: SignInPolicy,
+  sessionCreatedAt: Date,
+  now: Date = new Date(),
+): string | null {
+  const maxAge = Math.min(
+    policy.stepUpMaxAgeMinutes ?? LINK_MAX_AGE_MINUTES,
+    LINK_MAX_AGE_MINUTES,
+  );
+  const ageMs = now.getTime() - sessionCreatedAt.getTime();
+  if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= maxAge * 60_000) {
+    return null;
+  }
+  return `Linking a sign-in identity needs a sign-in within the last ${maxAge} minutes. Sign out and sign in again, then link it from Settings.`;
 }
 
 export function parseStepUpMinutes(value: unknown): number | null {
@@ -120,19 +159,24 @@ export function emailDomain(email: string | undefined | null): string | null {
 /**
  * Just-in-time membership by email domain. A domain verified by another
  * organisation is never claimable here. Once this organisation verifies any
- * domain, JIT accepts only its verified domains; before that the provider's
- * allow-list applies as it always has.
+ * domain, JIT accepts only provider-verified emails in its verified domains;
+ * before that the provider's allow-list applies as it always has.
  */
 export function jitDomainRefusal(
   email: string | undefined | null,
   verifiedHere: readonly string[],
   verifiedElsewhere: readonly string[],
+  emailVerified: unknown = false,
 ): string | null {
   const domain = emailDomain(email);
   if (domain && verifiedElsewhere.includes(domain)) {
     return "That email domain is verified by another organisation.";
   }
   if (verifiedHere.length === 0) return null;
+  // An unverified email proves nothing about domain ownership.
+  if (emailVerified !== true) {
+    return "Just-in-time membership needs an email address your identity provider has verified.";
+  }
   if (!domain || !verifiedHere.includes(domain)) {
     return "Just-in-time membership needs an email in one of this organisation's verified domains.";
   }

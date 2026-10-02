@@ -1,7 +1,6 @@
 import "server-only";
 
-import { signCoordAssertion } from "./coord-assertion";
-import type { DeviceTag } from "./coord";
+import { coordFetch, type DeviceTag } from "./coord";
 import type { ConsoleContext } from "./session";
 
 export type ExplainProtocol = "tcp" | "udp" | "icmp";
@@ -118,26 +117,14 @@ export type AssessmentReport = {
   devices: DeviceAssessment[];
 };
 
-function coordBaseUrl(): string {
-  const url = process.env.COORD_BASE_URL;
-  if (!url) {
-    throw new Error("COORD_BASE_URL is required (HTTPS coordinator URL).");
-  }
-  return url.replace(/\/$/, "");
-}
-
 async function request<T>(
   ctx: ConsoleContext,
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${signCoordAssertion(ctx)}`);
-  if (init.body) headers.set("content-type", "application/json");
-  const res = await fetch(`${coordBaseUrl()}/v1/orgs/${ctx.coordOrgId}${path}`, {
+  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}${path}`, {
     ...init,
-    headers,
-    cache: "no-store",
+    ctx,
   });
   if (!res.ok) {
     let message = `Coordinator returned ${res.status}`;

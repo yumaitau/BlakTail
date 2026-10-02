@@ -27,6 +27,9 @@ export async function GET(request: Request) {
       state,
       code,
       linkingUserId: existing?.user.id,
+      linkingSessionCreatedAt: existing
+        ? new Date(existing.session.createdAt)
+        : undefined,
     });
     const sessionCookie = await establishConsoleSession(completed.userId);
     const redirectTo = completed.redirectTo.startsWith("/")

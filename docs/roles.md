@@ -89,7 +89,10 @@ Settings, Sign-in policy is per organisation and owner-only.
   write and every security change is refused until they do. An owner signed in
   with a password must have two-step verification on before turning this on. SSO identities rely on the
   identity provider's own MFA policy; BlakTail does not see or add a second
-  factor to SSO.
+  factor to SSO. Because a person's role is merged across linked identities,
+  an SSO sign-in is exempt only while none of their identities with a
+  membership in that organisation has a password; otherwise privileged writes
+  need the password sign-in with two-step verification.
 
 ## Two-step verification (TOTP)
 
@@ -118,7 +121,7 @@ Owners add a domain and publish the shown TXT record at
 then select Check. A domain can be verified by only one organisation (enforced
 by a unique index); once it is, no other organisation can add or verify it.
 After an organisation verifies any domain, just-in-time SSO membership accepts
-only email addresses in its verified domains, and never an address in a domain
+only provider-verified (`email_verified: true`) email addresses in its verified domains, and never an address in a domain
 another organisation verified. Organisations with no verified domains keep the
 provider allow-list behaviour they had before. Lookups use the console host's
 resolver with a 5-second timeout; nothing is re-checked automatically.
