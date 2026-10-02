@@ -1,4 +1,6 @@
+mod address_pool;
 mod admin;
+mod app_connectors;
 mod change_drafts;
 pub mod connectors;
 mod dns_workspace;
@@ -263,7 +265,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 20,
-        name: "IPAM reservations and connector leases",
+        name: "IPAM leases, reservations and connector leases",
         postgres_sql: include_str!("../migrations/postgres/0020_ipam_connectors.sql"),
         sqlite_sql: Some(include_str!(
             "../migrations/sqlite/0020_ipam_connectors.sql"
@@ -1439,6 +1441,8 @@ pub fn app_with_relays_console_and_metrics(
         )
         .merge(peer_lifecycle::routes())
         .merge(resources::routes())
+        .merge(address_pool::routes())
+        .merge(app_connectors::routes())
         .merge(service_users::routes())
         .merge(posture::routes())
         .merge(policy_explain::routes())
@@ -2676,7 +2680,14 @@ async fn register_node(
     }
     let id = Uuid::new_v4();
     let token = secret("btn");
-    let allowed_ips = allocate_ips(&mut tx, &grant.org_id).await?;
+    let allowed_ips = address_pool::allocate(
+        &mut tx,
+        &grant.org_id,
+        id,
+        input.name.trim(),
+        input.wg_public_key.trim(),
+    )
+    .await?;
     let assigned_ip = allowed_ips[0].clone();
     let dns_name = magic_dns_name(input.name.trim(), &grant.org_id);
     let registered_at = now();
@@ -3633,30 +3644,6 @@ fn relay_capability(secret: &[u8], node_id: Uuid, expires_at_unix: u64) -> Strin
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-async fn allocate_ips(
-    connection: &mut AnyConnection,
-    org_id: &str,
-) -> Result<Vec<String>, ApiError> {
-    let mut used = std::collections::HashSet::new();
-    let rows =
-        sqlx::query_scalar::<_, String>("SELECT allowed_ips_json FROM nodes WHERE org_id=$1")
-            .bind(org_id)
-            .fetch_all(connection)
-            .await?;
-    for row in rows {
-        for ip in serde_json::from_str::<Vec<String>>(&row).unwrap_or_default() {
-            used.insert(ip);
-        }
-    }
-    let ipv4 = (1..=254)
-        .map(|host| format!("100.64.0.{host}/32"))
-        .find(|ip| !used.contains(ip))
-        .ok_or_else(|| ApiError::Conflict("tailnet address pool exhausted".into()))?;
-    let host = assigned_ipv4_host(std::slice::from_ref(&ipv4))
-        .expect("coordinator-generated IPv4 address is valid");
-    Ok(vec![ipv4, org_ula_address(org_id, host)])
-}
-
 fn assigned_ipv4_host(addresses: &[String]) -> Option<u8> {
     addresses.iter().find_map(|address| {
         let (address, prefix) = address.split_once('/')?;

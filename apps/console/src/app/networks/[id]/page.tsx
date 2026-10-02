@@ -77,8 +77,16 @@ export default async function NetworkResourcePage({
                   <div>
                     <dt>DNS resolution</dt>
                     <dd>
-                      Not resolved. BlakTail records the name but does not resolve
-                      or route DNS targets yet.
+                      {resource.dns_resolution === "resolved"
+                        ? "Resolved by the selected app connector"
+                        : resource.dns_resolution === "blocked"
+                          ? `Blocked: ${resource.connector?.blocked_reason ?? "unsafe answer"}`
+                          : "Not resolved yet"}
+                      <div className="muted">
+                        Only exact host addresses (/32, /128) are routed. Anyone
+                        allowed this resource can reach every port at those
+                        addresses until router-side port filtering ships.
+                      </div>
                     </dd>
                   </div>
                 ) : null}
@@ -146,6 +154,78 @@ export default async function NetworkResourcePage({
                 enabled={resource.enabled}
               />
             </div>
+
+            {resource.kind === "dns" ? (
+              <div className="panel stack">
+                <div>
+                  <h2>App connector answers</h2>
+                  <p className="muted">
+                    The selected connector resolves {resource.dns_target} from its
+                    own resolver every 30 seconds. Each answer is leased for its
+                    DNS TTL (at least 30 seconds, at most 5 minutes); expired or
+                    changed answers are withdrawn from clients on their next sync.
+                    An answer pointing at loopback, link-local, cloud metadata,
+                    multicast or BlakTail&apos;s own addresses blocks the resource.
+                  </p>
+                </div>
+                {resource.connector?.blocked_reason ? (
+                  <p className="error" role="alert">
+                    Blocked: {resource.connector.blocked_reason}. Nothing is routed
+                    until the connector reports a safe answer.
+                  </p>
+                ) : null}
+                {resource.connector && resource.connector.answers.length > 0 ? (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Host route</th>
+                          <th>DNS TTL</th>
+                          <th>Lease expires</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resource.connector.answers.map((lease) => (
+                          <tr key={lease.route}>
+                            <td className="mono">{lease.route}</td>
+                            <td>{lease.ttl} s</td>
+                            <td>
+                              {new Date(lease.expires_at * 1000).toLocaleTimeString("en-AU", {
+                                timeZone: "Australia/Sydney",
+                              })}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : resource.connector?.blocked_reason ? null : (
+                  <p className="muted">
+                    Not resolved yet. Add a Linux routing peer started with{" "}
+                    <code>blaktaild up --app-connector</code>.
+                  </p>
+                )}
+                {resource.connector && resource.connector.reports.length > 0 ? (
+                  <dl className="details">
+                    {resource.connector.reports.map((report) => {
+                      const peer = resource.status.routing_peers.find(
+                        (candidate) => candidate.node_id === report.node_id,
+                      );
+                      return (
+                        <div key={report.node_id}>
+                          <dt>{peer?.name ?? report.node_id}</dt>
+                          <dd>
+                            Last report: {report.state}
+                            {report.reason ? ` — ${report.reason}` : ""}
+                            <div className="muted">{lastSeen(report.reported_at)}</div>
+                          </dd>
+                        </div>
+                      );
+                    })}
+                  </dl>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="panel stack">
               <div>

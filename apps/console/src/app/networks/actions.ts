@@ -12,6 +12,7 @@ import {
   type NetworkResourceInput,
   type ResourceProtocol,
 } from "@/lib/coord-networks";
+import { releaseReservation, reserveAddress } from "@/lib/coord-ipam";
 import { can, type OrgRole } from "@/lib/roles";
 import { requireOrganisationContext } from "@/lib/session";
 
@@ -140,6 +141,45 @@ export async function setNetworkResourceEnabledAction(
     return { ok: true, data: undefined };
   } catch (error) {
     return failure(error, "Could not change this resource.");
+  }
+}
+
+export async function reserveAddressAction(
+  formData: FormData,
+): Promise<NetworkActionResult> {
+  try {
+    const ctx = await managedContext(formData);
+    const optional = (key: string) => {
+      const value = String(formData.get(key) ?? "").trim();
+      return value ? value : undefined;
+    };
+    await reserveAddress(ctx, {
+      address: String(formData.get("address") ?? "").trim(),
+      bound_name: optional("boundName"),
+      bound_wg_public_key: optional("boundKey"),
+      reason: String(formData.get("reason") ?? ""),
+    });
+    revalidatePath("/networks/addresses");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return failure(error, "Could not reserve this address.");
+  }
+}
+
+export async function releaseReservationAction(
+  formData: FormData,
+): Promise<NetworkActionResult> {
+  try {
+    const ctx = await managedContext(formData);
+    await releaseReservation(
+      ctx,
+      String(formData.get("reservationId") ?? ""),
+      String(formData.get("etag") ?? ""),
+    );
+    revalidatePath("/networks/addresses");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return failure(error, "Could not release this reservation.");
   }
 }
 

@@ -35,6 +35,9 @@ export default async function NetworksPage() {
             <h2>Resources</h2>
             <span className="badge network">{ctx.organisationName}</span>
             <span className="muted">{roleLabel(ctx.role)}</span>
+            <Link className="button secondary" href="/networks/addresses">
+              Addresses
+            </Link>
             {canManage ? (
               <Link className="button" href="/networks/new">
                 New resource

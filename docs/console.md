@@ -255,6 +255,14 @@ The Networks page names private subnets as resources, picks routing peers with a
 failover metric, chooses which roles, tags or policy groups receive each route,
 and shows routing-peer health and effective distribution per device. Members can
 read it; owners and admins change it. See [network-resources.md](network-resources.md).
+A DNS resource's page also shows its app connector's current answers, lease
+expiry, each connector's last report and any block reason
+([app-connectors.md](app-connectors.md)).
+
+`/networks/addresses` shows the IPv4 and IPv6 device pools with used, reserved,
+grace-period and available counts, every address with its owner, reservations
+and conflicts. Owners, admins and network admins reserve and release addresses;
+everyone else can read it. See [ipam.md](ipam.md).
 
 
 `/dns` publishes organisation DNS (Settings now links there). The page shows the

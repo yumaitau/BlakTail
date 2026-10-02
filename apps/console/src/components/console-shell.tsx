@@ -20,6 +20,7 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     label: "Networks",
     links: [
       { href: "/networks", label: "Networks" },
+      { href: "/networks/addresses", label: "Addresses" },
       { href: "/topology", label: "Topology" },
       { href: "/changes", label: "Change drafts" },
     ],
