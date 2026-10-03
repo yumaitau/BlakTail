@@ -1297,6 +1297,7 @@ mod tests {
             ssh_users_enforced: false,
             forward_filter: None,
             app_connector: false,
+            agent_gateway: false,
             connector_routes: Vec::new(),
         }
     }

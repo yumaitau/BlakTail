@@ -1,5 +1,6 @@
 mod address_pool;
 mod admin;
+mod agent_gateway;
 mod app_connectors;
 mod audit_log;
 mod automation;
@@ -1552,6 +1553,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(traffic::routes())
         .merge(notifications::routes())
         .merge(post_quantum::routes())
+        .merge(agent_gateway::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))

@@ -283,6 +283,9 @@ pub struct NodeState {
     /// Operator opted this Linux node in as an app connector.
     #[serde(default)]
     pub app_connector: bool,
+    /// Operator opted this node in as an agent network model gateway.
+    #[serde(default)]
+    pub agent_gateway: bool,
     /// Host routes currently forwarded for app-connector resources.
     #[serde(default)]
     pub connector_routes: Vec<String>,
@@ -641,6 +644,7 @@ impl Coordinator {
             ssh_users_enforced: false,
             forward_filter: None,
             app_connector: false,
+            agent_gateway: false,
             connector_routes: Vec::new(),
         })
     }
@@ -927,6 +931,9 @@ fn inventory_query(state: &NodeState) -> [(&'static str, String); 5] {
     let mut capabilities = agent_capabilities(state.ssh_users_enforced);
     if cfg!(target_os = "linux") && state.app_connector {
         capabilities.push(connector::CAPABILITY.into());
+    }
+    if state.agent_gateway {
+        capabilities.push("agent-gateway".into());
     }
     let (serial, macs) = hardware_ids();
     [
@@ -2772,6 +2779,7 @@ mod tests {
             ssh_users_enforced: false,
             forward_filter: Some(forward_filter::ForwardFilter::default()),
             app_connector: false,
+            agent_gateway: false,
             connector_routes: Vec::new(),
         };
         let mut network = RecordingNetwork::default();
@@ -2847,6 +2855,7 @@ mod tests {
             ssh_users_enforced: false,
             forward_filter: None,
             app_connector: false,
+            agent_gateway: false,
             connector_routes: Vec::new(),
         };
         apply_org_dns_snapshot(&mut state, None);

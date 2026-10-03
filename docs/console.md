@@ -54,6 +54,10 @@ authorisation.
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
+- `/agents` — agent network (AI model gateway): offshore policy (owner),
+  model providers with their declared data location, agent keys (secret shown
+  once) and per-key policies, usage by key/model/day and recent requests
+  (owner/admin write, auditor read; see [agent-gateway.md](agent-gateway.md))
 - `/audit` — actor-attributed administration changes from the coordinator and
   console, filterable by actor, action, target and UTC date, paged with one
   cursor across both stores, redacted details, integrity-chain status, and

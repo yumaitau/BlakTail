@@ -155,6 +155,17 @@ proof, not release proof: forced relay traffic, IPv6-only operation,
 revocation/re-enrolment, published signed agent packages, and secure linking of
 pre-existing distinct login identities remain open acceptance work.
 
+## Agent network (AI model gateway)
+
+Owner-approved on 3 October 2026 ([ADR 0008](adr/0008-agent-network.md)).
+`blaktail-agentgw` is an OpenAI-compatible gateway that runs on an enrolled
+node and listens only on the overlay; the coordinator authorises every
+request against per-agent keys, model allowlists, daily quotas and the
+organisation's offshore policy (forbidden by default). Proven by coordinator
+and gateway tests and a live container lab with a real Ollama; not yet run on
+a WireGuard overlay or against a hosted provider. See
+[agent-gateway.md](agent-gateway.md).
+
 ## Related documents
 
 - [Threat model](threat-model.md)
