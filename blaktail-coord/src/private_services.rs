@@ -1640,13 +1640,14 @@ mod tests {
             ),
             (
                 issue_path.clone(),
-                serde_json::json!({"csr_pem": csr_for(&[&fqdn]), "private_key": "-----BEGIN PRIVATE KEY-----"}),
+                serde_json::json!({"csr_pem": csr_for(&[&fqdn]), "private_key": concat!("-----BEGIN ", "PRIVATE KEY-----")}),
                 token_a.clone(),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 issue_path.clone(),
-                serde_json::json!({"csr_pem": format!("{}\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----", csr_for(&[&fqdn]))}),
+                // Split so secret scanners don't mistake this fake key for a real one.
+                serde_json::json!({"csr_pem": format!("{}\n-----BEGIN {k}-----\nabc\n-----END {k}-----", csr_for(&[&fqdn]), k = "PRIVATE KEY")}),
                 token_a.clone(),
                 StatusCode::BAD_REQUEST,
             ),
