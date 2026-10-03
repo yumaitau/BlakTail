@@ -724,3 +724,170 @@ fn tunnel_drops_denied_packets_between_decrypt_and_tunnel_write() {
         crate::blaktail_tunnel_free(bob);
     }
 }
+
+/// Relayed traffic takes the same decrypt -> filter -> tunnel path as direct
+/// traffic: the relay only unwraps the ciphertext, it never bypasses policy.
+#[test]
+fn relayed_inbound_packets_are_filtered_and_reported_as_relayed() {
+    use crate::relay::{
+        blaktail_relay_begin_peers, blaktail_relay_configure, blaktail_relay_end_peers,
+        blaktail_relay_inbound, blaktail_relay_set_peer,
+    };
+    use blaktail_relay_proto::{mobile::parse_node_id, FORWARDED};
+    use x25519_dalek::{PublicKey, StaticSecret};
+    const ALICE_ID: &str = "00000000-0000-4000-8000-0000000000a1";
+    const BOB_ID: &str = "00000000-0000-4000-8000-0000000000b0";
+    const RELAY: &str = "relay-a.example.au:3478";
+
+    let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let alice_public = PublicKey::from(&alice_secret);
+    let alice = unsafe { crate::blaktail_tunnel_create(alice_secret.to_bytes().as_ptr()) };
+    let bob = unsafe { crate::blaktail_tunnel_create(bob_secret.to_bytes().as_ptr()) };
+    let to_bob = std::ffi::CString::new("100.64.0.2/32").unwrap();
+    let to_alice = std::ffi::CString::new("100.64.0.1/32").unwrap();
+    unsafe {
+        crate::blaktail_tunnel_add_peer(
+            alice,
+            PublicKey::from(&bob_secret).as_bytes().as_ptr(),
+            to_bob.as_ptr(),
+            0,
+        );
+        crate::blaktail_tunnel_add_peer(
+            bob,
+            alice_public.as_bytes().as_ptr(),
+            to_alice.as_ptr(),
+            0,
+        );
+    }
+    let policy = format!(
+        r#"[{{"id":"{ALICE_ID}","allowed_ips":["100.64.0.1/32"],"ingress":{{"tcp":["22"]}}}}]"#
+    );
+    assert_eq!(
+        unsafe { blaktail_tunnel_set_policy(bob, policy.as_ptr(), policy.len()) },
+        RESULT_DONE
+    );
+    assert_eq!(unsafe { blaktail_tunnel_set_traffic(bob, 1) }, RESULT_DONE);
+
+    // Bob reaches Alice only through the relay (no direct endpoint).
+    let self_id = std::ffi::CString::new(BOB_ID).unwrap();
+    let token = std::ffi::CString::new("ab".repeat(32)).unwrap();
+    let relays = std::ffi::CString::new(format!("{RELAY}\tap-southeast-2\t\n")).unwrap();
+    let alice_id = std::ffi::CString::new(ALICE_ID).unwrap();
+    unsafe {
+        assert_eq!(
+            blaktail_relay_configure(
+                bob,
+                self_id.as_ptr(),
+                token.as_ptr(),
+                4_000_000_000,
+                relays.as_ptr(),
+                0,
+            ),
+            0
+        );
+        blaktail_relay_begin_peers(bob);
+        assert_eq!(
+            blaktail_relay_set_peer(bob, alice_public.as_bytes().as_ptr(), alice_id.as_ptr(), 0),
+            0
+        );
+        blaktail_relay_end_peers(bob);
+    }
+    handshake(alice, bob);
+
+    let endpoint = std::ffi::CString::new(RELAY).unwrap();
+    // Alice encrypts, the relay forwards, Bob unwraps then decapsulates.
+    let relayed = |packet: &[u8]| -> (i32, Vec<u8>) {
+        let mut cipher = vec![0u8; 2048];
+        let mut length = 0usize;
+        let mut peer = [0u8; 32];
+        unsafe {
+            assert_eq!(
+                crate::blaktail_tunnel_encapsulate(
+                    alice,
+                    packet.as_ptr(),
+                    packet.len(),
+                    cipher.as_mut_ptr(),
+                    cipher.len(),
+                    &mut length,
+                    peer.as_mut_ptr()
+                ),
+                1
+            );
+            let mut frame = vec![FORWARDED];
+            frame.extend_from_slice(&parse_node_id(ALICE_ID).unwrap());
+            frame.extend_from_slice(&cipher[..length]);
+            let mut unwrapped = vec![0u8; 2048];
+            let mut unwrapped_len = 0usize;
+            let mut sender = [0u8; 32];
+            assert_eq!(
+                blaktail_relay_inbound(
+                    bob,
+                    frame.as_ptr(),
+                    frame.len(),
+                    0,
+                    endpoint.as_ptr(),
+                    unwrapped.as_mut_ptr(),
+                    unwrapped.len(),
+                    &mut unwrapped_len,
+                    sender.as_mut_ptr(),
+                ),
+                1
+            );
+            assert_eq!(&sender, alice_public.as_bytes());
+            let mut plain = vec![0u8; 2048];
+            let code = crate::blaktail_tunnel_decapsulate(
+                bob,
+                unwrapped.as_ptr(),
+                unwrapped_len,
+                plain.as_mut_ptr(),
+                plain.len(),
+                &mut length,
+                peer.as_mut_ptr(),
+            );
+            (code, plain[..length].to_vec())
+        }
+    };
+    let ssh = ipv4(LOCAL, PEER, TCP, &tcp(40_000, 22, 0x02));
+    assert_eq!(relayed(&ssh), (2, ssh.clone()));
+    let rdp = ipv4(LOCAL, PEER, TCP, &tcp(40_001, 3389, 0x02));
+    assert_eq!(relayed(&rdp), (RESULT_DONE, Vec::new()));
+
+    // The flow upload reports the relay's actual transport, whatever the
+    // host passed.
+    let org = std::ffi::CString::new("org-1").unwrap();
+    let device = std::ffi::CString::new(BOB_ID).unwrap();
+    let transport = std::ffi::CString::new("direct").unwrap();
+    let mut buffer = vec![0u8; 8192];
+    let mut written = 0usize;
+    assert_eq!(
+        unsafe {
+            blaktail_tunnel_take_flow_upload(
+                bob,
+                org.as_ptr(),
+                device.as_ptr(),
+                transport.as_ptr(),
+                1.0,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut written,
+            )
+        },
+        RESULT_DONE
+    );
+    let upload: serde_json::Value = serde_json::from_slice(&buffer[..written]).unwrap();
+    let records = upload["records"].as_array().unwrap();
+    assert!(records.iter().any(|r| r["decision"] == "denied"
+        && r["service"] == "rdp"
+        && r["peer_id"] == ALICE_ID
+        && r["transport"] == "udp_relay"));
+    assert!(records
+        .iter()
+        .any(|r| r["decision"] == "allowed" && r["service"] == "ssh"));
+    assert!(records.iter().all(|r| r["transport"] == "udp_relay"));
+
+    unsafe {
+        crate::blaktail_tunnel_free(alice);
+        crate::blaktail_tunnel_free(bob);
+    }
+}

@@ -78,40 +78,55 @@ Disconnect pauses the tunnel and keeps enrolment. Leave network revokes the
 node credential. Members still cannot mint join keys; an owner or admin must
 enrol the phone, as on the Mac.
 
-Direct UDP to a peer's advertised endpoint is the only path. Australian relay
-fallback and hole punch are not implemented on iPhone; see below.
+Peers are reached directly over UDP when that works, and through the
+Australian relay otherwise; see below.
 
-## Relay and hole-punch gap
+## Relay fallback
 
-The iPhone has **no relay fallback**. If a peer's advertised endpoint is not
-reachable by direct UDP (for example two devices behind carrier-grade NAT),
-traffic to that peer fails; there is no parity claim with the Linux and macOS
-agents. What exists and what is missing, precisely:
+The packet tunnel now carries encrypted WireGuard datagrams through the same
+Australian relays as the desktop agents. Rust decides, Swift owns the
+sockets:
 
-- `blaktail-ios-wg` exposes only the WireGuard engine over a C ABI (key
-  generation, peer set, encapsulate, decapsulate, timers). It has no relay
-  client. The relay client (`RelayMesh` in `blaktaild/src/relay_client.rs`) and
-  the selection logic (`blaktaild/src/relay_select.rs`) live in the agent crate,
-  which is not built for iOS. Android uses the same engine through JNI and
-  likewise has no relay path; Windows has one only because it runs the full
-  `blaktaild`.
-- `apps/ios/Tunnel/TunnelSession.swift` opens one `NWUDPSession` per peer to the
-  peer's coordinator-advertised `endpoint` and drops traffic for peers without
-  one. It ignores the `relays`, `relay_endpoints`, `relay_token`,
-  `relay_expires_at` and `relay_endpoint` fields in the peers response.
-- To close the gap, the extension needs: a relay socket that sends
-  `REGISTER`/`PING` with the node's capability every 30 seconds and parses
-  `OBSERVED`; `SEND`/`FORWARDED` framing around boringtun datagrams for relayed
-  peers; reporting its reflexive endpoint to `PUT /v1/nodes/{id}/relay-endpoint`;
-  the per-peer direct → relay → hole-punch state machine (`path_action` in
-  `blaktaild/src/main.rs`); the same Australian-only, ordered relay selection;
-  and a visible "observed transport" (direct, relay, peer-direct) in the app.
-  The cleanest route is moving the relay client and selection into a shared
-  crate exposed over the existing C ABI, so iOS and Android do not re-implement
-  the protocol in Swift and Kotlin.
-- Packet-tunnel memory limits, background wake for the 30-second keepalive,
-  relay-capability rotation and Network Extension restarts must then be proven
-  on a physical iPhone across independent NATs before any parity claim.
+- The relay protocol, the Australian-only ordered relay choice with back-off
+  and fail-back, the UDP → WSS ladder and the per-peer direct/relay
+  hysteresis live in `blaktail-relay-proto` (shared with `blaktaild` and the
+  relay). `blaktail-ios-wg` exposes it over the C ABI (`blaktail_relay_*` in
+  `blaktail-ios-wg/include/blaktail_ios_wg.h`). The core keeps a few hundred
+  bytes per peer and retains no packet buffers, to stay inside the Network
+  Extension memory limit.
+- `TunnelSession.swift` passes the coordinator's `relay_endpoints` (endpoint,
+  region, approved `wss://` URL), `relay_token` and `relay_expires_at` from
+  every peers poll, plus each peer's node id. Offshore relays are dropped in
+  Rust. It keeps one `NWUDPSession` per relay endpoint and, when the core
+  says UDP is blocked, one `URLSessionWebSocketTask` to the approved WSS URL
+  (system trust store and proxy settings; redirects refused; text frames
+  close the link).
+- Per peer: direct UDP first. If 15 seconds pass with traffic sent and
+  nothing decrypted from the direct path, that peer moves to the relay. While
+  relayed, outbound ciphertext is duplicated to the direct endpoint for 10
+  seconds every 30 seconds; two decrypted direct datagrams move it back.
+  Peers with no advertised endpoint always use the relay.
+- Relay link: UDP first; three unanswered UDP probe rounds (about 15 s) move
+  relay frames to the WebSocket of the same relay, and three answered rounds
+  move them back. A relay silent for 50 seconds on every link is failed over
+  to the next Australian relay.
+- **This iPhone → Path** shows the observed transport while connected:
+  *Direct*, *Australian relay*, *Australian relay over HTTPS*, or *No active
+  peers yet*, with relayed/direct peer counts. The app reads it from the
+  tunnel with a provider message; it carries no tokens or keys.
+
+Not done: the iPhone does not report its own reflexive address to the
+coordinator and does not run the desktop hole-punch (`PUNCH`) exchange, so a
+relayed iPhone peer returns to direct only when its advertised endpoint
+works. Fail-back to a higher-priority relay is probed over UDP only, so an
+iPhone stuck on WSS stays on its current relay until that relay fails.
+
+Proof so far: Rust unit tests for the state machine and the C ABI
+(`blaktail-relay-proto`, `blaktail-ios-wg`), `swift test`, and a simulator
+build of the app and packet tunnel with `xcodebuild`. **No physical iPhone has
+run this across independent NATs**; there is no parity claim until that
+drill (forced direct-UDP failure, observed transport shown, background wake,
+capability rotation, extension restart) is recorded.
 
 ## Sign in
 

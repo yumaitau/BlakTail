@@ -117,7 +117,14 @@ final class CoordinatorClientTests: XCTestCase {
                       }],
                       "assigned_ips": ["100.64.0.8/32"],
                       "dns_name": "field-iphone.25fe1727.blaktail",
-                      "credential_expires_at": 2000000000
+                      "credential_expires_at": 2000000000,
+                      "relays": ["relay-a.example.org.au:3478"],
+                      "relay_endpoints": [
+                        {"endpoint": "relay-a.example.org.au:3478", "region": "ap-southeast-2", "wss": "wss://relay-a.example.org.au/v1/relay"},
+                        {"endpoint": "relay-b.example.org.au:3478", "region": "australiaeast"}
+                      ],
+                      "relay_token": "ab",
+                      "relay_expires_at": 99
                     }
                     """.utf8
                 )
@@ -132,6 +139,18 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.peers.first?.wireGuardPublicKey, "peer-public")
         XCTAssertEqual(snapshot.peers.first?.allowedIPs, ["100.64.0.1/32"])
         XCTAssertEqual(snapshot.dnsName, "field-iphone.25fe1727.blaktail")
+        XCTAssertEqual(
+            snapshot.relayEndpoints,
+            [
+                RelayEndpointInfo(
+                    endpoint: "relay-a.example.org.au:3478",
+                    region: "ap-southeast-2",
+                    wss: "wss://relay-a.example.org.au/v1/relay"
+                ),
+                RelayEndpointInfo(endpoint: "relay-b.example.org.au:3478", region: "australiaeast")
+            ]
+        )
+        XCTAssertEqual(snapshot.relayExpiresAt, 99)
     }
 
     func testRejectsPlaintextRemoteCoordinator() {

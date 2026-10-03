@@ -138,6 +138,14 @@ protocol, port class and decision. Ports at or above 49152 are reported as
 49152 (`dynamic`). Agents apply the coordinator's own deterministic sampling
 draw before upload, so sampled-out records are never sent.
 
+A record's `transport` comes from the relay's own state, not a guess: a
+peer currently reached through the Australian relay reports `udp_relay`, or
+`https_relay` while the relay link is the WebSocket-over-443 fallback;
+other peers report `direct`. On iOS (and the shared userspace dataplane) the
+mobile relay state inside `blaktail-ios-wg` decides this; the Linux agent
+uses its relay mesh's current link. Relayed packets are decrypted and pass
+the same inbound filter as direct ones before they reach the device.
+
 Counter sources (all counters the kernel or dataplane keeps anyway):
 
 | Platform | Source | What it measures |
@@ -145,7 +153,7 @@ Counter sources (all counters the kernel or dataplane keeps anyway):
 | Linux | `iptables -L BLAKTAIL-ACL -v -x` per-rule counters, `wg show <if> transfer` | Allowed/denied **new inbound flow attempts** by peer, protocol and port (accept/reject rules sit after the established rule, so they count first packets); per-peer tunnel bytes as service `tunnel`, proto `all`, direction = byte direction |
 | macOS | per-rule counters of the pf anchor (`pfctl -a com.apple/blaktail -v -s rules`) | Whole flows (pf counts state traffic to the rule that created it): inbound by peer/protocol/port and decision, outbound per peer |
 | Windows, iOS | shared userspace filter counters | Whole flows by peer, initiator direction, protocol, service port and decision |
-| Android | — | Not reported (the app has no peer-map polling, so it cannot learn the setting) |
+| Android | — | Not reported (the app refreshes the peer map, policy and relay every 5 minutes, but its native bridge does not expose the traffic counters yet) |
 
 Counts are lower bounds: Linux rule counters reset when the chain is
 rebuilt, counter keys are capped (1,024 on userspace platforms; extra keys

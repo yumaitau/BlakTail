@@ -119,7 +119,8 @@ public struct CoordinatorClient: Sendable {
             relayToken: decoded.relayToken,
             relayExpiresAt: decoded.relayExpiresAt,
             policyJSON: policy,
-            traffic: decoded.traffic
+            traffic: decoded.traffic,
+            relayEndpoints: decoded.relayEndpoints
         )
     }
 
@@ -282,6 +283,7 @@ public struct CoordinatorClient: Sendable {
         var relays: [String]
         var relayToken: String
         var relayExpiresAt: UInt64
+        var relayEndpoints: [RelayEndpointInfo]
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -293,6 +295,7 @@ public struct CoordinatorClient: Sendable {
             relays = try container.decodeIfPresent([String].self, forKey: .relays) ?? []
             relayToken = try container.decodeIfPresent(String.self, forKey: .relayToken) ?? ""
             relayExpiresAt = try container.decodeIfPresent(UInt64.self, forKey: .relayExpiresAt) ?? 0
+            relayEndpoints = try container.decodeIfPresent([RelayEndpointInfo].self, forKey: .relayEndpoints) ?? []
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -304,6 +307,7 @@ public struct CoordinatorClient: Sendable {
             case relays
             case relayToken = "relay_token"
             case relayExpiresAt = "relay_expires_at"
+            case relayEndpoints = "relay_endpoints"
         }
     }
 }

@@ -106,18 +106,23 @@ See [console.md](console.md).
   with no physical-device or clean-host proof; the Linux tray controls the
   local agent but has not been validated on a clean desktop. See
   [platform-support.md](platform-support.md)
-- Not a completed iPhone relay path: the phone joins as a WireGuard client over
-  direct UDP; Australian relay fallback and hole punch are still the Mac/Linux
-  agent cut
+- Not a proven iPhone relay path: the packet tunnel now falls back to the
+  Australian relay (UDP, or WSS when UDP is blocked) through the shared Rust
+  core and shows the observed path, but it has only been built for the
+  simulator; no physical-device run across independent NATs is recorded, and
+  the phone does not hole-punch. Android has the UDP relay in code only. See
+  [ios.md](ios.md#relay-fallback)
 - Not a file-sync product (that is BlakSync)
 - Not an anonymity network; the coordinator and relay can still see metadata
 - Not a production-verified NAT claim: agents have hole punching and relay
   fallback, but a forced-relay proof across two independent NAT paths is still
-  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24). Multi-relay
-  failover is implemented and unit-tested; its single-host drill
-  (`deploy/homelab/prove-relay-failover.sh`) has not yet been recorded
-- No HTTPS/WebSocket relay transport: networks that block all UDP cannot
-  connect (ADR 0004)
+  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24). The
+  single-host relay, failover and WSS drills have passed (see
+  [relay.md](relay.md#lab-results-single-docker-host-3-october-2026)); they
+  are not independent-ISP proof
+- HTTPS/WebSocket relay fallback (ADR 0004) is implemented and proven only on
+  one Docker host: no real corporate proxy, ALB-fronted relay or independent
+  ISP has been tested
 - Not an IPv6-only product yet: dual-stack passed on private AWS agents, but
   the drill that removes each BlakTail IPv4 address is still open in
   [#32](https://github.com/jusso-dev/BlakTail/issues/32)

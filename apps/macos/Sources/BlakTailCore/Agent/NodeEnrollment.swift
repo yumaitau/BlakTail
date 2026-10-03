@@ -135,6 +135,20 @@ public struct TrafficReporting: Codable, Equatable, Sendable {
     }
 }
 
+/// A coordinator-advertised relay with its declared region and optional
+/// approved `wss://` fallback served by the same relay.
+public struct RelayEndpointInfo: Codable, Equatable, Hashable, Sendable {
+    public var endpoint: String
+    public var region: String
+    public var wss: String?
+
+    public init(endpoint: String, region: String, wss: String? = nil) {
+        self.endpoint = endpoint
+        self.region = region
+        self.wss = wss
+    }
+}
+
 public struct PeerSnapshot: Equatable, Sendable {
     public var peers: [CoordinatorPeer]
     public var assignedIPs: [String]
@@ -147,6 +161,7 @@ public struct PeerSnapshot: Equatable, Sendable {
     /// native inbound filter.
     public var policyJSON: Data
     public var traffic: TrafficReporting?
+    public var relayEndpoints: [RelayEndpointInfo]
 
     public init(
         peers: [CoordinatorPeer],
@@ -157,7 +172,8 @@ public struct PeerSnapshot: Equatable, Sendable {
         relayToken: String = "",
         relayExpiresAt: UInt64 = 0,
         policyJSON: Data = Data("[]".utf8),
-        traffic: TrafficReporting? = nil
+        traffic: TrafficReporting? = nil,
+        relayEndpoints: [RelayEndpointInfo] = []
     ) {
         self.peers = peers
         self.assignedIPs = assignedIPs
@@ -168,6 +184,7 @@ public struct PeerSnapshot: Equatable, Sendable {
         self.relayExpiresAt = relayExpiresAt
         self.policyJSON = policyJSON
         self.traffic = traffic
+        self.relayEndpoints = relayEndpoints
     }
 }
 

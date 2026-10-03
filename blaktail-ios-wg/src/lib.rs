@@ -2,6 +2,9 @@
 mod android;
 pub mod filter;
 pub mod flow_report;
+mod relay;
+
+pub use relay::*;
 
 use boringtun::noise::{Tunn, TunnResult};
 use std::collections::BTreeMap;
@@ -102,6 +105,8 @@ struct TunnelInner {
     peers: BTreeMap<u32, PeerSlot>,
     next_index: u32,
     filter: filter::Filter,
+    /// Relay fallback state, created by `blaktail_relay_configure`.
+    relay: Option<blaktail_relay_proto::mobile::MobileRelay>,
 }
 
 impl TunnelInner {
@@ -219,6 +224,7 @@ pub unsafe extern "C" fn blaktail_tunnel_create(private_key: *const u8) -> *mut 
                 peers: BTreeMap::new(),
                 next_index: 1,
                 filter: filter::Filter::new(),
+                relay: None,
             }),
         }))
     }))

@@ -1314,6 +1314,7 @@ mod tests {
             relay_endpoints: vec![],
             active_relay: None,
             relay_failovers: 0,
+            relay_link: None,
             dns_mode: None,
             org_dns: None,
             dns_degraded: None,

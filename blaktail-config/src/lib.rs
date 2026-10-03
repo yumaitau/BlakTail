@@ -1807,15 +1807,56 @@ fn url_host_is_loopback(url: &Url) -> bool {
 
 /// Splits a `coordinator.relays` entry into its UDP endpoint and optional
 /// declared region: `relay-a.example.org.au:3478#ap-southeast-2`. Untagged
-/// entries inherit `coordinator.region`.
+/// entries inherit `coordinator.region`. An optional `;wss=<url>` suffix
+/// (see [`relay_entry_wss`]) is ignored here.
 pub fn split_relay_entry(entry: &str) -> (&str, Option<&str>) {
-    match entry.trim().split_once('#') {
+    let entry = relay_entry_parts(entry).0;
+    match entry.split_once('#') {
         Some((endpoint, region)) => (endpoint.trim(), Some(region.trim())),
-        None => (entry.trim(), None),
+        None => (entry, None),
+    }
+}
+
+/// The WebSocket-over-TLS fallback served by the same relay process, from
+/// `relay-a.example.org.au:3478#ap-southeast-2;wss=wss://relay-a.example.org.au/v1/relay`.
+pub fn relay_entry_wss(entry: &str) -> Option<&str> {
+    relay_entry_parts(entry).1
+}
+
+fn relay_entry_parts(entry: &str) -> (&str, Option<&str>) {
+    let entry = entry.trim();
+    match entry.split_once(';') {
+        Some((relay, option)) => (
+            relay.trim(),
+            option
+                .trim()
+                .strip_prefix("wss=")
+                .map(str::trim)
+                .filter(|url| !url.is_empty()),
+        ),
+        None => (entry, None),
     }
 }
 
 fn validate_relay_endpoint(entry: &str, field: &str, violations: &mut Vec<Violation>) {
+    if let Some((_, option)) = entry.split_once(';') {
+        let valid = relay_entry_wss(entry).is_some_and(|url| {
+            Url::parse(url).is_ok_and(|url| {
+                url.scheme() == "wss"
+                    && url.host_str().is_some_and(|host| !host.is_empty())
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.fragment().is_none()
+            })
+        });
+        if !valid || !option.trim().starts_with("wss=") {
+            violation(
+                violations,
+                field,
+                "only a ;wss=wss://host/path fallback without credentials may follow the relay",
+            );
+        }
+    }
     let (value, region) = split_relay_entry(entry);
     if let Some(region) = region {
         if !is_australian_region(region) {
@@ -2695,6 +2736,33 @@ mod tests {
             split_relay_entry("relay-a.example:3478"),
             ("relay-a.example:3478", None)
         );
+        let with_wss = "relay-a.example:3478#australiaeast;wss=wss://relay-a.example.au/v1/relay";
+        assert_eq!(
+            split_relay_entry(with_wss),
+            ("relay-a.example:3478", Some("australiaeast"))
+        );
+        assert_eq!(
+            relay_entry_wss(with_wss),
+            Some("wss://relay-a.example.au/v1/relay")
+        );
+        assert_eq!(relay_entry_wss("relay-a.example:3478"), None);
+        let mut environment = valid_environment();
+        environment.insert(
+            "BLAKTAIL_RELAYS".into(),
+            format!(
+                "{with_wss},relay-b.example:3478;wss=https://relay-b.example.au/,relay-c.example:3478;wss=wss://u:p@relay-c.example.au/,relay-d.example:3478;proxy=x"
+            ),
+        );
+        let loaded = LoadedConfig::load_with_environment(None, Service::All, environment).unwrap();
+        let fields = loaded
+            .violations(Service::All)
+            .into_iter()
+            .map(|violation| violation.field)
+            .collect::<BTreeSet<_>>();
+        assert!(!fields.contains("coordinator.relays[0]"));
+        assert!(fields.contains("coordinator.relays[1]"));
+        assert!(fields.contains("coordinator.relays[2]"));
+        assert!(fields.contains("coordinator.relays[3]"));
         let mut environment = valid_environment();
         environment.insert(
             "BLAKTAIL_RELAYS".into(),
