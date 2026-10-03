@@ -15,6 +15,7 @@ blaktail-relay = { path = "../blaktail-relay" }
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = "2"
 hmac = "0.12"
 idna = "1"
 rand = "0.8"
@@ -22,6 +23,7 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "std"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["any", "postgres", "runtime-tokio", "sqlite", "tls-rustls-aws-lc-rs"] }
 thiserror = "2"
 time = "0.3"

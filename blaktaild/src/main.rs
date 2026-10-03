@@ -38,6 +38,13 @@ struct Cli {
     /// PEM trust bundle for a private coordinator CA.
     #[arg(long, global = true, env = "BLAKTAIL_COORD_CA")]
     coord_ca: Option<PathBuf>,
+    /// Run owner-approved remote job templates pulled from the coordinator.
+    /// Each job runs its fixed argv (no shell) as --remote-jobs-user.
+    #[arg(long, global = true, env = "BLAKTAIL_ALLOW_REMOTE_JOBS")]
+    allow_remote_jobs: bool,
+    /// Unprivileged account remote jobs run as; required with --allow-remote-jobs.
+    #[arg(long, global = true, env = "BLAKTAIL_REMOTE_JOBS_USER")]
+    remote_jobs_user: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -445,6 +452,11 @@ async fn sync_loop(
             }
         }
         report_relay_endpoint(coordinator, mesh.as_ref(), state, state_dir).await;
+        if blaktaild::remote::report_host_key(coordinator, state).await {
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist the reported SSH host key");
+            }
+        }
         if exit_after_join {
             if let Some(active) = mesh.take() {
                 active.stop();
@@ -1105,11 +1117,51 @@ fn blaktaild_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Validates the remote jobs opt-in before the agent starts syncing.
+fn remote_jobs_user(
+    allow: bool,
+    user: Option<&str>,
+) -> Result<Option<blaktaild::remote::RunAs>, blaktaild::Error> {
+    if !allow {
+        return Ok(None);
+    }
+    if cfg!(target_os = "windows") {
+        return Err(blaktaild::Error::Message(
+            "remote jobs are supported on Linux and macOS only".into(),
+        ));
+    }
+    let user = user.filter(|user| !user.trim().is_empty()).ok_or_else(|| {
+        blaktaild::Error::Message("--allow-remote-jobs needs --remote-jobs-user".into())
+    })?;
+    blaktaild::remote::resolve_user(user.trim())
+        .map(Some)
+        .map_err(blaktaild::Error::Message)
+}
+
+fn start_remote_jobs(
+    run_as: Option<blaktaild::remote::RunAs>,
+    coordinator: &Coordinator,
+    state: &mut blaktaild::NodeState,
+    state_dir: &std::path::Path,
+) {
+    state.remote.jobs_enabled = run_as.is_some();
+    if let Some(run_as) = run_as {
+        info!(uid = run_as.uid, "remote jobs enabled");
+        tokio::spawn(blaktaild::remote::job_loop(
+            coordinator.clone(),
+            state_dir.to_path_buf(),
+            run_as,
+            Duration::from_secs(15),
+        ));
+    }
+}
+
 async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Error> {
     let state_dir = cli
         .state_dir
         .as_deref()
         .expect("agent state directory resolved before run");
+    let remote_jobs = remote_jobs_user(cli.allow_remote_jobs, cli.remote_jobs_user.as_deref())?;
     match cli.command {
         Command::Up {
             coord,
@@ -1286,6 +1338,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 state.ipv6_address().unwrap_or("unavailable"),
                 state.coord
             );
+            if !exit_after_join {
+                start_remote_jobs(remote_jobs, &coordinator, &mut state, state_dir);
+            }
             sync_loop(
                 &coordinator,
                 network.as_mut(),
@@ -1320,6 +1375,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 info!(restored, "restored persisted WireGuard peers");
             }
             info!(node_id = %state.node_id, interface = %state.interface, "resuming enrollment");
+            start_remote_jobs(remote_jobs, &coordinator, &mut state, state_dir);
             sync_loop(
                 &coordinator,
                 network.as_mut(),

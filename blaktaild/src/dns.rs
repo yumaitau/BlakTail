@@ -1297,6 +1297,7 @@ mod tests {
             forward_filter: None,
             app_connector: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
         }
     }
 

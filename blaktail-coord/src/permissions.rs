@@ -39,6 +39,11 @@ pub(crate) enum Permission {
     /// Read the protected operator health view (versions, schema, relays,
     /// outbox, expiry counts, backup proof). Read-only, never key material.
     ViewOperations,
+    /// Start browser SSH/RDP sessions and request allowlisted remote jobs.
+    UseRemoteSessions,
+    /// Define remote job templates and approve runs. Owner-only: a job runs
+    /// on devices without anyone at the keyboard.
+    ManageRemoteJobs,
 }
 
 impl Role {
@@ -48,7 +53,7 @@ impl Role {
             Role::Owner => true,
             Role::Admin => !matches!(
                 permission,
-                ManageSecurity | ManageApiClients | ViewOperations
+                ManageSecurity | ManageApiClients | ViewOperations | ManageRemoteJobs
             ),
             Role::NetworkAdmin => matches!(
                 permission,
@@ -60,6 +65,7 @@ impl Role {
                     | ManageDns
                     | ManageServices
                     | ViewAudit
+                    | UseRemoteSessions
             ),
             Role::Auditor => matches!(
                 permission,
@@ -91,7 +97,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 13] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 15] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -105,6 +111,8 @@ pub(crate) mod tests {
         (Permission::ManageApiClients, "manage_api_clients"),
         (Permission::ManageSecurity, "manage_security"),
         (Permission::ViewOperations, "view_operations"),
+        (Permission::UseRemoteSessions, "use_remote_sessions"),
+        (Permission::ManageRemoteJobs, "manage_remote_jobs"),
     ];
 
     #[test]

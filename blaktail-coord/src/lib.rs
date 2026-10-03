@@ -20,6 +20,7 @@ mod permissions;
 mod policy_explain;
 mod posture;
 mod private_services;
+mod remote_access;
 mod resources;
 mod service_users;
 mod shares;
@@ -355,7 +356,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 33,
         name: "posture integrations",
         postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0033_edr_integrations.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0033_edr_integrations.sql"
+        )),
     },
     Migration {
         version: 34,
@@ -367,7 +370,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 35,
         name: "private service serving",
         postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0035_service_serving.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0035_service_serving.sql"
+        )),
     },
     Migration {
         version: 36,
@@ -1543,6 +1548,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(audit_log::routes())
         .merge(traffic::routes())
         .merge(notifications::routes())
+        .merge(remote_access::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -3242,6 +3248,9 @@ struct PeersResponse {
     /// may forward from the overlay when it routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forward_filter: Option<forwarding::ForwardFilter>,
+    /// Organisation SSH CA, gateway addresses and job signing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_access: Option<remote_access::AgentView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3553,6 +3562,7 @@ async fn list_peers(
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
         forward_filter,
+        remote_access: Some(remote_access::agent_view(&s, &org, node_id).await?),
     }))
 }
 
@@ -6086,6 +6096,7 @@ mod tests {
     mod forwarding;
     mod operations;
     mod policy_posture;
+    mod remote_access;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {

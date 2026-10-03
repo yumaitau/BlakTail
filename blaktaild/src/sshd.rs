@@ -10,6 +10,14 @@
 //! Any failure restores the previous file and reports the limits as not
 //! enforced, so the agent and coordinator keep TCP 22 closed to user-limited
 //! sources. The agent never edits `sshd_config` itself.
+//!
+//! Browser remote access (draft 13) is a second opt-in: when
+//! `BLAKTAIL_SSH_USER_CA` also names a file, the agent writes the
+//! organisation's SSH user CA there and trusts it only inside a
+//! `Match Address` block for the gateway's overlay addresses. In that block
+//! `AuthorizedPrincipalsFile none` keeps sshd's built-in principal mapping: a
+//! certificate logs in only as a login name it lists, and the coordinator
+//! lists exactly one approved OS user per session certificate.
 
 use crate::{acl_filter, Error, Peer};
 use std::{
@@ -21,6 +29,7 @@ use std::{
 };
 
 pub const DROPIN_ENV: &str = "BLAKTAIL_SSHD_DROPIN";
+pub const USER_CA_ENV: &str = "BLAKTAIL_SSH_USER_CA";
 pub const PID_FILE: &str = "/run/sshd.pid";
 /// TEST-NET-1: never an overlay peer, so its effective config must not
 /// carry BlakTail's per-source limits.
@@ -53,22 +62,150 @@ pub fn configured_dropin() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Where to write the organisation's SSH user CA. Needs the drop-in too.
+pub fn configured_user_ca() -> Option<PathBuf> {
+    configured_dropin()?;
+    std::env::var_os(USER_CA_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The organisation SSH user CA, trusted only from the gateway addresses.
+pub struct RemoteCa<'a> {
+    pub path: &'a Path,
+    pub public_key: &'a str,
+    pub gateways: &'a [String],
+}
+
+impl RemoteCa<'_> {
+    /// Everything here lands in sshd configuration, so anything that could
+    /// add a keyword or a line is refused.
+    fn validated(&self) -> Result<(String, Vec<String>), String> {
+        let path = self.path.to_str().unwrap_or_default();
+        if !self.path.is_absolute()
+            || path
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '"')
+        {
+            return Err(format!(
+                "{USER_CA_ENV} must be an absolute path without spaces"
+            ));
+        }
+        let mut parts = self.public_key.split(' ');
+        let valid_key = parts.next() == Some("ssh-ed25519")
+            && parts.next().is_some_and(|data| {
+                data.len() >= 68
+                    && data
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '='))
+            })
+            && parts.next().is_none();
+        if !valid_key {
+            return Err("coordinator SSH user CA is not a bare ssh-ed25519 key".into());
+        }
+        let gateways = self
+            .gateways
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.to_string())
+                    .map_err(|_| "gateway address is not an IP address".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if gateways.is_empty() {
+            return Err("no gateway address to trust the SSH user CA from".into());
+        }
+        Ok((path.to_owned(), gateways))
+    }
+}
+
+fn remote_ca_config(ca: &RemoteCa<'_>) -> Result<String, String> {
+    let (path, gateways) = ca.validated()?;
+    let mut out = String::from("# browser remote access: organisation CA, gateway only\n");
+    out.push_str(&format!("Match Address {}\n", gateways.join(",")));
+    for line in [
+        format!("TrustedUserCAKeys {path}"),
+        "AuthorizedPrincipalsFile none".into(),
+        "PasswordAuthentication no".into(),
+        "KbdInteractiveAuthentication no".into(),
+        "AllowAgentForwarding no".into(),
+        "AllowTcpForwarding no".into(),
+        "X11Forwarding no".into(),
+        "PermitTunnel no".into(),
+    ] {
+        out.push_str("    ");
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("Match all\n");
+    Ok(out)
+}
+
+/// Writes and proves the drop-in. Returns whether the remote-access CA is
+/// active; a CA problem leaves the CA out but keeps the user policy.
 pub fn sync(
     path: &Path,
     peers: &[Peer],
+    remote: Option<&RemoteCa<'_>>,
     runner: &mut dyn Runner,
     pid_file: impl AsRef<Path>,
-) -> Result<(), Error> {
-    let config = acl_filter::sshd_policy_config(peers);
+) -> Result<bool, Error> {
+    let mut config = acl_filter::sshd_policy_config(peers);
+    let mut trusted = None;
+    if let Some(ca) = remote {
+        match remote_ca_config(ca) {
+            Ok(block) => {
+                write_ca(ca)?;
+                config.push_str(&block);
+                trusted = Some(ca);
+            }
+            Err(reason) => tracing::warn!(%reason, "browser remote access CA not installed"),
+        }
+    }
     let previous = fs::read(path).ok();
     if previous.as_deref() != Some(config.as_bytes()) {
         write_config(path, config.as_bytes())?;
     }
-    if let Err(reason) = verify(peers, runner) {
+    let verified = verify(peers, runner).and_then(|()| match trusted {
+        Some(ca) => verify_ca(ca, runner),
+        None => Ok(()),
+    });
+    if let Err(reason) = verified {
         restore(path, previous.as_deref())?;
         return Err(Error::Message(reason));
     }
-    reload(runner, pid_file.as_ref()).map_err(Error::Message)
+    reload(runner, pid_file.as_ref()).map_err(Error::Message)?;
+    Ok(trusted.is_some())
+}
+
+fn write_ca(ca: &RemoteCa<'_>) -> Result<(), Error> {
+    let line = format!("{}\n", ca.public_key);
+    if fs::read(ca.path).ok().as_deref() != Some(line.as_bytes()) {
+        write_config(ca.path, line.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn verify_ca(ca: &RemoteCa<'_>, runner: &mut dyn Runner) -> Result<(), String> {
+    let (path, gateways) = ca.validated()?;
+    let trusted = format!("trustedusercakeys {}", path.to_ascii_lowercase());
+    for gateway in &gateways {
+        let lines = effective(runner, gateway)?;
+        if !lines.contains(&trusted)
+            || !lines
+                .iter()
+                .any(|line| line == "authorizedprincipalsfile none")
+        {
+            return Err(format!(
+                "sshd does not apply the BlakTail SSH user CA for gateway {gateway}; check that sshd_config includes the drop-in"
+            ));
+        }
+    }
+    if effective(runner, UNRELATED_ADDRESS)?.contains(&trusted) {
+        return Err("the BlakTail SSH user CA leaks outside the gateway Match block".into());
+    }
+    Ok(())
 }
 
 fn write_config(path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -267,6 +404,7 @@ mod tests {
         sync(
             &path,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid"),
         )
@@ -290,6 +428,7 @@ mod tests {
         assert!(sync(
             &path,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid")
         )
@@ -301,6 +440,7 @@ mod tests {
         assert!(sync(
             &path,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid")
         )
@@ -312,6 +452,7 @@ mod tests {
         let error = sync(
             &path,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid"),
         )
@@ -327,6 +468,7 @@ mod tests {
         assert!(sync(
             &fresh,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid")
         )
@@ -343,6 +485,7 @@ mod tests {
         assert!(sync(
             &path,
             &[limited(&["deploy"])],
+            None,
             &mut sshd,
             dir.path().join("none.pid")
         )
@@ -351,7 +494,96 @@ mod tests {
         fs::write(&pid, "4242\n").unwrap();
         let mut sshd = fake(dir.path());
         sshd.running = true;
-        sync(&path, &[limited(&["deploy"])], &mut sshd, &pid).unwrap();
+        sync(&path, &[limited(&["deploy"])], None, &mut sshd, &pid).unwrap();
         assert!(sshd.calls.iter().any(|call| call == "kill -HUP 4242"));
+    }
+
+    const CA: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOT6Bm5wD3HKNzLD7SKSaVM9ADEFMHGm9pScXfB1IxZ";
+
+    #[test]
+    fn remote_ca_is_trusted_only_from_the_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sshd = fake(dir.path());
+        let path = sshd.dropin.clone();
+        let ca_path = dir.path().join("blaktail_user_ca.pub");
+        let gateways = vec!["100.64.0.9".to_string()];
+        let ca = RemoteCa {
+            path: &ca_path,
+            public_key: CA,
+            gateways: &gateways,
+        };
+        let active = sync(
+            &path,
+            &[limited(&["deploy"])],
+            Some(&ca),
+            &mut sshd,
+            dir.path().join("none.pid"),
+        )
+        .unwrap();
+        assert!(active);
+        assert_eq!(fs::read_to_string(&ca_path).unwrap(), format!("{CA}\n"));
+        let config = fs::read_to_string(&path).unwrap();
+        assert!(config.contains("Match Address 100.64.0.9\n"));
+        assert!(config.contains(&format!("TrustedUserCAKeys {}", ca_path.display())));
+        assert!(config.contains("AuthorizedPrincipalsFile none"));
+        assert!(config.contains("PasswordAuthentication no"));
+        assert!(sshd
+            .calls
+            .iter()
+            .any(|call| call.contains("addr=100.64.0.9")));
+
+        // A CA that leaks to every address is refused and the file restored.
+        let mut leaky = fake(dir.path());
+        leaky.leaks = true;
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(sync(
+            &path,
+            &[],
+            Some(&ca),
+            &mut leaky,
+            dir.path().join("none.pid")
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn untrusted_ca_input_never_reaches_sshd_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pub");
+        let good = vec!["100.64.0.9".to_string()];
+        let injected = vec!["100.64.0.9\n    PermitRootLogin yes".to_string()];
+        let spaced = PathBuf::from("/etc/ssh/ca file.pub");
+        for (path, key, gateways) in [
+            (
+                ca_path.as_path(),
+                "ssh-ed25519 AAAA\nPermitRootLogin yes",
+                &good,
+            ),
+            (
+                ca_path.as_path(),
+                "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ",
+                &good,
+            ),
+            (ca_path.as_path(), CA, &injected),
+            (ca_path.as_path(), CA, &vec![]),
+            (spaced.as_path(), CA, &good),
+            (Path::new("relative.pub"), CA, &good),
+        ] {
+            let mut sshd = fake(dir.path());
+            let dropin = sshd.dropin.clone();
+            let ca = RemoteCa {
+                path,
+                public_key: key,
+                gateways,
+            };
+            let active =
+                sync(&dropin, &[], Some(&ca), &mut sshd, dir.path().join("x.pid")).unwrap();
+            assert!(!active, "{key:?} {gateways:?} {path:?}");
+            let config = fs::read_to_string(&dropin).unwrap_or_default();
+            assert!(!config.contains("TrustedUserCAKeys"));
+            assert!(!config.contains("PermitRootLogin"));
+        }
     }
 }
