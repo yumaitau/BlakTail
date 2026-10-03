@@ -677,17 +677,20 @@ async fn load_service(
             "target_unavailable",
             "The target device was revoked or removed; choose another device.".to_owned(),
         )
+    } else if fresh && health.state == "unhealthy" {
+        // The agent drops the route (and its listener, if nothing else is
+        // routed) for a target that fails its check, so this is decided
+        // before anything that needs a live listener or certificate.
+        ("target_unhealthy", format!(
+            "The target device reports that the local target failed its check ({}); the name is not published until it recovers.",
+            if health.detail.is_empty() { "no detail" } else { health.detail.as_str() }
+        ))
     } else if certificate.is_none() {
         ("awaiting_certificate", "Waiting for the target device to request a certificate. Run `blaktaild up --serve-services` on it; the name is not published until it serves.".to_owned())
-    } else if !fresh || !serving_live_certificate || health.state == "not_listening" {
+    } else if !fresh || !serving_live_certificate || health.state != "healthy" {
         ("certificate_issued", format!(
             "A current certificate was issued, but the target device has not reported a listener serving it in the last {} seconds, so the name is not published.",
             service_serving::HEALTH_FRESH_SECS
-        ))
-    } else if health.state != "healthy" {
-        ("target_unhealthy", format!(
-            "The listener is up but the local target failed its health check ({}); the name is withdrawn from DNS until it recovers.",
-            if health.detail.is_empty() { "no detail" } else { health.detail.as_str() }
         ))
     } else {
         ("serving", "The target device reports its listener serving the current certificate and a healthy local target; authorised devices resolve the name in MagicDNS. This is the device's own report, not a probe from a client.".to_owned())

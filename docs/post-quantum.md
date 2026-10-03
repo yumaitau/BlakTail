@@ -139,27 +139,31 @@ own agent blocks the pair from its side.
 
 `deploy/homelab/prove-post-quantum.sh` builds a lab image on the
 `m3-max` Docker context, starts a coordinator and two privileged Linux agents
-on kernel WireGuard, and checks baseline, `require`, rotation and downgrade.
-Results are recorded below.
+on kernel WireGuard, and checks baseline, `require`, rotation, downgrade and
+that the block lets nothing but the exchange through. `LAB_PREFIX` renames
+everything it starts (default `pqlab`).
 
-Run on 3 October 2026 (OrbStack Linux 7.0 kernel WireGuard, Debian
-bookworm agents, SQLite coordinator, self-signed lab CA):
+Re-run on 3 October 2026 after protocol version 2 (WireGuard static-key
+agreement in the derivation) and the `mangle`/conntrack block rules landed
+(OrbStack Linux 7.0 kernel WireGuard, Debian bookworm agents, SQLite
+coordinator, self-signed lab CA, `LAB_PREFIX=final-pqlab`):
 
 ```
 == enrol two agents (kernel WireGuard)
-ok baseline classical tunnel (100.64.0.1 <-> 100.64.0.2), no PSK
+ok baseline classical tunnel (100.64.0.1 <-> 100.64.0.2), no PSK, b reaches a:8080
 == policy require
 policy mode=require revision=1
-ok both agents report established after 28s
+ok both agents report established after 30s
 ok wg shows the same non-zero PSK on both sides (fingerprint compared, not printed)
 ok ping a -> b with the hybrid PSK installed
 {"device": "pq-a", "peer": "pq-b", "state": "established", "mode": "require",
  "algorithm": "ml-kem-768+x25519", "epoch": 1, "rotated_seconds_ago": 29, "blocked": false}
 == rotation (every 120s)
-ok PSK rotated after 98s (epoch 1 -> 2), both sides agree, ping works
+ok PSK rotated after 101s (epoch 1 -> 2), both sides agree, ping works
 == downgrade: b restarts without the pq-psk capability
 ok a reports b: required_not_established, reason peer_not_capable, blocked
-ok PSK cleared, raw-table block installed, ping a -> b blocked
+ok PSK cleared, mangle-table block installed, ping a -> b blocked
+ok b -> a:8080 from source port 51822 is dropped (reached it from an ephemeral port before the block)
 {"device": "pq-a", "peer": "pq-b", "state": "required_not_established",
  "reason": "peer_not_capable", "blocked": true}
 {"device": "pq-b", "peer": "pq-a", "state": "required_not_established",
@@ -167,18 +171,18 @@ ok PSK cleared, raw-table block installed, ping a -> b blocked
 post_quantum lab passed
 ```
 
-The driver also checks that the coordinator's per-peer view never mentions
-`psk`, `preshared` or `private`. Agent logs show `post-quantum PSK installed
-(initiator) epoch=1` at 00:41:14 and `epoch=2` at 00:43:14 UTC, matching the
-two-minute rotation. The lab proves Linux agent and coordinator behaviour on
-one Docker host. It does not prove the macOS path, independent networks,
-relay failover with PQ, mobile cost, or cryptographic soundness.
+The source-port check opens a TCP connection from b's port 51822 (b runs
+without the capability, so nothing else holds that port) to a plain HTTP
+listener on a's overlay port 8080. The same listener answered b from an
+ephemeral port before the policy, so the drop is the block, not the ACL. The
+reverse direction is not exercised live because a's own exchange listener
+holds port 51822; `pq::tests::block_rules_keep_only_the_exchange_port_and_skip_default_routes`
+covers the outbound rules.
 
-That run predates protocol version 2 (WireGuard static-key agreement in the
-derivation) and the `mangle`/conntrack block rules; both are covered by unit
-tests (`pq::tests::exchange_without_the_wireguard_private_key_fails`,
-`pq::tests::block_rules_keep_only_the_exchange_port_and_skip_default_routes`)
-and the driver now checks the `mangle` chain, but the lab has not been re-run.
+The driver also checks that the coordinator's per-peer view never mentions
+`psk`, `preshared` or `private`. The lab proves Linux agent and coordinator
+behaviour on one Docker host. It does not prove the macOS path, independent
+networks, relay failover with PQ, mobile cost, or cryptographic soundness.
 
 ## Still open
 

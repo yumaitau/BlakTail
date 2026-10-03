@@ -10,7 +10,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-P=pubingress
+P="${LAB_PREFIX:-pubingress}"
 IMG="${P}-lab:latest"
 NET="${P}-net"
 FQDN=app.example.org.au
@@ -53,7 +53,7 @@ docker network create "$NET" >/dev/null
 docker volume create "${P}-certs" >/dev/null
 
 echo "== lab certificates (coordinator and the public test name)"
-docker run --rm -v "${P}-certs:/certs" --entrypoint sh "$IMG" -ceu '
+docker run --rm -v "${P}-certs:/certs" -e P="$P" --entrypoint sh "$IMG" -ceu '
   cd /certs
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.crt \
     -days 2 -subj "/CN=pubingress lab CA" \
@@ -63,7 +63,7 @@ docker run --rm -v "${P}-certs:/certs" --entrypoint sh "$IMG" -ceu '
     printf "subjectAltName=%s\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n" "$2" >"$1.ext"
     openssl x509 -req -in "$1.csr" -CA ca.crt -CAkey ca.key -CAcreateserial -out "$1.crt" -days 2 -extfile "$1.ext" 2>/dev/null
   }
-  gen coord DNS:pubingress-coord
+  gen coord "DNS:$P-coord"
   gen public DNS:app.example.org.au
   chmod 644 ./*.crt && chmod 600 ./*.key'
 
@@ -173,6 +173,19 @@ pass "owner published ${FQDN} -> app:8080 (route ${route_id})"
 
 edge_ip="$(ip_of "${P}-edge")"
 public() { docker exec "${P}-client" curl -sS -m 5 --cacert /certs/ca.crt --resolve "${FQDN}:443:${edge_ip}" "$@"; }
+
+echo "== designation: the capability alone gets no routes"
+sleep 15 # three ingress polls
+if public "https://${FQDN}/" >/dev/null 2>&1; then fail "undesignated ingress served the route"; fi
+edge_id="$(lab node-id edge)"
+for role in admin network_admin member; do
+  status="$(lab designate "$edge_id" true "$role")"
+  [[ "$status" == 403 ]] || fail "${role} designation answered ${status}"
+done
+pass "undesignated edge serves nothing; admin, network admin and member cannot designate it (403)"
+status="$(lab designate "$edge_id" true)"
+[[ "$status" == 200 ]] || fail "owner designation answered ${status}"
+pass "owner designated edge as the public ingress"
 for _ in $(seq 1 60); do
   [[ "$(public "https://${FQDN}/" 2>/dev/null || true)" == "hello from the private app" ]] && break
   sleep 1

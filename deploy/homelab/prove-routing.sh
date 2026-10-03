@@ -39,8 +39,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 CTX="${DOCKER_CONTEXT:-m3-max}"
 D=(docker --context "$CTX")
-P=labs-routing
-IMG="${LABS_IMAGE:-labs-routing:latest}"
+P="${LAB_PREFIX:-labs-routing}"
+IMG="${LABS_IMAGE:-$P:latest}"
 COORD_URL=https://$P-coord:8443
 ORG="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 export BLAKTAIL_AUTH_HMAC_SECRET="$(openssl rand -hex 32)"
@@ -85,13 +85,13 @@ echo "== coordinator (self-signed lab CA, SQLite)"
   "$IMG" >/dev/null
 "${D[@]}" cp deploy/homelab/routing-lab.py "$P-coord:/usr/local/bin/routing-lab"
 x coord chmod 0755 /usr/local/bin/routing-lab
-x coord sh -c '
+"${D[@]}" exec -e P="$P" "$P-coord" sh -c '
   set -e; cd /certs
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
     -subj "/CN=labs-routing CA" -keyout ca.key -out ca.crt 2>/dev/null
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-    -subj "/CN=labs-routing-coord" -keyout coord.key -out coord.csr 2>/dev/null
-  printf "subjectAltName=DNS:labs-routing-coord\n" > san.ext
+    -subj "/CN=$P-coord" -keyout coord.key -out coord.csr 2>/dev/null
+  printf "subjectAltName=DNS:%s\n" "$P-coord" > san.ext
   openssl x509 -req -in coord.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
     -days 1 -extfile san.ext -out coord.crt 2>/dev/null
   chmod 644 coord.key ca.crt coord.crt; rm -f ca.key'
@@ -101,7 +101,7 @@ for i in $(seq 1 61); do
   x coord python3 -c "import ssl,urllib.request; urllib.request.urlopen('$COORD_URL/readyz', context=ssl.create_default_context(cafile='/certs/ca.crt'))" >/dev/null 2>&1 && break
   sleep 1
 done
-lab() { "${D[@]}" exec -e BLAKTAIL_AUTH_HMAC_SECRET "$P-coord" routing-lab "$@"; }
+lab() { "${D[@]}" exec -e BLAKTAIL_AUTH_HMAC_SECRET -e ROUTINGLAB_COORD="$COORD_URL" "$P-coord" routing-lab "$@"; }
 lab bootstrap "$ORG"
 
 echo "== hosts behind the sites and the Internet host"

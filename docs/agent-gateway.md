@@ -49,7 +49,11 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
 
 3. In the console, open **Agents → Agent network**:
    - Add a provider: name, OpenAI-compatible base URL (for Ollama,
-     `http://<host>:11434/v1`), the models it serves, a **data location**
+     `http://<host>:11434/v1`; a provider on a private, loopback or overlay
+     address must be named by IP literal, `localhost`, or a `.internal` or
+     `.blaktail` name, because the gateway refuses any other hostname that
+     resolves to such an address, including single-label names such as
+     `ollama`), the models it serves, a **data location**
      (free text, e.g. "Australia (self-hosted, Mparntwe office)") and an
      explicit **onshore/offshore** residency. An optional credential is sealed
      and never shown again.
@@ -190,30 +194,45 @@ Docker host) builds Linux release binaries and starts, on a private Docker
 network: a TLS coordinator, the gateway, and a real Ollama serving
 `qwen2.5:0.5b`. It enrols the gateway node with the `agent-gateway`
 capability, configures an onshore Ollama provider and an offshore provider,
-mints a key (quota 3/day, metadata logging, a redaction pattern) and drives
-requests through the gateway.
+mints a key (quota 3/day, metadata logging, a redaction pattern), checks the
+designation gate and drives requests through the gateway. `LAB_PREFIX`
+renames everything it starts (default `agentgw-lab`).
 
-Result on the `m3-max` lab host (16 CPU, OrbStack, Linux arm64), 3 October 2026:
+Re-run on the `m3-max` lab host (16 CPU, OrbStack, Linux arm64) on 3 October
+2026 after designation became mandatory (`LAB_PREFIX=final-agentgw`):
 
 ```
 ok gateway node enrolled with capability agent-gateway at 100.64.0.1/32
 ok providers: lab-ollama "Australia (self-hosted lab)" onshore, blocked_by_policy false;
    hosted-offshore "United States (hosted)" offshore, blocked_by_policy true, has_credential true
-ok agent key btak_-AfktO5… (secret shown once, stored only as a hash)
+ok agent key btak_PS07AvE… (secret shown once, stored only as a hash)
 ok refused: "refusing to listen on every interface; bind the node's overlay address"
+ok undesignated gateway (capability only) gets nothing: /v1/models -> 503 gateway_unavailable
+ok member cannot designate the gateway (403)
+ok admin designates the gateway (204)
 ok /v1/models: [{"id":"qwen2.5:0.5b","residency":"onshore","data_location":"Australia (self-hosted lab)"}]
 ok non-streaming completion via gateway (200)   reply "Hello!", usage 45 + 3
-ok streaming completion via gateway (200)       12 SSE chunks, ends with [DONE], usage chunk 45 + 10
+ok streaming completion via gateway (200)       5 SSE chunks, ends with [DONE], usage chunk 45 + 3
 ok offshore provider refused by default (403 offshore_forbidden)
 ok unknown agent key refused (401)
 ok third request inside quota (200)
 ok fourth request over the daily quota of 3 (429)
-ok quota counters for lab-agent today: {"requests":3,"tokens":158,"denied":2}
-ok usage by day/model: 2026-10-03 lab-agent qwen2.5:0.5b requests 3, prompt 135, completion 23
+ok quota counters for lab-agent today: {"requests":3,"tokens":151,"denied":2}
+ok usage by day/model: 2026-10-03 lab-agent qwen2.5:0.5b requests 3, prompt 135, completion 16
 ok recent requests: 3 x status ok, usage_estimated false
 ok audit: ["agent.key.created","agent.provider.created"]
+ok owner releases the gateway (204)
+ok released gateway is cut off on its next request: /v1/models -> 503
 ok gateway log (7 lines) holds no agent key, node token or provider credential
 ```
+
+An undesignated or released gateway gets `403` from the coordinator, which
+the gateway reports to callers as `503 gateway_unavailable` ("cannot reach the
+coordinator"): it fails closed, but the message does not say the device is
+not designated. The re-run first failed with `502 upstream_unreachable`
+because the lab named Ollama by its Docker container name; the connect-time
+check correctly refuses a non-`.internal` hostname that resolves to a private
+address, so the lab now uses `ollama.internal`.
 
 The first run failed before any request because the coordinator needs
 `BLAKTAIL_CONSOLE_URL`; the script now sets it. Limits of this proof: the

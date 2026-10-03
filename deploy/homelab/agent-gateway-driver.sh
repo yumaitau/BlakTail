@@ -4,8 +4,9 @@
 # phase "prove" drives requests through the gateway and reads back usage.
 set -euo pipefail
 
-COORD="https://agentgw-lab-coord:8443"
-GW="http://agentgw-lab-gateway:8686"
+P="${LAB_PREFIX:-agentgw-lab}"
+COORD="https://$P-coord:8443"
+GW="http://$P-gateway:8686"
 MODEL="${AGENTGW_LAB_MODEL:-qwen2.5:0.5b}"
 SECRET="$(cat /lab/hmac)"
 CURL=(curl -sS --cacert /lab/ca.crt -H 'content-type: application/json')
@@ -42,7 +43,7 @@ setup() {
   jq "{node_id: .id, node_token: .node_token, coord: \"$COORD\", assigned_ip: .assigned_ip}" <<<"$node" > /lab/state.json
   chmod 644 /lab/state.json # the gateway container runs as another uid in this lab
   echo "ok gateway node enrolled with capability agent-gateway at $(jq -r .assigned_ip <<<"$node")"
-  local_provider="$(owner POST /agents/providers "{\"name\":\"lab-ollama\",\"base_url\":\"http://agentgw-lab-ollama:11434/v1\",\"data_location\":\"Australia (self-hosted lab)\",\"residency\":\"onshore\",\"models\":[\"$MODEL\"]}")"
+  local_provider="$(owner POST /agents/providers "{\"name\":\"lab-ollama\",\"base_url\":\"http://ollama.internal:11434/v1\",\"data_location\":\"Australia (self-hosted lab)\",\"residency\":\"onshore\",\"models\":[\"$MODEL\"]}")"
   offshore="$(owner POST /agents/providers '{"name":"hosted-offshore","base_url":"https://api.example.com/v1","data_location":"United States (hosted)","residency":"offshore","credential":"sk-lab-offshore-not-real","models":["gpt-offshore"]}')"
   if grep -q sk-lab <<<"$offshore"; then echo "FAIL credential echoed" >&2; exit 1; fi
   echo "ok providers: $(jq -c '{name, data_location, residency, blocked_by_policy}' <<<"$local_provider") $(jq -c '{name, data_location, residency, blocked_by_policy, has_credential}' <<<"$offshore")"
@@ -62,9 +63,20 @@ expect() { # want got label
   echo "ok $3 ($2)"
 }
 
+designate() { # role true|false: prints the HTTP status
+  local node; node="$(jq -r .node_id /lab/state.json)"
+  "${CURL[@]}" -o /dev/null -w '%{http_code}' -X PUT "${COORD}/v1/orgs/${ORG}/agents/gateways/${node}" \
+    -H "authorization: Bearer $(sign "$1")" -d "{\"designated\":$2}"
+}
+
 prove() {
   ORG="$(cat /lab/org)"
   KEY="$(cat /lab/agent-key)"
+  code="$(curl -sS -o /tmp/body -w '%{http_code}' "$GW/v1/models" -H "authorization: Bearer $KEY")"
+  [[ "$code" != 200 ]] || { echo "FAIL undesignated gateway listed models" >&2; exit 1; }
+  echo "ok undesignated gateway (capability only) gets nothing: /v1/models -> $code $(jq -c .error /tmp/body 2>/dev/null || true)"
+  expect 403 "$(designate member true)" "member cannot designate the gateway"
+  expect 204 "$(designate admin true)" "admin designates the gateway"
   models="$(curl -sS "$GW/v1/models" -H "authorization: Bearer $KEY")"
   echo "ok /v1/models: $(jq -c '[.data[] | {id, residency: .blaktail.residency, data_location: .blaktail.data_location}]' <<<"$models")"
 
@@ -88,6 +100,10 @@ prove() {
   echo "ok usage by day/model: $(owner GET /agents/usage | jq -c '.days')"
   echo "ok recent requests: $(owner GET /agents/usage | jq -c '[.recent[] | {model, status, http_status, prompt_tokens, completion_tokens, usage_estimated, latency_ms}]')"
   echo "ok audit: $(owner GET '/audit?limit=50' | jq -c '[.. | objects | select(has("action")) | .action | select(startswith("agent."))] | unique')"
+  expect 204 "$(designate owner false)" "owner releases the gateway"
+  code="$(curl -sS -o /tmp/body -w '%{http_code}' "$GW/v1/models" -H "authorization: Bearer $KEY")"
+  [[ "$code" != 200 ]] || { echo "FAIL released gateway still listed models" >&2; exit 1; }
+  echo "ok released gateway is cut off on its next request: /v1/models -> $code"
   echo "agent_gateway_lab passed"
 }
 

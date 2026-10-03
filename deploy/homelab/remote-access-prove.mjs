@@ -263,6 +263,69 @@ async function suspendLive(orgId) {
   );
 }
 
+async function gatewayChangeLive(orgId) {
+  const gateway = await nodeByName(orgId, "lab-gateway");
+  const issued = must(await issue(orgId), 201, "issue session");
+  let changedAt = 0;
+  const result = await terminal(issued, {
+    onConnected() {
+      changedAt = Date.now();
+      void api("PUT", `/v1/orgs/${orgId}/remote-access/settings`, {
+        orgId,
+        body: { gateway_node_id: null, gateway_url: "" },
+      });
+    },
+  });
+  const reason = closedReason(result);
+  const seconds = ((Date.now() - changedAt) / 1000).toFixed(1);
+  if (reason !== "gateway_changed") throw new Error(`clearing the gateway did not end the session: ${reason}`);
+  console.log(`ok live session ended ${seconds}s after the gateway setting was cleared (reason ${reason})`);
+  must(
+    await api("PUT", `/v1/orgs/${orgId}/remote-access/settings`, {
+      orgId,
+      body: { gateway_node_id: gateway.id, gateway_url: "wss://gateway:8443" },
+    }),
+    200,
+    "restore gateway",
+  );
+}
+
+/** SCIM deprovisioning: the console's service assertion, scoped to one call. */
+async function scimRevokeLive(orgId) {
+  const scim = { orgId, sub: "system:scim", role: "service", action: "remote_access.revoke_user" };
+  const misuse = await api("GET", `/v1/orgs/${orgId}/nodes`, scim);
+  if (misuse.status < 400) throw new Error(`revoke-only service assertion listed nodes: ${misuse.status}`);
+  const forged = await api("POST", `/v1/orgs/${orgId}/remote-access/users/lab-admin/revoke`, {
+    ...scim,
+    sub: "lab-impostor",
+    body: {},
+  });
+  if (forged.status !== 403) throw new Error(`non-system service assertion answered ${forged.status}`);
+  console.log(`ok revoke-only assertion refused elsewhere (${misuse.status}) and without a system: subject (403)`);
+  const issued = must(await issue(orgId), 201, "issue session");
+  let revokedAt = 0;
+  let revoked = null;
+  const result = await terminal(issued, {
+    onConnected() {
+      revokedAt = Date.now();
+      void api("POST", `/v1/orgs/${orgId}/remote-access/users/lab-admin/revoke`, { ...scim, body: {} }).then(
+        (response) => {
+          revoked = response;
+        },
+      );
+    },
+  });
+  const reason = closedReason(result);
+  const seconds = ((Date.now() - revokedAt) / 1000).toFixed(1);
+  if (revoked?.status !== 200 || revoked.body.revoked < 1) throw new Error(`SCIM revoke answered ${JSON.stringify(revoked)}`);
+  if (reason !== "revoked") throw new Error(`SCIM revoke did not end the session: ${reason}`);
+  const audit = must(await api("GET", `/v1/orgs/${orgId}/audit?limit=100`, { orgId }), 200, "audit");
+  const events = Array.isArray(audit) ? audit : (audit.events ?? []);
+  const row = events.find((event) => event.action === "remote_session.revoked" && JSON.stringify(event).includes("system:scim"));
+  if (!row) throw new Error("SCIM revoke not audited as system:scim");
+  console.log(`ok SCIM-style revoke (service assertion, system:scim) ended the live session ${seconds}s later (reason ${reason}); audited`);
+}
+
 async function forbidden(orgId) {
   const target = await nodeByName(orgId, "lab-target");
   const member = await api("POST", `/v1/orgs/${orgId}/remote-access/sessions`, {
@@ -448,6 +511,8 @@ const commands = {
   "session-id": () => sessionId(orgId),
   "revoke-live": () => revokeLive(orgId),
   "suspend-live": () => suspendLive(orgId),
+  "gateway-change-live": () => gatewayChangeLive(orgId),
+  "scim-revoke-live": () => scimRevokeLive(orgId),
   forbidden: () => forbidden(orgId),
   "expect-mismatch": () => expectMismatch(orgId),
   "expect-pending": () => expectPending(orgId),
