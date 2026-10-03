@@ -240,6 +240,7 @@ mod tests {
             dns_name: "office.blaktail".into(),
             tags: vec![],
             relay_endpoint: None,
+            pq: None,
             ingress: Some(PeerIngress {
                 tcp: vec!["22".into()],
                 ssh_users: users.iter().map(|user| user.to_string()).collect(),

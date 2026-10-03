@@ -3,11 +3,13 @@ import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { PeerLifecycle } from "@/components/peer-lifecycle";
+import { PqPeerTable } from "@/components/pq-peer-table";
 import {
   CoordRequestError,
   getPeerDetail,
   type PeerDetail,
 } from "@/lib/coord-peers";
+import { getPqOverview } from "@/lib/coord-pq";
 import { listMemberships } from "@/lib/oidc";
 import {
   organisationContext,
@@ -113,6 +115,13 @@ export default async function DeviceDetailPage({
     (row) => row.userId === node.user_id,
   );
   const heartbeat = heartbeatLabel[detail.heartbeat.state];
+  const protection = await getPqOverview(ctx, node.id).then(
+    (overview) => ({ rows: overview.peers, error: null }),
+    (error: unknown) => ({
+      rows: [],
+      error: error instanceof Error ? error.message : "Could not load tunnel protection.",
+    }),
+  );
   const lifecycle = detail.lifecycle.state;
 
   return (
@@ -267,6 +276,21 @@ export default async function DeviceDetailPage({
               </dd>
             </div>
           </dl>
+        </section>
+
+        <section className="panel stack" aria-labelledby="protection-title">
+          <h2 id="protection-title">Tunnel protection per peer</h2>
+          <p className="muted">
+            What this device&apos;s agent reports it negotiated with each peer. Policy is set on{" "}
+            <Link href="/tunnel-protection">Tunnel protection</Link> for {ctx.organisationName}.
+          </p>
+          {protection.error ? (
+            <p className="error" role="alert">
+              {protection.error}
+            </p>
+          ) : (
+            <PqPeerTable rows={protection.rows} />
+          )}
         </section>
 
         <section className="panel stack" aria-labelledby="routes-title">

@@ -5,6 +5,7 @@ use blaktaild::{
     connector::{self, ConnectorRuntime},
     disable_share, dns_domain, enable_share, ensure_private_key, load_shares,
     organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
+    pq::{self, PqRuntime},
     published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
     sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
     Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
@@ -419,6 +420,11 @@ async fn sync_loop(
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
     let mut connector = ConnectorRuntime::default();
+    let own_key = ensure_private_key(state_dir)
+        .map(|(_, public)| public)
+        .unwrap_or_default();
+    let mut pq = PqRuntime::new(&own_key, state_dir, network.psk_device(&state.interface));
+    let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -436,6 +442,7 @@ async fn sync_loop(
         }
         let transport = manage_paths(network, &mut mesh, &mut relays, state, &mut paths).await;
         coordinator.set_transport(transport);
+        manage_pq(&mut pq, coordinator, state, &mut pq_reported).await;
         let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
         if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
             state.active_relay = active_relay;
@@ -492,6 +499,33 @@ async fn sync_loop(
     }
     shutdown_magic_dns(&mut dns, state, state_dir);
     Ok(())
+}
+
+/// Feeds the peer map to the post-quantum PSK runtime and reports the
+/// per-peer outcome when it changes (at least once a minute while non-empty).
+async fn manage_pq(
+    pq: &mut PqRuntime,
+    coordinator: &Coordinator,
+    state: &blaktaild::NodeState,
+    last: &mut Option<(Vec<pq::PeerReport>, Instant)>,
+) {
+    let listen = state
+        .assigned_ip
+        .split('/')
+        .next()
+        .and_then(|ip| ip.parse().ok());
+    let reports = pq.manage(&state.peers, listen);
+    let due = match last {
+        None => reports.iter().any(|report| report.mode != pq::Mode::Off),
+        Some((previous, at)) => previous != &reports || at.elapsed() >= Duration::from_secs(60),
+    };
+    if !due {
+        return;
+    }
+    match coordinator.report_pq_state(state, &reports).await {
+        Ok(()) => *last = Some((reports, Instant::now())),
+        Err(error) => warn!(%error, "could not report post-quantum peer state"),
+    }
 }
 
 async fn manage_shares(

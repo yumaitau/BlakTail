@@ -1278,6 +1278,7 @@ mod tests {
                 dns_name: "peer.12345678.blaktail".into(),
                 tags: vec![],
                 relay_endpoint: None,
+                pq: None,
                 ingress: None,
             }],
             relays: vec![],

@@ -17,8 +17,9 @@ authorisation.
   routes, last heartbeat (online or stale by coordinator time), agent/OS
   version against the coordinator's minimum, credential expiry, the
   agent-reported transport (direct, relay, mixed, or "not measured") with its
-  timestamp, recent audit entries for the device, and suspend/resume, revoke
-  and delete with an impact preview (owner/admin)
+  timestamp, per-peer tunnel protection as this device's agent reports it,
+  recent audit entries for the device, and suspend/resume, revoke and delete
+  with an impact preview (owner/admin)
 - `/join-keys` — enrolment workspace (owner/admin): mint named one-use or
   reusable keys with optional maximum uses, expiry and tags; the secret is
   shown once; inventory with creator, uses left, last use, expiry and revoke;
@@ -28,6 +29,12 @@ authorisation.
   pairing and whether the destination device actually enforces the result
 - `/posture` — versioned posture checks (owner/admin write) and each
   device's current assessment; self-reported data is labelled as such
+- `/tunnel-protection` — opt-in hybrid post-quantum WireGuard pre-shared keys
+  (owner writes; off by default): off/prefer/require with optional tag-pair
+  rules and blocking under require, which agents advertise `pq-psk`, and every
+  pair's negotiated state as each agent reports it ("Classical", "Hybrid PQ
+  (ML-KEM-768 + X25519), rotated Ns ago", "Required but not established").
+  There is no account-wide badge. See [post-quantum.md](post-quantum.md)
 - `/topology` — who can reach what in the selected organisation: devices
   (online, stale, suspended, expired, agent-reported transport with its
   timestamp or "not measured"), network resources and routing peers, approved

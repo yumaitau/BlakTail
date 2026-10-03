@@ -58,12 +58,21 @@ pub fn plan_overlay_filter(peers: &[Peer]) -> FilterPlan {
             all: true,
             ..crate::PeerIngress::default()
         });
+        let pq_exchange = peer
+            .pq
+            .as_ref()
+            .is_some_and(|pq| pq.mode != crate::pq::Mode::Off && pq.capable);
         for address in overlay_host_addrs(&peer.allowed_ips) {
             let rules = if address.contains(':') {
                 &mut ipv6
             } else {
                 &mut ipv4
             };
+            if pq_exchange {
+                // The in-tunnel PSK exchange must work even when policy
+                // grants this peer nothing else.
+                rules.push(accept_port(&address, "tcp", &crate::pq::PORT.to_string()));
+            }
             append_peer_rules(rules, &address, &ingress);
         }
     }
@@ -342,6 +351,7 @@ mod tests {
             dns_name: "store.blaktail".into(),
             tags: vec![],
             relay_endpoint: None,
+            pq: None,
             ingress: Some(ingress),
         }
     }

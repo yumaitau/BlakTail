@@ -78,6 +78,10 @@ See [console.md](console.md).
 - Owner opt-in traffic diagnostics endpoint and page; current agents do not
   report traffic yet
 - Single-host SQLite or concurrent PostgreSQL coordinator storage
+- Opt-in hybrid post-quantum WireGuard pre-shared keys (ML-KEM-768 + X25519,
+  rotated every two minutes, negotiated per peer, shown per peer). Classical
+  authentication remains; not independently reviewed yet
+  ([post-quantum.md](post-quantum.md))
 - A disposable Sydney AWS proof harness, not a production SaaS
 - An iPhone client that joins a network as a WireGuard node and still administers All networks
 
