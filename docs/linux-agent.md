@@ -33,7 +33,11 @@ The coordinator URL must use HTTPS except for localhost testing. The private key
 The coordinator assigns both an IPv4 `/32` and an organisation-scoped ULA IPv6
 `/128`. The agent applies both addresses and both peer host routes. An upgraded
 agent also adds a missing IPv6 address returned by the coordinator to an existing
-enrollment without changing its IPv4 address.
+enrollment without changing its IPv4 address. During a staged renumber
+([ipam.md](ipam.md#renumbering-and-pool-growth)) the agent carries both its old
+and new addresses, uses the new IPv4 as its primary (MagicDNS listener,
+`status`), answers MagicDNS only with new addresses, and removes the old ones
+when the plan completes.
 
 The agent sets the tunnel MTU to 1280. It starts with each peer's configured UDP
 endpoint, moves an unresponsive peer to the advertised Australian relay within one
@@ -51,14 +55,17 @@ version.
 
 ## Subnet routers and exit nodes
 
-Advertise one or more RFC1918 private IPv4 networks from the Linux router:
+Advertise one or more RFC1918 private IPv4 networks, or unique local
+(`fd00::/8`) or global unicast (`2000::/3`) IPv6 networks of `/16` or longer,
+from the Linux router:
 
 ```sh
 sudo blaktaild up --coord https://coord.example.org \
-  --advertise-routes 10.1.0.0/24,10.2.0.0/16
+  --advertise-routes 10.1.0.0/24,10.2.0.0/16,fd42:1:2:3::/64
 ```
 
-Or advertise a full IPv4 exit path with `--advertise-exit-node`. The request is
+Or advertise a full IPv4 exit path with `--advertise-exit-node`, and an IPv6
+exit path by adding `::/0` to `--advertise-routes`. The request is
 inert until an owner or admin opens **Devices** in the console and explicitly
 checks each route, or creates a named resource on **Networks** that uses this
 router as a routing peer ([network-resources.md](network-resources.md)).
@@ -78,9 +85,11 @@ Rerunning `up` resumes the existing enrollment; no join key is needed. Use
 withdraw all advertisements. When changing routes, pass the complete desired
 list; the new list replaces the previous one.
 
-On a router, BlakTail enables `net.ipv4.ip_forward`, filters what it forwards,
-and masquerades tailnet sources leaving non-BlakTail interfaces. `down` and
-`pause` remove those exact rules and restore forwarding when BlakTail originally
+On a router, BlakTail enables `net.ipv4.ip_forward` (and
+`net.ipv6.conf.all.forwarding` when it routes an IPv6 prefix), filters what it
+forwards, and masquerades tailnet sources (`100.64.0.0/10`, and `fd00::/8` for
+IPv6) leaving non-BlakTail interfaces. `down` and `pause` remove those exact
+rules and restore each family's forwarding setting when BlakTail originally
 enabled it.
 
 ### Forward filter
@@ -104,12 +113,14 @@ last list is kept in `state.json` and reinstalled before routing restarts. When
 the coordinator predates forward filtering (no `forward_filter` field), the
 agent keeps the legacy per-route `ACCEPT` rules. Inspect with
 `sudo iptables -S BLAKTAIL-FWD`. On an exit client, policy routing preserves local/subnet routes and
-WireGuard's marked transport packets while sending the remaining IPv4 default
-through the selected peer. Existing conflicting kernel routes fail closed instead
+WireGuard's marked transport packets while sending the remaining default route
+through the selected peer, separately per family: IPv4 when the exit node
+offers `0.0.0.0/0`, IPv6 when it offers `::/0`. Existing conflicting kernel routes fail closed instead
 of being overwritten. macOS peers can consume approved private subnet routes, but
 route advertising and exit-node selection are Linux-only in this release. IPv6
-subnet routing and IPv6 exit nodes are not enabled by this IPv4 routing feature;
-node-to-node IPv6 is enabled independently.
+subnet routing through a Linux router is proven on one Docker host
+(`deploy/homelab/prove-ipv6-renumber.sh`); the IPv6 exit path (`::/0`) is covered
+only by coordinator distribution tests, not by a live lab.
 
 ## MagicDNS
 

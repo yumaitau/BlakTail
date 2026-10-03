@@ -1402,7 +1402,8 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                         existing.exit_node = requested_exit_node.clone();
                         existing.exit_node_active = false;
                         for peer in &mut existing.peers {
-                            peer.allowed_ips.retain(|route| route != "0.0.0.0/0");
+                            peer.allowed_ips
+                                .retain(|route| route != "0.0.0.0/0" && route != "::/0");
                         }
                     }
                     existing
@@ -1463,16 +1464,16 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
                 return Err(error);
             }
-            let previous_ipv4_forward = state.router_previous_ipv4_forward;
+            let previous_forwarding = state.forwarding_originals();
             // Known allow-list first, so routing never starts unfiltered.
             network.apply_forward_filter(&interface, state.forward_filter.as_ref())?;
             match network.configure_router(
                 &interface,
                 &previous_routes,
                 &state.advertised_routes,
-                state.router_previous_ipv4_forward,
+                previous_forwarding,
             ) {
-                Ok(original) => state.router_previous_ipv4_forward = original,
+                Ok(originals) => state.set_forwarding_originals(originals),
                 Err(error) => {
                     if !resumed {
                         let _ = coordinator.revoke(&state).await;
@@ -1490,7 +1491,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                         &interface,
                         &state.advertised_routes,
                         &previous_routes,
-                        previous_ipv4_forward,
+                        previous_forwarding,
                     );
                     let _ = network.down(&interface);
                     return Err(error);
@@ -1536,12 +1537,13 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             // Connector host routes are re-added after the first report.
             let mut previous_routes = state.advertised_routes.clone();
             previous_routes.append(&mut state.connector_routes);
-            state.router_previous_ipv4_forward = network.configure_router(
+            let originals = network.configure_router(
                 &state.interface,
                 &previous_routes,
                 &state.advertised_routes,
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
+            state.set_forwarding_originals(originals);
             write_state(state_dir, &state)?;
             let restored = restore_peers(network.as_mut(), &state, state_dir)?;
             if restored > 0 {
@@ -1700,7 +1702,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 &state.interface,
                 &forwarded,
                 &[],
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
             network.down(&state.interface)?;
             println!(
@@ -1727,7 +1729,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 &state.interface,
                 &forwarded,
                 &[],
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
             coordinator.revoke(&state).await?;
             network.down(&state.interface)?;

@@ -223,6 +223,7 @@ fn state_ip(state: &NodeState) -> Result<IpAddr, Error> {
     let addresses = state
         .interface_addresses()
         .into_iter()
+        .filter(|address| !state.retiring_ips.contains(address))
         .filter_map(|address| address.split('/').next()?.parse::<IpAddr>().ok())
         .collect::<Vec<_>>();
     addresses
@@ -235,11 +236,14 @@ fn state_ip(state: &NodeState) -> Result<IpAddr, Error> {
 
 fn records_from_state(state: &NodeState, domain: &str) -> Records {
     let mut addresses = HashMap::new();
-    for address in state.interface_addresses() {
-        insert_record(&mut addresses, &state.dns_name, &address, domain);
+    // A renumber's old addresses stay routed during the window, but names
+    // already answer with the new ones.
+    let current = |address: &String| !state.retiring_ips.contains(address);
+    for address in state.interface_addresses().iter().filter(|a| current(a)) {
+        insert_record(&mut addresses, &state.dns_name, address, domain);
     }
     for peer in &state.peers {
-        for address in &peer.allowed_ips {
+        for address in peer.allowed_ips.iter().filter(|a| current(a)) {
             insert_record(&mut addresses, &peer.dns_name, address, domain);
         }
     }
@@ -1294,6 +1298,8 @@ mod tests {
             exit_node: None,
             exit_node_active: false,
             router_previous_ipv4_forward: None,
+            router_previous_ipv6_forward: None,
+            retiring_ips: Vec::new(),
             peers: vec![Peer {
                 id: Uuid::from_u128(2),
                 name: "peer".into(),
@@ -1345,6 +1351,26 @@ mod tests {
         packet.extend_from_slice(&query_type.to_be_bytes());
         packet.extend_from_slice(&1u16.to_be_bytes());
         packet
+    }
+
+    #[test]
+    fn renumber_window_answers_only_the_new_addresses() {
+        let mut state = state();
+        let old = state.peers[0].allowed_ips.clone();
+        state.peers[0].allowed_ips = vec![
+            "100.64.0.9/32".into(),
+            "fd12:3456:789a:bcde::9/128".into(),
+            old[0].clone(),
+            old[1].clone(),
+        ];
+        state.retiring_ips = old;
+        let records = records_from_state(&state, "12345678.blaktail");
+        let response = answer(&query("peer", 1), &records).unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        assert_eq!(&response[response.len() - 4..], &[100, 64, 0, 9]);
+        let response = answer(&query("peer", 28), &records).unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        assert_eq!(response[response.len() - 1], 9);
     }
 
     #[test]

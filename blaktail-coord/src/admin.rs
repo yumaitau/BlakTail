@@ -1199,6 +1199,7 @@ async fn api_approve_routes(
         &serde_json::json!({"approved_routes": body.approved_routes, "via":"admin_api"}),
     )
     .await?;
+    crate::bump_control_revision(&mut tx, org_id.to_string()).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

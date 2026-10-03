@@ -27,7 +27,8 @@ A device receives a resource prefix only when all of these hold:
    group (a group later removed from policy matches nobody);
 3. access policy lets the device reach the selected routing peer;
 4. the device is not itself one of the resource's routing peers;
-5. for `0.0.0.0/0`, the device has chosen that routing peer as its exit node.
+5. for `0.0.0.0/0` or `::/0`, the device has chosen that routing peer as its
+   exit node (`::/0` only marks the exit active for a device that runs IPv6).
 
 The detail page lists every active device with the reason it does or does not
 receive the route.
@@ -109,9 +110,14 @@ Admins and automation clients cannot confirm them.
 - **Masquerade is always on.** `blaktaild` masquerades overlay sources on the
   routing peer; forwarding without NAT is not supported, so the console shows
   it as fixed rather than offering a toggle.
-- **IPv6 resources** are validated and overlap-checked, but Linux agents can
-  only advertise IPv4 RFC 1918 subnets and `0.0.0.0/0` today, so an IPv6
-  resource shows **No routing peer** until IPv6 advertisement ships.
+- **IPv6 subnets.** Linux routing peers advertise unique local (`fd00::/8`)
+  or global unicast (`2000::/3`) subnets of `/16` or longer and `::/0`. The
+  coordinator refuses an IPv6 advertisement that overlaps the organisation's
+  device `/64`. The router enables `net.ipv6.conf.all.forwarding` (restoring
+  it on `down`/`pause`), filters with `ip6tables` and masquerades overlay
+  sources (`fd00::/8`) leaving other interfaces. Clients that report IPv6
+  receive the prefix; `/networks` labels IPv6 routes and the `::/0` exit.
+  Proven on one Docker host only (see [ipam.md](ipam.md#live-lab)).
 - **DNS targets** are resolved by a routing peer running
   `blaktaild up --app-connector` (Linux) and routed as exact host routes; see
   [app-connectors.md](app-connectors.md). Without such a peer they show

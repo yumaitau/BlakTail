@@ -295,12 +295,13 @@ fn reconcile_forwarding(
     }
     let previous = router_routes(state, &current);
     let next = router_routes(state, &desired);
-    state.router_previous_ipv4_forward = network.configure_router(
+    let originals = network.configure_router(
         &state.interface,
         &previous,
         &next,
-        state.router_previous_ipv4_forward,
+        state.forwarding_originals(),
     )?;
+    state.set_forwarding_originals(originals);
     info!(routes = desired.len(), "app connector forwarding updated");
     state.connector_routes = desired.into_iter().collect();
     Ok(true)

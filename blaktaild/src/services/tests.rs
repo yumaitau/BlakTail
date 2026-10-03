@@ -153,6 +153,8 @@ fn state(listen: u16, allowed: &[&str], id: Uuid) -> NodeState {
         public_ingress: false,
         traffic: None,
         acl_filter_enforced: false,
+        router_previous_ipv6_forward: None,
+        retiring_ips: Vec::new(),
         connector_routes: vec![],
         serve_services: true,
         service_listen_port: Some(listen),

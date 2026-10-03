@@ -50,3 +50,45 @@ real HA failover drill; staged dual-address renumber implementation; pool
 expansion beyond 254 devices (needs IPv6 derivation change); independent
 IPv6-only drill before any IPv6-only claim; whether `/api/v1` automation
 routes for IPAM are wanted (not added).
+
+### Pool growth and staged renumbering (3 October 2026)
+
+**Done:** migration slot 39 (`orgs.ipv4_pool_cidr`, default `100.64.0.0/24`;
+`ipam_renumber_plans` with one staged plan per organisation). Pools are `/24`
+to `/20` inside `100.64.0.0/10`; the IPv6 interface ID is now the IPv4
+address's offset in `100.64.0.0/10`, so every existing `100.64.0.x` device keeps
+its IPv6 address. `blaktail-coord/src/renumber.rs`: preview, stage, complete,
+roll back (`/v1/orgs/:org/ipam/renumber[/preview|/:id/complete|/:id/rollback]`,
+`ManageNetworks`, `If-Match` etags, audited, control revision bumped); a
+dual-address window (10 minutes to 30 days, default 24 hours) in which moved
+devices carry old and new AllowedIPs, policy and forward allow-lists include
+both, peer maps list `retiring_ips` so MagicDNS answers only new addresses, and
+the window ends automatically on the next check-in. Literal policy/DNS
+references to an old address block the plan; reservations outside a target
+pool block a pool change; rollback is refused if a device enrolled from the
+new pool. `blaktaild` adopts the coordinator's address list (new IPv4 becomes
+primary, old addresses removed at completion). Console `/networks/addresses`:
+plan form (pool change or chosen devices, optional exact address, window,
+reason), **Preview impact** (moves, peer maps, allow lists, MagicDNS names,
+blockers) before **Start**, staged plan with window progress, **Complete now**
+and **Roll back**, and plan history. Docs: `docs/ipam.md`.
+**Proven by tests:** `blaktail-coord/src/tests/ipv6_renumber.rs`
+(`renumber_stage_then_complete_keeps_both_addresses_during_the_window`,
+`renumber_rollback_restores_the_old_address_and_window_end_completes`,
+`renumber_is_blocked_by_literal_policy_references_and_pool_moves_follow_the_window`,
+`pool_growth_beyond_254_keeps_addresses_and_allocates_uniquely`,
+`schema_38_upgrade_keeps_every_device_address`); `blaktaild`
+`renumbered_addresses_become_primary_and_retiring_ones_are_tracked` and
+`dns::tests::renumber_window_answers_only_the_new_addresses`. Live lab
+`deploy/homelab/prove-ipv6-renumber.sh` on `m3-max` (3 October 2026, passed):
+pool move `100.64.0.0/24` → `100.64.8.0/24` with 0/74 pings lost to the old
+address during staging, old and new IPv4/IPv6 both answering in the window,
+only new after completion; single-device stage and rollback; and an IPv6-only
+*underlay* (Docker network with no IPv4) where enrolment and an overlay ping
+worked.
+**Still needs live/field proof or a decision:** IPv6-only operation on real
+networks (ISP, NAT64/DNS64, mobile) — the overlay still assigns IPv4, so no
+IPv6-only claim; renumbering with agents older than this release (untested);
+a PostgreSQL/HA renumber drill; macOS/Windows/iOS/Android agents adopting a
+new address (only Linux proven); `/api/v1` automation routes for IPAM (not
+added, needs a decision).
