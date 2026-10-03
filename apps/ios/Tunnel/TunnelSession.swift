@@ -30,6 +30,11 @@ final class TunnelSession {
     private var pollTask: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
     private var dns: MagicDNSResponder
+    private var traffic: TrafficReporting?
+    private var lastTrafficUpload = Date()
+    /// The dataplane filters inbound packets, so the coordinator may report
+    /// this phone's ports as enforced.
+    private static let capabilities = ["wireguard", "magicdns", "acl-filter"]
 
     init(provider: NEPacketTunnelProvider) throws {
         guard let enrollment = try EnrollmentStore().load() else {
@@ -43,7 +48,7 @@ final class TunnelSession {
 
     func start() async throws {
         let snapshot = try await CoordinatorClient(coordinator: enrollment.coordinatorURL)
-            .peers(enrollment: enrollment)
+            .peers(enrollment: enrollment, capabilities: Self.capabilities)
         apply(snapshot)
         try await provider.setTunnelNetworkSettings(networkSettings())
         readPackets()
@@ -80,6 +85,8 @@ final class TunnelSession {
         enrollment.credentialExpiresAt = snapshot.credentialExpiresAt
         peers = snapshot.peers
         engine.replacePeers(peers)
+        engine.setPolicy(snapshot.policyJSON)
+        applyTraffic(snapshot.traffic)
         dns = MagicDNSResponder(enrollment: enrollment, peers: peers)
         for peer in peers {
             ensureSession(for: peer)
@@ -89,11 +96,42 @@ final class TunnelSession {
     private func refreshPeers() async {
         do {
             let snapshot = try await CoordinatorClient(coordinator: enrollment.coordinatorURL)
-                .peers(enrollment: enrollment)
+                .peers(enrollment: enrollment, capabilities: Self.capabilities)
             apply(snapshot)
             try await provider.setTunnelNetworkSettings(networkSettings())
         } catch {
             // Keep the existing tunnel configuration if the coordinator is briefly unavailable.
+        }
+        await uploadTraffic()
+    }
+
+    /// Counting runs only while the peer map says diagnostics are on; turning
+    /// it off discards counters immediately.
+    private func applyTraffic(_ setting: TrafficReporting?) {
+        let active = setting.flatMap { $0.enabled && $0.samplingRate > 0 ? $0 : nil }
+        if active != nil && traffic == nil {
+            lastTrafficUpload = Date()
+        }
+        traffic = active
+        engine.setTraffic(active != nil)
+    }
+
+    private func uploadTraffic() async {
+        guard let traffic, Date().timeIntervalSince(lastTrafficUpload) >= 60 else { return }
+        lastTrafficUpload = Date()
+        guard let body = engine.takeFlowUpload(
+            organisationID: traffic.organisationID,
+            deviceID: enrollment.nodeID,
+            samplingRate: traffic.samplingRate
+        ), !body.isEmpty, body != Data(#"{"records":[]}"#.utf8) else { return }
+        do {
+            let accepted = try await CoordinatorClient(coordinator: enrollment.coordinatorURL)
+                .uploadFlows(enrollment: enrollment, body: body)
+            if !accepted {
+                applyTraffic(nil)
+            }
+        } catch {
+            // Counters for this bucket are dropped; reporting is best effort.
         }
     }
 

@@ -3256,6 +3256,9 @@ struct PeersResponse {
     /// may forward from the overlay when it routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forward_filter: Option<forwarding::ForwardFilter>,
+    /// Present while the organisation has traffic diagnostics on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    traffic: Option<traffic::AgentTraffic>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3594,6 +3597,7 @@ async fn list_peers(
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
         forward_filter,
+        traffic: traffic::agent_view(&s.store.pool, &org).await?,
     }))
 }
 

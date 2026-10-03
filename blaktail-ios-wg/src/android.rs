@@ -1,5 +1,6 @@
 //! JNI entry points for the Android VpnService. The packet pump stays in Kotlin.
 
+use crate::filter::blaktail_tunnel_set_policy;
 use crate::{
     blaktail_tunnel_add_peer, blaktail_tunnel_create, blaktail_tunnel_decapsulate,
     blaktail_tunnel_encapsulate, blaktail_tunnel_free, blaktail_tunnel_public_key,
@@ -133,6 +134,23 @@ pub extern "system" fn Java_au_org_blaktail_NativeTunnel_tick<'local>(
         )
     };
     frame(&env, code, &peer, &output[..length])
+}
+
+/// Installs the inbound filter policy from the coordinator's `peers` JSON.
+#[no_mangle]
+pub extern "system" fn Java_au_org_blaktail_NativeTunnel_setPolicy<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    tunnel: jlong,
+    json: JByteArray<'local>,
+) -> jint {
+    if tunnel == 0 {
+        return -1;
+    }
+    let Ok(raw) = env.convert_byte_array(json) else {
+        return -1;
+    };
+    unsafe { blaktail_tunnel_set_policy(tunnel as *mut _, raw.as_ptr(), raw.len()) }
 }
 
 fn transform<'local>(

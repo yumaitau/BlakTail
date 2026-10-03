@@ -36,6 +36,8 @@ export type TrafficSummary = {
   denied: TrafficCounter;
   by_transport: Record<string, TrafficCounter>;
   by_service: Record<string, TrafficCounter>;
+  /** `inbound`, `outbound` or `unknown` (records that do not say). */
+  by_direction?: Record<string, TrafficCounter>;
   buckets: { start: number; allowed: TrafficCounter; denied: TrafficCounter }[];
   confidence: {
     source: string;

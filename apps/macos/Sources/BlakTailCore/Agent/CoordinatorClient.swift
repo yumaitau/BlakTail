@@ -88,16 +88,28 @@ public struct CoordinatorClient: Sendable {
         )
     }
 
-    public func peers(enrollment: NodeEnrollment) async throws -> PeerSnapshot {
+    /// `capabilities` reports what this client enforces (for example
+    /// `acl-filter` from the packet tunnel, whose dataplane filters inbound).
+    public func peers(enrollment: NodeEnrollment, capabilities: [String] = []) async throws -> PeerSnapshot {
+        var query = [URLQueryItem(name: "ipv6", value: "true")]
+        if !capabilities.isEmpty {
+            query.append(URLQueryItem(name: "capabilities", value: capabilities.joined(separator: ",")))
+        }
         let (data, response) = try await request(
             path: "/v1/nodes/\(enrollment.nodeID)/peers",
             method: "GET",
             body: nil,
             bearer: enrollment.nodeToken,
-            query: [URLQueryItem(name: "ipv6", value: "true")]
+            query: query
         )
         try validate(response: response, data: data)
         let decoded = try decode(PeersResponse.self, from: data)
+        var policy = Data("[]".utf8)
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let peers = object["peers"],
+           let encoded = try? JSONSerialization.data(withJSONObject: peers) {
+            policy = encoded
+        }
         return PeerSnapshot(
             peers: decoded.peers,
             assignedIPs: decoded.assignedIps,
@@ -105,8 +117,27 @@ public struct CoordinatorClient: Sendable {
             credentialExpiresAt: decoded.credentialExpiresAt,
             relays: decoded.relays,
             relayToken: decoded.relayToken,
-            relayExpiresAt: decoded.relayExpiresAt
+            relayExpiresAt: decoded.relayExpiresAt,
+            policyJSON: policy,
+            traffic: decoded.traffic
         )
+    }
+
+    /// Uploads one aggregate traffic batch built by the native dataplane.
+    /// Returns false when the coordinator says diagnostics are off.
+    public func uploadFlows(enrollment: NodeEnrollment, body: Data) async throws -> Bool {
+        let (data, response) = try await request(
+            path: "/v1/nodes/\(enrollment.nodeID)/flows",
+            method: "POST",
+            body: body,
+            bearer: enrollment.nodeToken
+        )
+        if let http = response as? HTTPURLResponse, http.statusCode == 409,
+           sanitizedErrorBody(data).contains("turned off") {
+            return false
+        }
+        try validate(response: response, data: data)
+        return true
     }
 
     public func revoke(enrollment: NodeEnrollment) async throws {
@@ -243,6 +274,7 @@ public struct CoordinatorClient: Sendable {
     }
 
     private struct PeersResponse: Decodable {
+        var traffic: TrafficReporting?
         var peers: [CoordinatorPeer]
         var assignedIps: [String]
         var dnsName: String
@@ -253,6 +285,7 @@ public struct CoordinatorClient: Sendable {
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            traffic = try? container.decodeIfPresent(TrafficReporting.self, forKey: .traffic)
             peers = try container.decodeIfPresent([CoordinatorPeer].self, forKey: .peers) ?? []
             assignedIps = try container.decodeIfPresent([String].self, forKey: .assignedIps) ?? []
             dnsName = try container.decodeIfPresent(String.self, forKey: .dnsName) ?? ""
@@ -263,6 +296,7 @@ public struct CoordinatorClient: Sendable {
         }
 
         private enum CodingKeys: String, CodingKey {
+            case traffic
             case peers
             case assignedIps = "assigned_ips"
             case dnsName = "dns_name"

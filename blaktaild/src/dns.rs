@@ -1295,6 +1295,8 @@ mod tests {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            acl_filter_enforced: false,
+            traffic: None,
             forward_filter: None,
             app_connector: false,
             agent_gateway: false,

@@ -1,5 +1,7 @@
 #[cfg(feature = "jni")]
 mod android;
+pub mod filter;
+pub mod flow_report;
 
 use boringtun::noise::{Tunn, TunnResult};
 use std::collections::BTreeMap;
@@ -99,6 +101,7 @@ struct TunnelInner {
     private: StaticSecret,
     peers: BTreeMap<u32, PeerSlot>,
     next_index: u32,
+    filter: filter::Filter,
 }
 
 impl TunnelInner {
@@ -215,6 +218,7 @@ pub unsafe extern "C" fn blaktail_tunnel_create(private_key: *const u8) -> *mut 
                 private: StaticSecret::from(raw),
                 peers: BTreeMap::new(),
                 next_index: 1,
+                filter: filter::Filter::new(),
             }),
         }))
     }))
@@ -325,6 +329,7 @@ pub unsafe extern "C" fn blaktail_tunnel_encapsulate(
         dst_len,
         peer_public_out,
         |inner, packet, output, length, peer_out| {
+            inner.filter.outbound_now(packet);
             let Some(peer) = inner.peer_for_packet(packet) else {
                 return RESULT_ERR;
             };
@@ -360,15 +365,20 @@ pub unsafe extern "C" fn blaktail_tunnel_decapsulate(
         dst_len,
         peer_public_out,
         |inner, packet, output, length, peer_out| {
-            for peer in inner.peers.values_mut() {
+            let TunnelInner { peers, filter, .. } = inner;
+            for peer in peers.values_mut() {
                 let public = peer.public_key;
                 let result = peer.tunn.decapsulate(None, packet, output);
                 if !matches!(result, TunnResult::Err(_)) {
-                    if matches!(
-                        result,
-                        TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _)
-                    ) {
+                    if let TunnResult::WriteToTunnelV4(plain, _)
+                    | TunnResult::WriteToTunnelV6(plain, _) = &result
+                    {
                         peer.last_handshake_unix = unix_now();
+                        // Inbound policy sits between decrypt and the tunnel
+                        // device; a dropped packet reports nothing to write.
+                        if !filter.inbound_now(plain) {
+                            return RESULT_DONE;
+                        }
                     }
                     return apply_result(result, length, peer_out, public);
                 }

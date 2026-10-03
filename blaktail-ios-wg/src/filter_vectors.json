@@ -1,0 +1,122 @@
+[
+  {
+    "name": "legacy map without grants is not filtered",
+    "peers": [{"id": "p1", "allowed_ips": ["100.64.0.2/32"]}],
+    "checks": [
+      ["100.64.0.2", "tcp", 22, true],
+      ["100.64.0.9", "udp", 53, true],
+      ["100.64.0.2", "gre", 0, true]
+    ]
+  },
+  {
+    "name": "ports, ranges and wildcard",
+    "peers": [
+      {
+        "id": "p1",
+        "allowed_ips": ["100.64.0.2/32", "fd7a:115c:a1e0::2/128"],
+        "ingress": {"tcp": ["443", "1000-2000"], "udp": ["*"]}
+      }
+    ],
+    "checks": [
+      ["100.64.0.2", "tcp", 443, true],
+      ["100.64.0.2", "tcp", 1000, true],
+      ["100.64.0.2", "tcp", 2000, true],
+      ["100.64.0.2", "tcp", 2001, false],
+      ["100.64.0.2", "tcp", 22, false],
+      ["100.64.0.2", "udp", 65535, true],
+      ["100.64.0.2", "icmp", 0, false],
+      ["100.64.0.2", "gre", 0, false],
+      ["fd7a:115c:a1e0::2", "tcp", 443, true],
+      ["fd7a:115c:a1e0::2", "tcp", 80, false],
+      ["100.64.0.3", "tcp", 443, false]
+    ]
+  },
+  {
+    "name": "deny wins over all",
+    "peers": [
+      {
+        "id": "p1",
+        "allowed_ips": ["100.64.0.2/32", "fd7a:115c:a1e0::2/128"],
+        "ingress": {"all": true, "deny_tcp": ["22"], "deny_udp": ["5000-5010"], "deny_icmp": true}
+      }
+    ],
+    "checks": [
+      ["100.64.0.2", "tcp", 22, false],
+      ["100.64.0.2", "tcp", 23, true],
+      ["100.64.0.2", "udp", 5005, false],
+      ["100.64.0.2", "udp", 5011, true],
+      ["100.64.0.2", "icmp", 0, false],
+      ["fd7a:115c:a1e0::2", "icmp", 0, false],
+      ["100.64.0.2", "gre", 0, true]
+    ]
+  },
+  {
+    "name": "icmp grant covers ICMPv4 and ICMPv6",
+    "peers": [
+      {
+        "id": "p1",
+        "allowed_ips": ["100.64.0.2/32", "fd7a:115c:a1e0::2/128"],
+        "ingress": {"icmp": true}
+      }
+    ],
+    "checks": [
+      ["100.64.0.2", "icmp", 0, true],
+      ["fd7a:115c:a1e0::2", "icmp", 0, true],
+      ["100.64.0.2", "tcp", 80, false]
+    ]
+  },
+  {
+    "name": "user-limited ssh stays closed without verified sshd",
+    "peers": [
+      {"id": "limited", "allowed_ips": ["100.64.0.2/32"], "ingress": {"tcp": ["22", "8080"], "ssh_users": ["deploy"]}},
+      {"id": "open", "allowed_ips": ["100.64.0.3/32"], "ingress": {"tcp": ["22"], "ssh_users": ["*"]}},
+      {"id": "star-deny", "allowed_ips": ["100.64.0.4/32"], "ingress": {"all": true, "ssh_users": ["*"], "ssh_deny_users": ["root"]}}
+    ],
+    "checks": [
+      ["100.64.0.2", "tcp", 22, false],
+      ["100.64.0.2", "tcp", 8080, true],
+      ["100.64.0.3", "tcp", 22, true],
+      ["100.64.0.4", "tcp", 22, false],
+      ["100.64.0.4", "tcp", 80, true]
+    ]
+  },
+  {
+    "name": "malformed port specs are ignored",
+    "peers": [
+      {
+        "id": "p1",
+        "allowed_ips": ["100.64.0.2/32"],
+        "ingress": {"tcp": ["0", "70000", "abc", "5-3", " 443 "], "deny_tcp": ["x"]}
+      }
+    ],
+    "checks": [
+      ["100.64.0.2", "tcp", 443, true],
+      ["100.64.0.2", "tcp", 5, false],
+      ["100.64.0.2", "tcp", 4, false],
+      ["100.64.0.2", "tcp", 1, false]
+    ]
+  },
+  {
+    "name": "peer without grants in an enforcing map is all",
+    "peers": [
+      {"id": "p1", "allowed_ips": ["100.64.0.2/32"], "ingress": {"tcp": ["443"]}},
+      {"id": "p2", "allowed_ips": ["100.64.0.3/32"]}
+    ],
+    "checks": [
+      ["100.64.0.2", "tcp", 80, false],
+      ["100.64.0.3", "tcp", 80, true],
+      ["100.64.0.3", "gre", 0, true]
+    ]
+  },
+  {
+    "name": "routed subnet sources are not overlay hosts",
+    "peers": [
+      {"id": "router", "allowed_ips": ["100.64.0.5/32", "10.20.0.0/24"], "ingress": {"all": true}}
+    ],
+    "checks": [
+      ["100.64.0.5", "tcp", 80, true],
+      ["10.20.0.7", "tcp", 80, false],
+      ["10.20.0.7", "icmp", 0, false]
+    ]
+  }
+]

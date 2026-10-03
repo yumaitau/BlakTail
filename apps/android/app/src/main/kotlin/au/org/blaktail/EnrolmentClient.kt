@@ -56,8 +56,12 @@ class EnrolmentClient(private val coordinatorUrl: String) {
         return Joined(parsed.getString("id"), parsed.getString("node_token"), cidr)
     }
 
-    fun peers(nodeId: String, nodeToken: String): ArrayList<String> {
-        val connection = open("GET", "/v1/nodes/$nodeId/peers")
+    /** `peers` as `key|cidrs|endpoint`; `policy` is the raw peer array for the native inbound filter. */
+    data class PeerMap(val peers: ArrayList<String>, val policy: String)
+
+    fun peers(nodeId: String, nodeToken: String): PeerMap {
+        // The native dataplane filters inbound traffic with the peers' `ingress` grants.
+        val connection = open("GET", "/v1/nodes/$nodeId/peers?capabilities=wireguard,acl-filter")
         connection.setRequestProperty("authorization", "Bearer $nodeToken")
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val text = stream.bufferedReader().readText()
@@ -71,7 +75,7 @@ class EnrolmentClient(private val coordinatorUrl: String) {
             val cidrs = (0 until allowed.length()).joinToString(",") { allowed.getString(it) }
             peers.add("${peer.getString("wg_public_key")}|$cidrs|${peer.optString("endpoint")}")
         }
-        return peers
+        return PeerMap(peers, list.toString())
     }
 
     fun newPublicKey(): String = Base64.getEncoder().encodeToString(ByteArray(32).also(SecureRandom()::nextBytes))

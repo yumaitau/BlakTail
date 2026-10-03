@@ -657,9 +657,11 @@ export function AclEditor({
               Without it, user-limited grants keep TCP 22 closed.
             </li>
             <li>
-              <span className="badge pending">macOS, iOS and other clients</span>{" "}
-              Do not filter inbound traffic, so these rules are not enforced
-              there. Use Explain access to check a specific device.
+              <span className="badge pending">macOS, Windows, iOS and Android</span>{" "}
+              Agents that report the inbound filter reject TCP 22 from sources
+              without a grant and keep it closed for user-limited grants;
+              per-user limits are Linux-only. Older clients do not filter. Use
+              Explain access to check a specific device.
             </li>
           </ul>
         </div>
