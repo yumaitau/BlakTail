@@ -2,7 +2,6 @@ import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
-import { TopologyGraph } from "@/components/topology-graph";
 import {
   editHref,
   getTopology,
@@ -105,13 +104,18 @@ export default async function TopologyPage({
   const filtered = Boolean(q || kind || path || focus);
 
   return (
-    <ConsoleShell ctx={ctx} current="/topology">
+    <ConsoleShell ctx={ctx} current="/control-center">
       <div className="stack">
         <PageHeader
           eyebrow={ctx.organisationName}
           title="Topology"
           description="Who can reach what in this organisation, through which router, and whether the path is direct, relayed or unknown. Computed from the published policy by the same compiler that builds device peer maps."
         />
+        <p>
+          <Link className="button secondary" href="/control-center">
+            Open the Control Center graph
+          </Link>
+        </p>
         <p className="muted">
           <span className="badge network">{ctx.organisationName}</span> {roleLabel(ctx.role)} ·
           Only this organisation&apos;s devices are shown. Change access on{" "}
@@ -337,13 +341,6 @@ export default async function TopologyPage({
               )}
             </section>
 
-            <section className="panel stack" aria-labelledby="graph-title">
-              <h2 id="graph-title">Graph</h2>
-              <details>
-                <summary>Show graph grouped by tag</summary>
-                <TopologyGraph topology={topology} />
-              </details>
-            </section>
           </>
         ) : null}
       </div>

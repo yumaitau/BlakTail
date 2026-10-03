@@ -34,7 +34,7 @@ export async function GET(request: Request) {
     const sessionCookie = await establishConsoleSession(completed.userId);
     const redirectTo = completed.redirectTo.startsWith("/")
       ? completed.redirectTo
-      : "/devices";
+      : "/control-center";
     const response = NextResponse.redirect(new URL(redirectTo, url.origin));
     response.cookies.set({
       name: sessionCookie.name,

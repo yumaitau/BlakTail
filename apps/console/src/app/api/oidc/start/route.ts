@@ -4,7 +4,7 @@ import { OidcError, startOidcLogin } from "@/lib/oidc";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const organisationId = url.searchParams.get("organisation") ?? "";
-  const redirectTo = url.searchParams.get("redirect") ?? "/devices";
+  const redirectTo = url.searchParams.get("redirect") ?? "/control-center";
   if (!organisationId) {
     return NextResponse.redirect(
       new URL("/sign-in?error=organisation%20is%20required", url.origin),
