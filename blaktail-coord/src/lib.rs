@@ -20,6 +20,7 @@ mod permissions;
 mod policy_explain;
 mod posture;
 mod private_services;
+mod public_ingress;
 mod resources;
 mod service_users;
 mod shares;
@@ -355,7 +356,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 33,
         name: "posture integrations",
         postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0033_edr_integrations.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0033_edr_integrations.sql"
+        )),
     },
     Migration {
         version: 34,
@@ -367,7 +370,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 35,
         name: "private service serving",
         postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0035_service_serving.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0035_service_serving.sql"
+        )),
     },
     Migration {
         version: 36,
@@ -1537,6 +1542,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(admin::api_routes())
         .merge(dns_workspace::routes())
         .merge(private_services::routes())
+        .merge(public_ingress::routes())
         .merge(topology::routes())
         .merge(change_drafts::routes())
         .merge(operations::routes())

@@ -13,7 +13,8 @@
     "manage_integrations",
     "manage_api_clients",
     "manage_security",
-    "view_operations"
+    "view_operations",
+    "manage_public_ingress"
   ],
   "roles": {
     "owner": [
@@ -29,7 +30,8 @@
       "manage_integrations",
       "manage_api_clients",
       "manage_security",
-      "view_operations"
+      "view_operations",
+      "manage_public_ingress"
     ],
     "admin": [
       "view_network",

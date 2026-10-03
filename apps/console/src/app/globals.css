@@ -1439,3 +1439,59 @@ button.quiet-danger:hover:not(:disabled),
   gap: 0.75rem;
   align-items: end;
 }
+
+/* Public ingress: visibly different from private services. */
+.badge.public {
+  background: var(--destructive);
+  border-color: var(--destructive);
+  color: var(--blaktail-sand-100);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.badge.public::before {
+  background: var(--blaktail-sand-100);
+}
+
+.public-panel {
+  border-color: rgba(200, 90, 75, 0.45);
+  box-shadow: inset 4px 0 0 var(--destructive);
+}
+
+.public-routes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.public-route {
+  border: 1px solid rgba(200, 90, 75, 0.35);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+}
+
+.public-route-head {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.public-fqdn {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.public-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.public-facts dt {
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+}
+
+.public-facts dd {
+  margin: 0;
+}

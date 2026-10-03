@@ -39,6 +39,9 @@ pub(crate) enum Permission {
     /// Read the protected operator health view (versions, schema, relays,
     /// outbox, expiry counts, backup proof). Read-only, never key material.
     ViewOperations,
+    /// Enable public ingress for the organisation and create, change or
+    /// re-enable public routes. Owner-only: it exposes a device to the Internet.
+    ManagePublicIngress,
 }
 
 impl Role {
@@ -48,7 +51,7 @@ impl Role {
             Role::Owner => true,
             Role::Admin => !matches!(
                 permission,
-                ManageSecurity | ManageApiClients | ViewOperations
+                ManageSecurity | ManageApiClients | ViewOperations | ManagePublicIngress
             ),
             Role::NetworkAdmin => matches!(
                 permission,
@@ -91,7 +94,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 13] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 14] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -105,6 +108,7 @@ pub(crate) mod tests {
         (Permission::ManageApiClients, "manage_api_clients"),
         (Permission::ManageSecurity, "manage_security"),
         (Permission::ViewOperations, "view_operations"),
+        (Permission::ManagePublicIngress, "manage_public_ingress"),
     ];
 
     #[test]
@@ -163,6 +167,7 @@ pub(crate) mod tests {
             Permission::ManageApiClients,
             Permission::ManageSecurity,
             Permission::ExportAudit,
+            Permission::ManagePublicIngress,
         ] {
             assert!(!Role::NetworkAdmin.can(permission));
         }

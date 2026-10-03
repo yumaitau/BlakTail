@@ -24,7 +24,8 @@ export type Permission =
   | "manage_integrations"
   | "manage_api_clients"
   | "manage_security"
-  | "view_operations";
+  | "view_operations"
+  | "manage_public_ingress";
 
 const NETWORK_WRITE: readonly Permission[] = [
   "manage_peers",
@@ -47,6 +48,7 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "manage_api_clients",
     "manage_security",
     "view_operations",
+    "manage_public_ingress",
   ],
   admin: [
     "view_network",
@@ -88,6 +90,7 @@ const PERMISSION_TASK: Record<Permission, string> = {
   manage_api_clients: "manage automation credentials",
   manage_security: "change people, sign-in and security settings",
   view_operations: "read operator health",
+  manage_public_ingress: "publish services to the Internet",
 };
 
 const HOLDERS: Record<Permission, string> = Object.fromEntries(

@@ -282,6 +282,10 @@ pub struct NodeState {
     /// Host routes currently forwarded for app-connector resources.
     #[serde(default)]
     pub connector_routes: Vec<String>,
+    /// Operator opted this node in as a public ingress host; a co-located
+    /// `blaktail-ingress` uses this node's identity to fetch public routes.
+    #[serde(default)]
+    pub public_ingress: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -638,6 +642,7 @@ impl Coordinator {
             forward_filter: None,
             app_connector: false,
             connector_routes: Vec::new(),
+            public_ingress: false,
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -886,6 +891,9 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     fs::rename(tmp, path)?;
     Ok(())
 }
+/// Reported while `blaktaild up --public-ingress` is in effect.
+pub const PUBLIC_INGRESS_CAPABILITY: &str = "public-ingress";
+
 /// Capabilities this build provides. `ssh-users` is only claimed after the
 /// last apply verified the sshd drop-in.
 pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
@@ -904,6 +912,9 @@ fn inventory_query(state: &NodeState) -> [(&'static str, String); 3] {
     let mut capabilities = agent_capabilities(state.ssh_users_enforced);
     if cfg!(target_os = "linux") && state.app_connector {
         capabilities.push(connector::CAPABILITY.into());
+    }
+    if state.public_ingress {
+        capabilities.push(PUBLIC_INGRESS_CAPABILITY.into());
     }
     [
         ("capabilities", capabilities.join(",")),
@@ -2605,6 +2616,25 @@ mod tests {
     }
 
     #[test]
+    fn public_ingress_capability_is_opt_in_and_survives_old_state() {
+        let mut state: NodeState = serde_json::from_value(serde_json::json!({
+            "node_id": Uuid::nil(),
+            "node_token": "secret",
+            "coord": "https://coord.example",
+            "interface": "blaktail0",
+            "assigned_ip": "100.64.0.1/32",
+        }))
+        .unwrap();
+        assert!(!state.public_ingress);
+        let reported = |state: &NodeState| inventory_query(state)[0].1.clone();
+        assert!(!reported(&state).contains(PUBLIC_INGRESS_CAPABILITY));
+        state.public_ingress = true;
+        assert!(reported(&state)
+            .split(',')
+            .any(|c| c == PUBLIC_INGRESS_CAPABILITY));
+    }
+
+    #[test]
     fn persisted_peers_are_reinstalled_after_interface_recreation() {
         let expected = peer("restored", Some("192.0.2.1:51820"));
         let state = NodeState {
@@ -2638,6 +2668,7 @@ mod tests {
             forward_filter: Some(forward_filter::ForwardFilter::default()),
             app_connector: false,
             connector_routes: Vec::new(),
+            public_ingress: false,
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2713,6 +2744,7 @@ mod tests {
             forward_filter: None,
             app_connector: false,
             connector_routes: Vec::new(),
+            public_ingress: false,
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));
