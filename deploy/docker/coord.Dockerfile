@@ -7,6 +7,7 @@ COPY config ./config
 COPY blaktail-config ./blaktail-config
 COPY blaktail-coord ./blaktail-coord
 COPY blaktail-relay ./blaktail-relay
+COPY blaktail-gateway ./blaktail-gateway
 COPY blaktaild ./blaktaild
 COPY blaktail-ios-wg ./blaktail-ios-wg
 RUN cargo build --release -p blaktail-coord -p blaktail-config
