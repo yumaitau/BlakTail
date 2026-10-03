@@ -878,11 +878,17 @@ mod tests {
 
         mesh_a.drop_forwarder(node_b);
         assert!(!mesh_a.has_forwarder(node_b));
-        tokio::task::yield_now().await;
-        let rebound = UdpSocket::bind(format!("127.0.0.1:{port_b}"))
-            .await
-            .unwrap();
-        drop(rebound);
+        // The aborted forwarder task releases its socket asynchronously; under
+        // a loaded test run that can take more than one scheduler turn.
+        let mut rebound = None;
+        for _ in 0..100 {
+            if let Ok(socket) = UdpSocket::bind(format!("127.0.0.1:{port_b}")).await {
+                rebound = Some(socket);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(rebound.is_some(), "dropped forwarder kept port {port_b}");
 
         mesh_a.stop();
         mesh_b.stop();
