@@ -51,7 +51,7 @@ value. Defaults apply when a section or field is absent.
 | `coordinator.tls_key` | Required | Secret file reference |
 | `coordinator.auth_hmac_secret` | Required | Console assertion secret, at least 32 bytes |
 | `coordinator.relay_auth_secret` | Required when relays exist | Relay capability secret, at least 32 bytes |
-| `coordinator.relays` | Empty list | UDP host/IP and non-zero port entries in priority order; optional `#region` suffix (for example `relay-a.example.org.au:3478#australiaeast`) must be an approved Australian region, untagged entries inherit `coordinator.region` |
+| `coordinator.relays` | Empty list | UDP host/IP and non-zero port entries in priority order; optional `#region` suffix (for example `relay-a.example.org.au:3478#australiaeast`) must be an approved Australian region, untagged entries inherit `coordinator.region`; optional `;wss=wss://host/path` suffix names that relay's HTTPS fallback (see [relay.md](relay.md#https--websocket-fallback-adr-0004)) |
 | `coordinator.console_url` | Required | HTTPS URL, except loopback development |
 | `relay.region` | Required | Approved Australian region |
 | `relay.bind` | `0.0.0.0:3478` | UDP IP socket, non-zero port |
@@ -233,6 +233,13 @@ Lists are comma-separated. Boolean values accept `true`/`false`, `yes`/`no`, or
 | `BLAKTAIL_RELAY_IDLE_SECONDS` | `relay.idle_seconds` | 10-86400 |
 | `BLAKTAIL_RELAY_RATE_PER_SECOND` | `relay.rate_per_second` | 1-100000 |
 | `BLAKTAIL_RELAY_RATE_BURST` | `relay.rate_burst` | At least sustained rate |
+| `BLAKTAIL_RELAY_WSS_BIND` | (relay process environment only) | Optional TCP socket for the WebSocket-over-TLS fallback |
+| `BLAKTAIL_RELAY_WSS_CERT_FILE` / `BLAKTAIL_RELAY_WSS_KEY_FILE` | (relay process environment only) | PEM chain and key for that listener |
+| `BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY` | (relay process environment only) | `true` serves plain WebSocket behind a TLS-terminating balancer |
+| `BLAKTAIL_RELAY_WSS_PATH` | (relay process environment only) | Upgrade path, default `/v1/relay` |
+| `BLAKTAIL_RELAY_PROXY` / `HTTPS_PROXY` | (agent process environment only) | HTTP CONNECT proxy for the WSS fallback |
+| `BLAKTAIL_RELAY_PROXY_USER` / `BLAKTAIL_RELAY_PROXY_PASSWORD` / `BLAKTAIL_RELAY_PROXY_PASSWORD_FILE` | (agent process environment only) | Proxy credentials; never command-line flags |
+| `BLAKTAIL_RELAY_WSS_CA_FILE` | (agent process environment only) | Extra PEM trust anchor for a private relay CA |
 | `BLAKTAIL_AGENT_STATE_DIR` | `agent.state_dir` | Absolute path |
 | `BLAKTAIL_AGENT_COORD_URL` | `agent.coordinator_url` | Canonical URL |
 | `BLAKTAIL_COORDINATOR_URL` | `agent.coordinator_url` | Deprecated schema-v1 alias |

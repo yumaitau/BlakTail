@@ -1,7 +1,7 @@
 # ADR 0004 — HTTPS fallback transport for constrained networks (issue #48)
 
-- Status: proposed (recommendation recorded; test still needed)
-- Date: 2026-09-03
+- Status: Accepted (3 October 2026); implemented as described below
+- Date: 2026-09-03 (proposed), 2026-10-03 (accepted)
 
 ## Context
 
@@ -46,3 +46,34 @@ Explicit caveats:
 - TLS-framed TCP stays a possible later optimisation for non-proxied
   networks where HTTP overhead matters; it is not the first fallback
   because it fails exactly where the fallback is needed most.
+
+## Implementation (3 October 2026)
+
+Accepted and built as WebSocket-over-443. The caveats above remain
+requirements:
+
+- `blaktail-relay` serves `REGISTER`/`SEND`/`PING` frames as binary WebSocket
+  messages over TLS (`blaktail_relay::wss`, tokio-tungstenite + rustls with the
+  `ring` provider) next to UDP, sharing one registration table, the same
+  capability tokens and the same rate limits. Bounded: frame size, 64-frame
+  per-connection queue, 10 s handshake and write timeouts, 50 s idle close
+  with 20 s server pings (inside ALB's 60 s default), 4,096 connections.
+  `BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY` serves plain WebSocket only behind a
+  TLS-terminating balancer.
+- The coordinator advertises a WSS URL per relay (`;wss=` suffix on the relay
+  entry) only when it passes `https_fallback::approved_endpoint` (TLS, `.au`
+  host, no credentials).
+- Clients (`blaktaild`, the iPhone tunnel) climb UDP → WSS after three
+  unanswered UDP probe rounds and promote back after three answered rounds
+  (`blaktail_relay_proto::ladder`). Redirects are never followed. Optional
+  HTTP CONNECT proxy with credentials from the environment or a file only.
+  Android stays on UDP: the platform SDK has no WebSocket client.
+- Test evidence: in-process relay tests (UDP↔WSS, WSS↔WSS, forged tokens,
+  oversize/text frames, slowloris, connection cap, idle close, full queue,
+  redirect refusal, CONNECT proxy with and without credentials), an agent
+  test with the UDP relay black-holed, and the single-host lab
+  `deploy/homelab/prove-relay-wss.sh` (all UDP dropped on both agents; overlay
+  traffic over TLS/443; promotion back to UDP when restored). See
+  [relay.md](../relay.md#lab-results-single-docker-host-3-october-2026).
+- Not yet proven: a real corporate (inspecting) proxy, an ALB-fronted relay,
+  independent ISPs and physical phones. TLS-framed TCP was not built.

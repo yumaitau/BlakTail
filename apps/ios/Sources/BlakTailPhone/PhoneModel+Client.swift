@@ -133,6 +133,11 @@ extension PhoneModel {
         enrollment = try? enrollmentStore.load()
     }
 
+    /// Re-reads the observed path while connected; clears it otherwise.
+    public func refreshTransport() async {
+        observedTransport = connectionState == .connected ? await tunnel.transportStatus() : nil
+    }
+
     public func refreshTunnelStatus() async {
         if enrollment == nil {
             if connectionState == .connected {
@@ -143,8 +148,12 @@ extension PhoneModel {
         }
         if await tunnel.isRunning() {
             connectionState = .connected
-        } else if connectionState == .connected {
-            connectionState = .disconnected
+            observedTransport = await tunnel.transportStatus()
+        } else {
+            if connectionState == .connected {
+                connectionState = .disconnected
+            }
+            observedTransport = nil
         }
         publishWidget()
     }

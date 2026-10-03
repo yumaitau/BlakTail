@@ -1,5 +1,8 @@
 #[cfg(feature = "jni")]
 mod android;
+mod relay;
+
+pub use relay::*;
 
 use boringtun::noise::{Tunn, TunnResult};
 use std::collections::BTreeMap;
@@ -99,6 +102,8 @@ struct TunnelInner {
     private: StaticSecret,
     peers: BTreeMap<u32, PeerSlot>,
     next_index: u32,
+    /// Relay fallback state, created by `blaktail_relay_configure`.
+    relay: Option<blaktail_relay_proto::mobile::MobileRelay>,
 }
 
 impl TunnelInner {
@@ -215,6 +220,7 @@ pub unsafe extern "C" fn blaktail_tunnel_create(private_key: *const u8) -> *mut 
                 private: StaticSecret::from(raw),
                 peers: BTreeMap::new(),
                 next_index: 1,
+                relay: None,
             }),
         }))
     }))

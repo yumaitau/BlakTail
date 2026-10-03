@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
                             .putString("address", joined.address)
                             .putString("nodeId", joined.id)
                             .putString("nodeToken", joined.nodeToken)
+                            .putString("coordinator", coordinator.text.toString())
                             .putStringSet("peers", peers.toSet())
                             .apply()
                         runOnUiThread {

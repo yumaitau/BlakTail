@@ -19,6 +19,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// The app asks for observed transport (direct, relay, relay-wss).
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        Task { @MainActor in
+            completionHandler?(session?.statusJSON())
+        }
+    }
+
     override func stopTunnel(
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void

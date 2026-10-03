@@ -259,6 +259,9 @@ pub struct NodeState {
     /// Relay failovers since the agent last started.
     #[serde(default)]
     pub relay_failovers: u64,
+    /// Link carrying relay frames: `udp`, or `wss` for the HTTPS fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_link: Option<String>,
     #[serde(default)]
     pub dns_mode: Option<String>,
     #[serde(default)]
@@ -625,6 +628,7 @@ impl Coordinator {
             relay_endpoints: r.relay_endpoints,
             active_relay: None,
             relay_failovers: 0,
+            relay_link: None,
             relay_token: r.relay_token,
             relay_expires_at: r.relay_expires_at,
             relay_endpoint: None,
@@ -2629,6 +2633,7 @@ mod tests {
             relay_endpoints: vec![],
             active_relay: None,
             relay_failovers: 0,
+            relay_link: None,
             dns_mode: None,
             org_dns: None,
             dns_degraded: None,
@@ -2699,6 +2704,7 @@ mod tests {
             relay_endpoints: vec![],
             active_relay: None,
             relay_failovers: 0,
+            relay_link: None,
             dns_mode: None,
             org_dns: Some(OrgDnsSnapshot {
                 revision: 4,

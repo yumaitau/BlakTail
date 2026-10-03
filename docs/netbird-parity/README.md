@@ -52,6 +52,6 @@ Each draft ends with its own **Status** section listing what is done, what tests
 | 13 browser access, 11 public ingress, 24 agent network, 25 post-quantum | Decision records only (ADRs 0006–0009); proposed, awaiting owner sign-off |
 | 14 roles, 15 sign-in | Built and tested, including Postgres; SCIM group-to-role mapping not built |
 | 17 audit and traffic, 18 notifications, 22 API and IaC | Built and tested; no agent sends traffic data yet; Terraform example validated, not applied |
-| 19 clients, 20 profiles, 21 relay, 23 operations | Operator health, signed-release path, multi-relay failover and tray built; no device, NAT-lab, release or failover drill run; iPhone and Android have no relay client |
+| 19 clients, 20 profiles, 21 relay, 23 operations | Operator health, signed-release path, multi-relay failover, tray, WSS relay fallback and mobile relay (iPhone UDP+WSS, Android UDP) built; single-host relay, failover and WSS labs passed; no device, independent-NAT or release drill run |
 
 Three independent security reviews (coordinator authorisation, data-plane enforcement, console sign-in) ran after merging; every confirmed finding was fixed with a regression test.

@@ -30,6 +30,16 @@ struct ThisPhoneView: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("This iPhone is \(model.connectionState.label.lowercased())")
+
+                if model.connectionState == .connected, let transport = model.observedTransport {
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("Path", value: transport.label)
+                        Text(transport.detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
             }
 
             if let session = model.session {
@@ -116,6 +126,13 @@ struct ThisPhoneView: View {
                     LabeledContent("Coordinator", value: model.preferences.coordinatorURL)
                         .textSelection(.enabled)
                 }
+            }
+        }
+        .task(id: model.connectionState) {
+            // The tunnel measures its path continuously; poll it while shown.
+            while !Task.isCancelled && model.connectionState == .connected {
+                await model.refreshTransport()
+                try? await Task.sleep(for: .seconds(5))
             }
         }
         .navigationTitle("This iPhone")

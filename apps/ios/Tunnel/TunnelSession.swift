@@ -27,6 +27,10 @@ final class TunnelSession {
     private var engine: WireGuardEngine
     private var peers: [CoordinatorPeer] = []
     private var sessions: [Data: NWUDPSession] = [:]
+    /// One UDP session per Australian relay endpoint (`host:port`).
+    private var relaySessions: [String: NWUDPSession] = [:]
+    private var relayWebSocket: RelayWebSocket?
+    private(set) var relayStatus: RelayStatus?
     private var pollTask: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
     private var dns: MagicDNSResponder
@@ -58,6 +62,7 @@ final class TunnelSession {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 self?.pollTimers()
+                self?.driveRelay()
             }
         }
     }
@@ -67,6 +72,16 @@ final class TunnelSession {
         timerTask?.cancel()
         sessions.values.forEach { $0.cancel() }
         sessions.removeAll()
+        relaySessions.values.forEach { $0.cancel() }
+        relaySessions.removeAll()
+        relayWebSocket?.close()
+        relayWebSocket = nil
+    }
+
+    /// Observed transport for the app (`handleAppMessage`). Carries no
+    /// tokens or keys.
+    func statusJSON() -> Data {
+        (try? JSONEncoder().encode(relayStatus)) ?? Data("null".utf8)
     }
 
     private func apply(_ snapshot: PeerSnapshot) {
@@ -80,6 +95,8 @@ final class TunnelSession {
         enrollment.credentialExpiresAt = snapshot.credentialExpiresAt
         peers = snapshot.peers
         engine.replacePeers(peers)
+        engine.configureRelay(selfNodeID: enrollment.nodeID, snapshot: snapshot)
+        engine.setRelayPeers(peers)
         dns = MagicDNSResponder(enrollment: enrollment, peers: peers)
         for peer in peers {
             ensureSession(for: peer)
@@ -122,8 +139,14 @@ final class TunnelSession {
         }
     }
 
-    private func handleRemoteDatagram(_ datagram: Data) {
-        switch engine.decapsulate(datagram) {
+    /// `directPeer` is set when the datagram arrived on that peer's direct
+    /// UDP session; a successful decrypt then proves the direct path.
+    private func handleRemoteDatagram(_ datagram: Data, directPeer: Data? = nil) {
+        let result = engine.decapsulate(datagram)
+        if let directPeer, result != .failed {
+            engine.directReceived(from: directPeer)
+        }
+        switch result {
         case let .writeTunnel(inner):
             let version = inner.first.map { $0 >> 4 } ?? 4
             let protocolNumber = NSNumber(value: version == 6 ? AF_INET6 : AF_INET)
@@ -152,6 +175,16 @@ final class TunnelSession {
     }
 
     private func send(_ datagram: Data, to peerPublic: Data) {
+        let route = engine.route(datagram, to: peerPublic)
+        if route.direct {
+            sendDirect(datagram, to: peerPublic)
+        }
+        if let frame = route.relayFrame {
+            sendToRelay(frame, viaWebSocket: route.viaWebSocket)
+        }
+    }
+
+    private func sendDirect(_ datagram: Data, to peerPublic: Data) {
         if let session = sessions[peerPublic] {
             session.writeDatagram(datagram) { _ in }
             return
@@ -162,6 +195,71 @@ final class TunnelSession {
             ensureSession(for: peer)
             sessions[peerPublic]?.writeDatagram(datagram) { _ in }
         }
+    }
+
+    private func sendToRelay(_ frame: Data, viaWebSocket: Bool) {
+        if viaWebSocket {
+            relayWebSocket?.send(frame)
+        } else if let endpoint = relayStatus?.relay {
+            relaySession(for: endpoint)?.writeDatagram(frame) { _ in }
+        }
+    }
+
+    /// Runs the relay state machine once a second: opens or closes the WSS
+    /// fallback to match the core, then sends due REGISTER/PING frames (a new
+    /// WebSocket queues them until its handshake completes).
+    private func driveRelay() {
+        let controls = engine.relayTick()
+        relayStatus = engine.relayStatus()
+        let wanted = relayStatus?.link == "wss" ? relayStatus?.wssURL : nil
+        if relayWebSocket?.url.absoluteString != wanted || relayWebSocket?.isClosed == true {
+            relayWebSocket?.close()
+            relayWebSocket = nil
+            if let wanted, let url = URL(string: wanted), url.scheme == "wss" {
+                relayWebSocket = RelayWebSocket(url: url) { [weak self] frame in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        if let payload = self.engine.relayInbound(frame, viaWebSocket: true, endpoint: "") {
+                            self.handleRemoteDatagram(payload)
+                        }
+                    }
+                }
+            }
+        }
+        for control in controls {
+            switch control {
+            case let .udp(endpoint, frame):
+                relaySession(for: endpoint)?.writeDatagram(frame) { _ in }
+            case let .webSocket(frame):
+                relayWebSocket?.send(frame)
+            }
+        }
+        let active = Set([relayStatus?.relay].compactMap { $0 })
+        for (endpoint, session) in relaySessions where !active.contains(endpoint) && relaySessions.count > 4 {
+            session.cancel()
+            relaySessions[endpoint] = nil
+        }
+    }
+
+    private func relaySession(for endpoint: String) -> NWUDPSession? {
+        if let session = relaySessions[endpoint] { return session }
+        guard let parsed = parseEndpoint(endpoint) else { return nil }
+        let session = provider.createUDPSession(
+            to: NWHostEndpoint(hostname: parsed.host, port: parsed.port),
+            from: nil
+        )
+        session.setReadHandler({ [weak self] datagrams, _ in
+            guard let self else { return }
+            Task { @MainActor in
+                for datagram in datagrams ?? [] {
+                    if let payload = self.engine.relayInbound(datagram, viaWebSocket: false, endpoint: endpoint) {
+                        self.handleRemoteDatagram(payload)
+                    }
+                }
+            }
+        }, maxDatagrams: 32)
+        relaySessions[endpoint] = session
+        return session
     }
 
     private func ensureSession(for peer: CoordinatorPeer) {
@@ -176,7 +274,7 @@ final class TunnelSession {
             guard let self else { return }
             Task { @MainActor in
                 for datagram in datagrams ?? [] {
-                    self.handleRemoteDatagram(datagram)
+                    self.handleRemoteDatagram(datagram, directPeer: key)
                 }
             }
         }, maxDatagrams: 32)
@@ -287,5 +385,84 @@ final class TunnelSession {
     private static func ipv4Mask(prefix: Int) -> String {
         let mask: UInt32 = prefix == 0 ? 0 : UInt32.max << (32 - prefix)
         return "\((mask >> 24) & 0xFF).\((mask >> 16) & 0xFF).\((mask >> 8) & 0xFF).\(mask & 0xFF)"
+    }
+}
+
+/// The HTTPS (WebSocket over TLS) relay fallback. Uses the system trust
+/// store and proxy settings, refuses redirects, and carries one relay frame
+/// per binary message.
+final class RelayWebSocket: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let url: URL
+    private var session: URLSession!
+    private var task: URLSessionWebSocketTask?
+    private let onFrame: @Sendable (Data) -> Void
+    private let lock = NSLock()
+    private var closed = false
+
+    init(url: URL, onFrame: @escaping @Sendable (Data) -> Void) {
+        self.url = url
+        self.onFrame = onFrame
+        super.init()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        let task = session.webSocketTask(with: url)
+        task.maximumMessageSize = 4_096
+        self.task = task
+        task.resume()
+        receive()
+    }
+
+    var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func send(_ frame: Data) {
+        task?.send(.data(frame)) { [weak self] error in
+            if error != nil { self?.markClosed() }
+        }
+    }
+
+    func close() {
+        markClosed()
+        task?.cancel(with: .goingAway, reason: nil)
+        session.invalidateAndCancel()
+    }
+
+    private func markClosed() {
+        lock.lock()
+        closed = true
+        lock.unlock()
+    }
+
+    private func receive() {
+        task?.receive { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(.data(frame)):
+                self.onFrame(frame)
+                self.receive()
+            case .success:
+                // Text frames are a protocol violation: drop the link.
+                self.close()
+            case .failure:
+                self.markClosed()
+            }
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Never follow a redirect away from the coordinator-approved endpoint.
+        completionHandler(nil)
     }
 }

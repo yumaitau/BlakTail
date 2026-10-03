@@ -1,6 +1,6 @@
 [package]
 name = "blaktail-relay"
-description = "Australia-pinned BlakTail UDP relay"
+description = "Australia-pinned BlakTail UDP relay with a WebSocket-over-TLS fallback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,20 @@ name = "blaktail-relay"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 blaktail-config = { path = "../blaktail-config" }
+blaktail-relay-proto = { path = "../blaktail-relay-proto" }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hmac = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["macros", "io-util", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "io-util", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake", "__rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

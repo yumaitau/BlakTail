@@ -23,6 +23,29 @@ final class BlakTailPhoneTests: XCTestCase {
         )
     }
 
+    func testTransportStatusDecodesTunnelReplyAndLabelsTheFallback() throws {
+        let reply = Data(
+            #"{"transport":"relay-wss","relay":"relay-a.example.org.au:3478","link":"wss","wss_url":"wss://relay-a.example.org.au/v1/relay","healthy":true,"peers_direct":1,"peers_relayed":2,"failovers":0}"#.utf8
+        )
+        let status = try JSONDecoder().decode(TunnelTransportStatus.self, from: reply)
+        XCTAssertEqual(status.peersRelayed, 2)
+        XCTAssertEqual(status.relay, "relay-a.example.org.au:3478")
+        XCTAssertEqual(status.label, "Australian relay over HTTPS")
+        XCTAssertTrue(status.detail.contains("port 443"))
+        XCTAssertEqual(TunnelTransportStatus(transport: "direct", peersDirect: 3).label, "Direct")
+        XCTAssertEqual(TunnelTransportStatus(transport: "none").label, "No active peers yet")
+    }
+
+    @MainActor
+    func testObservedTransportClearsWhenDisconnected() async {
+        let tunnel = RecordingPacketTunnelController()
+        let model = PhoneModel(tunnel: tunnel)
+        model.observedTransport = TunnelTransportStatus(transport: "relay")
+        model.connectionState = .disconnected
+        await model.refreshTransport()
+        XCTAssertNil(model.observedTransport)
+    }
+
     func testCallbackTokenFromFragment() throws {
         let url = URL(string: "blaktail://auth/callback#token=abc%20def")!
         XCTAssertEqual(try BrowserSignIn.token(from: url), "abc def")
