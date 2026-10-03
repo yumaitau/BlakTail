@@ -241,6 +241,13 @@ pub struct NodeState {
     pub exit_node_active: bool,
     #[serde(default)]
     pub router_previous_ipv4_forward: Option<bool>,
+    /// `net.ipv6.conf.all.forwarding` before this node first routed IPv6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_previous_ipv6_forward: Option<bool>,
+    /// Overlay addresses (own or peers') a staged renumber is withdrawing:
+    /// still installed and routed, but never answered by MagicDNS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retiring_ips: Vec<String>,
     #[serde(default)]
     pub peers: Vec<Peer>,
     /// Advertised relay endpoints (host:port UDP) and our capability token.
@@ -355,10 +362,48 @@ impl NodeState {
     pub fn ipv6_address(&self) -> Option<&str> {
         self.assigned_ips
             .iter()
+            .filter(|address| !self.retiring_ips.contains(address))
             .map(String::as_str)
             .chain(std::iter::once(self.assigned_ip.as_str()))
             .find(|address| address.contains(':'))
     }
+
+    /// Adopts the coordinator's address list. The primary IPv4 (MagicDNS
+    /// listener, status) is the first one not being withdrawn, so a
+    /// renumbered node moves to its new address at the start of the window
+    /// and drops the old one when the window ends.
+    pub fn adopt_assigned_ips(&mut self, assigned_ips: Vec<String>, retiring_ips: Vec<String>) {
+        if !assigned_ips.is_empty() {
+            if let Some(primary) = assigned_ips
+                .iter()
+                .find(|address| !address.contains(':') && !retiring_ips.contains(address))
+            {
+                self.assigned_ip = primary.clone();
+            }
+            self.assigned_ips = assigned_ips;
+        }
+        self.retiring_ips = retiring_ips;
+    }
+
+    pub fn forwarding_originals(&self) -> ForwardingOriginals {
+        ForwardingOriginals {
+            ipv4: self.router_previous_ipv4_forward,
+            ipv6: self.router_previous_ipv6_forward,
+        }
+    }
+
+    pub fn set_forwarding_originals(&mut self, originals: ForwardingOriginals) {
+        self.router_previous_ipv4_forward = originals.ipv4;
+        self.router_previous_ipv6_forward = originals.ipv6;
+    }
+}
+
+/// Each family's forwarding sysctl as it was before this node started
+/// routing that family; `None` while the node does not route it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForwardingOriginals {
+    pub ipv4: Option<bool>,
+    pub ipv6: Option<bool>,
 }
 #[derive(Serialize)]
 struct RegisterRequest<'a> {
@@ -456,6 +501,8 @@ struct PeersResponse {
     shares: Vec<crate::PublishedShare>,
     #[serde(default)]
     forward_filter: Option<forward_filter::ForwardFilter>,
+    #[serde(default)]
+    retiring_ips: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -627,6 +674,8 @@ impl Coordinator {
             exit_node: registration.exit_node,
             exit_node_active: false,
             router_previous_ipv4_forward: None,
+            router_previous_ipv6_forward: None,
+            retiring_ips: Vec::new(),
             peers: vec![],
             relays: r.relays,
             relay_endpoints: r.relay_endpoints,
@@ -720,9 +769,7 @@ impl Coordinator {
         if let Some(revision) = body.revision {
             state.control_revision = revision;
         }
-        if !body.assigned_ips.is_empty() {
-            state.assigned_ips = body.assigned_ips;
-        }
+        state.adopt_assigned_ips(body.assigned_ips, body.retiring_ips);
         state.dns_name = body.dns_name;
         state.credential_expires_at = body.credential_expires_at;
         state.exit_node_active = body.exit_node_active;
@@ -1064,18 +1111,17 @@ pub trait Network {
     /// The WireGuard listen endpoint on this machine (loopback IP + port).
     fn listen_endpoint(&mut self, interface: &str) -> Result<Option<std::net::SocketAddr>, Error>;
     /// Reconciles forwarding/NAT for a subnet or exit-node advertisement and
-    /// returns the original IPv4-forwarding setting for safe restoration.
-    /// IPv6 routes (including `::/0`) are handled symmetrically via
-    /// `ip6tables` inside the Linux implementation; see its docs for details.
+    /// returns each family's original forwarding setting for safe
+    /// restoration (`None` for a family this node no longer routes).
     fn configure_router(
         &mut self,
         _interface: &str,
         _previous_routes: &[String],
         desired_routes: &[String],
-        _original_ipv4_forward: Option<bool>,
-    ) -> Result<Option<bool>, Error> {
+        _originals: ForwardingOriginals,
+    ) -> Result<ForwardingOriginals, Error> {
         if desired_routes.is_empty() {
-            Ok(None)
+            Ok(ForwardingOriginals::default())
         } else {
             Err(Error::Message(
                 "subnet and exit-node advertisement is supported on Linux only".into(),
@@ -1152,6 +1198,10 @@ pub struct LinuxNetwork {
     peer_routes: HashMap<String, Vec<String>>,
     installed_routes: HashSet<String>,
     exit_routing: bool,
+    exit_routing_v6: bool,
+    /// Tunnel addresses currently on the interface, so a withdrawn
+    /// (renumbered) address is removed rather than left behind.
+    addresses: Vec<String>,
     /// Routes this node currently forwards for (from `configure_router`).
     router_routes: Vec<String>,
     forward_filter: Option<forward_filter::ForwardFilter>,
@@ -1215,7 +1265,7 @@ impl LinuxNetwork {
             .peer_routes
             .values()
             .flatten()
-            .filter(|route| route.as_str() != "0.0.0.0/0")
+            .filter(|route| route.as_str() != "0.0.0.0/0" && route.as_str() != "::/0")
             .cloned()
             .collect();
         let additions: Vec<_> = desired
@@ -1256,24 +1306,46 @@ impl LinuxNetwork {
             self.installed_routes.remove(&route);
         }
 
-        let wants_exit = self
-            .peer_routes
-            .values()
-            .flatten()
-            .any(|route| route == "0.0.0.0/0");
-        if wants_exit && !self.exit_routing {
-            self.enable_exit_routing(interface)?;
-        } else if !wants_exit && self.exit_routing {
-            self.disable_exit_routing(interface);
+        for (family, default) in [("-4", "0.0.0.0/0"), ("-6", "::/0")] {
+            let wants = self
+                .peer_routes
+                .values()
+                .flatten()
+                .any(|route| route == default);
+            let active = self.exit_family(family);
+            if wants && !active {
+                self.enable_exit_routing(interface, family)?;
+            } else if !wants && active {
+                self.disable_exit_routing(interface, family);
+            }
         }
         Ok(())
     }
 
-    fn clear_exit_rules() {
+    fn exit_family(&self, family: &str) -> bool {
+        if family == "-6" {
+            self.exit_routing_v6
+        } else {
+            self.exit_routing
+        }
+    }
+
+    fn set_exit_family(&mut self, family: &str, enabled: bool) {
+        if family == "-6" {
+            self.exit_routing_v6 = enabled;
+        } else {
+            self.exit_routing = enabled;
+        }
+    }
+
+    /// Exit routing uses the same policy-routing scheme for both families:
+    /// WireGuard's own packets carry the fwmark and keep the main table; all
+    /// other traffic without a more specific route goes into the tunnel.
+    fn clear_exit_rules(family: &str) {
         Self::run_ignore(
             "ip",
             &[
-                "-4",
+                family,
                 "rule",
                 "del",
                 "priority",
@@ -1287,7 +1359,7 @@ impl LinuxNetwork {
         Self::run_ignore(
             "ip",
             &[
-                "-4",
+                family,
                 "rule",
                 "del",
                 "priority",
@@ -1301,18 +1373,18 @@ impl LinuxNetwork {
         );
         Self::run_ignore(
             "ip",
-            &["-4", "route", "del", "default", "table", EXIT_ROUTE_TABLE],
+            &[family, "route", "del", "default", "table", EXIT_ROUTE_TABLE],
         );
     }
 
-    fn enable_exit_routing(&mut self, interface: &str) -> Result<(), Error> {
-        Self::clear_exit_rules();
+    fn enable_exit_routing(&mut self, interface: &str, family: &str) -> Result<(), Error> {
+        Self::clear_exit_rules(family);
         Self::run("wg", &["set", interface, "fwmark", EXIT_ROUTE_TABLE])?;
         let configured = (|| {
             Self::run(
                 "ip",
                 &[
-                    "-4",
+                    family,
                     "route",
                     "add",
                     "default",
@@ -1325,7 +1397,7 @@ impl LinuxNetwork {
             Self::run(
                 "ip",
                 &[
-                    "-4",
+                    family,
                     "rule",
                     "add",
                     "priority",
@@ -1339,7 +1411,7 @@ impl LinuxNetwork {
             Self::run(
                 "ip",
                 &[
-                    "-4",
+                    family,
                     "rule",
                     "add",
                     "priority",
@@ -1353,18 +1425,22 @@ impl LinuxNetwork {
             )
         })();
         if let Err(error) = configured {
-            Self::clear_exit_rules();
-            Self::run_ignore("wg", &["set", interface, "fwmark", "off"]);
+            Self::clear_exit_rules(family);
+            if !self.exit_routing && !self.exit_routing_v6 {
+                Self::run_ignore("wg", &["set", interface, "fwmark", "off"]);
+            }
             return Err(error);
         }
-        self.exit_routing = true;
+        self.set_exit_family(family, true);
         Ok(())
     }
 
-    fn disable_exit_routing(&mut self, interface: &str) {
-        Self::clear_exit_rules();
-        Self::run_ignore("wg", &["set", interface, "fwmark", "off"]);
-        self.exit_routing = false;
+    fn disable_exit_routing(&mut self, interface: &str, family: &str) {
+        Self::clear_exit_rules(family);
+        self.set_exit_family(family, false);
+        if !self.exit_routing && !self.exit_routing_v6 {
+            Self::run_ignore("wg", &["set", interface, "fwmark", "off"]);
+        }
     }
 
     fn ipv4_forwarding() -> Result<bool, Error> {
@@ -1596,11 +1672,13 @@ impl LinuxNetwork {
 }
 impl Network for LinuxNetwork {
     fn setup(&mut self, interface: &str, key: &Path, addresses: &[String]) -> Result<(), Error> {
-        Self::clear_exit_rules();
+        Self::clear_exit_rules("-4");
+        Self::clear_exit_rules("-6");
         Self::clear_acl_filter(interface);
         self.peer_routes.clear();
         self.installed_routes.clear();
         self.exit_routing = false;
+        self.exit_routing_v6 = false;
         let _ = Command::new("ip")
             .args(["link", "delete", "dev", interface])
             .output();
@@ -1621,11 +1699,28 @@ impl Network for LinuxNetwork {
             .ok_or_else(|| Error::Message("private key path is not UTF-8".into()))?;
         Self::run("wg", &["set", interface, "private-key", key])?;
         Self::replace_addresses(interface, addresses)?;
+        self.addresses = addresses.to_vec();
         Self::run("ip", &["link", "set", "dev", interface, "mtu", TUNNEL_MTU])?;
         Self::run("ip", &["link", "set", "up", "dev", interface])
     }
     fn set_addresses(&mut self, interface: &str, addresses: &[String]) -> Result<(), Error> {
-        Self::replace_addresses(interface, addresses)
+        Self::replace_addresses(interface, addresses)?;
+        // A renumber's old address leaves once the coordinator withdraws it.
+        for stale in self.addresses.iter().filter(|a| !addresses.contains(a)) {
+            Self::run(
+                "ip",
+                &[
+                    iproute_family(stale)?,
+                    "address",
+                    "del",
+                    stale,
+                    "dev",
+                    interface,
+                ],
+            )?;
+        }
+        self.addresses = addresses.to_vec();
+        Ok(())
     }
     fn apply(&mut self, interface: &str, changes: &[PeerChange]) -> Result<(), Error> {
         for change in changes {
@@ -1677,7 +1772,9 @@ impl Network for LinuxNetwork {
         }))
     }
     fn down(&mut self, interface: &str) -> Result<(), Error> {
-        self.disable_exit_routing(interface);
+        self.disable_exit_routing(interface, "-4");
+        self.disable_exit_routing(interface, "-6");
+        self.addresses.clear();
         pq::WgCommandDevice::clear_blocks();
         Self::clear_acl_filter(interface);
         Self::clear_forward_filter(interface);
@@ -1746,45 +1843,43 @@ impl Network for LinuxNetwork {
     /// (`net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding`) are only
     /// touched when that family has advertised routes.
     ///
-    /// The return value preserves the original IPv4-forwarding setting for
-    /// safe restoration (`None` once no routes remain); IPv6 forwarding is
-    /// managed symmetrically inside but its original value is not returned,
-    /// to keep this signature stable for existing callers. On teardown the
-    /// IPv6 flag is restored to `0` only when the stored IPv4 original is
-    /// `Some(false)`, i.e. this node enabled forwarding.
+    /// The return value keeps each family's original forwarding sysctl for
+    /// safe restoration. A family this node stops routing is restored at
+    /// once (only if this node turned it on) and its original becomes
+    /// `None`, so a no-op teardown never touches sysctl.
     fn configure_router(
         &mut self,
         interface: &str,
         previous_routes: &[String],
         desired_routes: &[String],
-        original_ipv4_forward: Option<bool>,
-    ) -> Result<Option<bool>, Error> {
+        originals: ForwardingOriginals,
+    ) -> Result<ForwardingOriginals, Error> {
         let known_routes: HashSet<_> = previous_routes
             .iter()
             .chain(desired_routes)
             .cloned()
             .collect();
         Self::remove_router_rules(interface, &known_routes.into_iter().collect::<Vec<_>>());
-        if desired_routes.is_empty() {
-            if original_ipv4_forward == Some(false) && Self::ipv4_forwarding()? {
-                Self::run("sysctl", &["-w", "net.ipv4.ip_forward=0"])?;
-            }
-            // Symmetric best-effort v6 restore, gated on the same stored
-            // original so a no-op teardown (None) never touches sysctl.
-            if original_ipv4_forward == Some(false) {
-                if let Ok(enabled) = Self::ipv6_forwarding() {
-                    if enabled {
-                        Self::run("sysctl", &["-w", "net.ipv6.conf.all.forwarding=0"])?;
-                    }
-                }
-            }
-            Self::clear_forward_filter(interface);
-            self.router_routes.clear();
-            return Ok(None);
-        }
-
         let has_v4 = desired_routes.iter().any(|route| !is_ipv6_route(route));
         let has_v6 = desired_routes.iter().any(|route| is_ipv6_route(route));
+        let mut result = originals;
+        if !has_v4 {
+            if originals.ipv4 == Some(false) && Self::ipv4_forwarding()? {
+                Self::run("sysctl", &["-w", "net.ipv4.ip_forward=0"])?;
+            }
+            result.ipv4 = None;
+        }
+        if !has_v6 {
+            if originals.ipv6 == Some(false) && Self::ipv6_forwarding()? {
+                Self::run("sysctl", &["-w", "net.ipv6.conf.all.forwarding=0"])?;
+            }
+            result.ipv6 = None;
+        }
+        if desired_routes.is_empty() {
+            Self::clear_forward_filter(interface);
+            self.router_routes.clear();
+            return Ok(result);
+        }
 
         let installed = (|| {
             // With a coordinator allow-list, forwarding goes only through
@@ -1871,42 +1966,41 @@ impl Network for LinuxNetwork {
             Self::remove_router_rules(interface, desired_routes);
             return Err(error);
         }
-        let original = if has_v4 {
-            let current = match Self::ipv4_forwarding() {
+        type ReadForwarding = fn() -> Result<bool, Error>;
+        let families: [(bool, ReadForwarding, &str); 2] = [
+            (has_v4, Self::ipv4_forwarding, "net.ipv4.ip_forward=1"),
+            (
+                has_v6,
+                Self::ipv6_forwarding,
+                "net.ipv6.conf.all.forwarding=1",
+            ),
+        ];
+        for (index, (wanted, read, enable)) in families.into_iter().enumerate() {
+            if !wanted {
+                continue;
+            }
+            let enabled = read().and_then(|current| {
+                if !current {
+                    Self::run("sysctl", &["-w", enable])?;
+                }
+                Ok(current)
+            });
+            let current = match enabled {
                 Ok(current) => current,
                 Err(error) => {
                     Self::remove_router_rules(interface, desired_routes);
                     return Err(error);
                 }
             };
-            let original = original_ipv4_forward.unwrap_or(current);
-            if !current {
-                if let Err(error) = Self::run("sysctl", &["-w", "net.ipv4.ip_forward=1"]) {
-                    Self::remove_router_rules(interface, desired_routes);
-                    return Err(error);
-                }
-            }
-            Some(original)
-        } else {
-            original_ipv4_forward
-        };
-        if has_v6 {
-            let current = match Self::ipv6_forwarding() {
-                Ok(current) => current,
-                Err(error) => {
-                    Self::remove_router_rules(interface, desired_routes);
-                    return Err(error);
-                }
+            let slot = if index == 0 {
+                &mut result.ipv4
+            } else {
+                &mut result.ipv6
             };
-            if !current {
-                if let Err(error) = Self::run("sysctl", &["-w", "net.ipv6.conf.all.forwarding=1"]) {
-                    Self::remove_router_rules(interface, desired_routes);
-                    return Err(error);
-                }
-            }
+            *slot = Some(slot.unwrap_or(current));
         }
         self.router_routes = desired_routes.to_vec();
-        Ok(original)
+        Ok(result)
     }
     fn apply_forward_filter(
         &mut self,
@@ -1939,6 +2033,8 @@ pub struct MacOsNetwork {
     private_hex: String,
     peers: Vec<Peer>,
     installed_routes: HashSet<String>,
+    /// Tunnel addresses currently on the utun.
+    addresses: Vec<String>,
     /// Post-quantum PSKs, re-sent on every `replace_peers` push.
     psks: std::sync::Arc<std::sync::Mutex<HashMap<String, pq::Psk>>>,
 }
@@ -1952,6 +2048,7 @@ impl MacOsNetwork {
             private_hex: String::new(),
             peers: vec![],
             installed_routes: HashSet::new(),
+            addresses: vec![],
             psks: Default::default(),
         }
     }
@@ -2015,17 +2112,40 @@ impl MacOsNetwork {
             .status();
     }
 
-    fn replace_addresses(name: &str, addresses: &[String]) -> Result<(), Error> {
+    fn replace_addresses(
+        name: &str,
+        addresses: &[String],
+        previous: &[String],
+    ) -> Result<(), Error> {
         if addresses.is_empty() {
             return Err(Error::Message(
                 "coordinator returned no tunnel addresses".into(),
             ));
         }
+        // A renumber's withdrawn address leaves first, so the primary IPv4
+        // below is never replaced by an alias that is about to go.
+        for stale in previous.iter().filter(|a| !addresses.contains(a)) {
+            if let Ok((parsed, _)) = parse_cidr(stale) {
+                let family = if parsed.is_ipv4() { "inet" } else { "inet6" };
+                let target = if parsed.is_ipv4() {
+                    parsed.to_string()
+                } else {
+                    stale.clone()
+                };
+                Self::run_ignore("/sbin/ifconfig", &[name, family, &target, "-alias"]);
+            }
+        }
+        let mut first_v4 = true;
         for address in addresses {
             let (parsed, prefix) = parse_cidr(address)?;
             if parsed.is_ipv4() && prefix == 32 {
                 let address = parsed.to_string();
-                Self::run("/sbin/ifconfig", &[name, "inet", &address, &address, "up"])?;
+                // The first IPv4 is the utun's primary; a second one (during a
+                // renumber window) is an alias, not a replacement.
+                let mut args = vec![name, "inet", address.as_str(), address.as_str()];
+                args.push(if first_v4 { "up" } else { "alias" });
+                first_v4 = false;
+                Self::run("/sbin/ifconfig", &args)?;
             } else if parsed.is_ipv6() && prefix == 128 {
                 Self::run_ignore("/sbin/ifconfig", &[name, "inet6", address, "delete"]);
                 Self::run("/sbin/ifconfig", &[name, "inet6", address, "alias"])?;
@@ -2066,7 +2186,7 @@ impl MacOsNetwork {
             .flat_map(|peer| peer.allowed_ips.iter())
             .cloned()
             .collect();
-        if desired.contains("0.0.0.0/0") {
+        if desired.contains("0.0.0.0/0") || desired.contains("::/0") {
             return Err(Error::Message(
                 "exit-node routing is supported on Linux only".into(),
             ));
@@ -2160,7 +2280,8 @@ impl Network for MacOsNetwork {
             return Err(Error::Message("utun name was not reported".into()));
         }
         Self::run("/sbin/ifconfig", &[&name, "mtu", TUNNEL_MTU])?;
-        Self::replace_addresses(&name, addresses)?;
+        Self::replace_addresses(&name, addresses, &[])?;
+        self.addresses = addresses.to_vec();
         self.device = Some(device);
         self.name = Some(name);
         self.peers.clear();
@@ -2168,7 +2289,9 @@ impl Network for MacOsNetwork {
         Ok(())
     }
     fn set_addresses(&mut self, _interface: &str, addresses: &[String]) -> Result<(), Error> {
-        Self::replace_addresses(self.utun_name()?, addresses)
+        Self::replace_addresses(self.utun_name()?, addresses, &self.addresses)?;
+        self.addresses = addresses.to_vec();
+        Ok(())
     }
     fn apply(&mut self, _interface: &str, changes: &[PeerChange]) -> Result<(), Error> {
         if self.name.is_none() {
@@ -2384,36 +2507,98 @@ pub fn validate_advertised_routes(routes: &[String]) -> Result<Vec<String>, Erro
     }
     let mut canonical = routes
         .iter()
-        .map(|route| canonical_ipv4_route(route))
+        .map(|route| {
+            if is_ipv6_route(route) {
+                canonical_ipv6_route(route)
+            } else {
+                canonical_ipv4_route(route)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     canonical.sort();
     canonical.dedup();
+    let default = |route: &str| route == "0.0.0.0/0" || route == "::/0";
     for (index, route) in canonical.iter().enumerate() {
-        if route != "0.0.0.0/0"
-            && !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-                .iter()
-                .any(|private| ipv4_route_is_within(route, private))
+        if default(route) {
+            continue;
+        }
+        if is_ipv6_route(route) {
+            // The coordinator also keeps these off the organisation's /64.
+            let (network, prefix) = ipv6_route_bits(route);
+            let ula = network >> 120 == 0xfd;
+            let global = network >> 125 == 0b001;
+            if !(ula || global) || prefix < 16 {
+                return Err(Error::Message(format!(
+                    "route {route} must be a unique local (fd00::/8) or global unicast (2000::/3) subnet of /16 or longer, or ::/0"
+                )));
+            }
+        } else if !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+            .iter()
+            .any(|private| ipv4_route_is_within(route, private))
         {
             return Err(Error::Message(format!(
                 "route {route} must be an RFC1918 private subnet or 0.0.0.0/0"
             )));
         }
-        if route != "0.0.0.0/0" && ipv4_routes_overlap(route, "100.64.0.0/10") {
+        if !is_ipv6_route(route) && ipv4_routes_overlap(route, "100.64.0.0/10") {
             return Err(Error::Message(format!(
                 "route {route} overlaps the BlakTail address pool"
             )));
         }
-        if route != "0.0.0.0/0"
-            && canonical[index + 1..]
-                .iter()
-                .any(|other| other != "0.0.0.0/0" && ipv4_routes_overlap(route, other))
-        {
+        let overlaps = |other: &String| {
+            !default(other)
+                && is_ipv6_route(other) == is_ipv6_route(route)
+                && if is_ipv6_route(route) {
+                    ipv6_routes_overlap(route, other)
+                } else {
+                    ipv4_routes_overlap(route, other)
+                }
+        };
+        if canonical[index + 1..].iter().any(overlaps) {
             return Err(Error::Message(format!(
                 "route {route} overlaps another advertised route"
             )));
         }
     }
     Ok(canonical)
+}
+
+fn canonical_ipv6_route(route: &str) -> Result<String, Error> {
+    let route = route.trim();
+    let (address, prefix) = parse_cidr(route)
+        .map_err(|_| Error::Message(format!("route {route} must be IPv6 CIDR")))?;
+    let std::net::IpAddr::V6(address) = address else {
+        return Err(Error::Message(format!("route {route} must be IPv6 CIDR")));
+    };
+    if u128::from(address) & !ipv6_mask(prefix) != 0 {
+        return Err(Error::Message(format!(
+            "route {route} is not a network address"
+        )));
+    }
+    Ok(format!("{address}/{prefix}"))
+}
+
+fn ipv6_mask(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(prefix))
+    }
+}
+
+/// A validated IPv6 route as (network bits, prefix length).
+fn ipv6_route_bits(route: &str) -> (u128, u8) {
+    match parse_cidr(route) {
+        Ok((std::net::IpAddr::V6(address), prefix)) => (u128::from(address), prefix),
+        _ => (0, 0),
+    }
+}
+
+fn ipv6_routes_overlap(left: &str, right: &str) -> bool {
+    let (left, left_prefix) = ipv6_route_bits(left);
+    let (right, right_prefix) = ipv6_route_bits(right);
+    let mask = ipv6_mask(left_prefix.min(right_prefix));
+    left & mask == right & mask
 }
 
 fn canonical_ipv4_route(route: &str) -> Result<String, Error> {
@@ -2697,20 +2882,79 @@ mod tests {
         // With no stored original, teardown must not read sysctl at all, so
         // this passes without root or Linux networking tools present.
         let mut network = LinuxNetwork::default();
+        let none = ForwardingOriginals::default();
         assert_eq!(
             network
-                .configure_router("blaktail0", &[], &[], None)
+                .configure_router("blaktail0", &[], &[], none)
                 .unwrap(),
-            None
+            none
         );
         // Best-effort cleanup of stale rules (run_ignore) must not fail.
         let previous = vec!["10.20.0.0/16".to_string(), "fd00::/8".to_string()];
         assert_eq!(
             network
-                .configure_router("blaktail0", &previous, &[], None)
+                .configure_router("blaktail0", &previous, &[], none)
                 .unwrap(),
-            None
+            none
         );
+    }
+
+    #[test]
+    fn renumbered_addresses_become_primary_and_retiring_ones_are_tracked() {
+        let mut state: NodeState = serde_json::from_value(serde_json::json!({
+            "node_id": Uuid::nil(),
+            "node_token": "t",
+            "coord": "https://coord.example",
+            "interface": "blaktail0",
+            "assigned_ip": "100.64.0.1/32",
+            "assigned_ips": ["100.64.0.1/32", "fd00::1/128"],
+        }))
+        .unwrap();
+        let old = vec!["100.64.0.1/32".to_owned(), "fd00::1/128".to_owned()];
+        state.adopt_assigned_ips(
+            vec![
+                "100.64.0.9/32".into(),
+                "fd00::9/128".into(),
+                old[0].clone(),
+                old[1].clone(),
+            ],
+            old.clone(),
+        );
+        assert_eq!(state.assigned_ip, "100.64.0.9/32");
+        assert_eq!(state.ipv6_address(), Some("fd00::9/128"));
+        // Both stay on the interface during the window.
+        assert_eq!(state.interface_addresses().len(), 4);
+        // When the window ends the old ones leave entirely.
+        state.adopt_assigned_ips(
+            vec!["100.64.0.9/32".into(), "fd00::9/128".into()],
+            Vec::new(),
+        );
+        assert_eq!(
+            state.interface_addresses(),
+            vec!["100.64.0.9/32".to_owned(), "fd00::9/128".to_owned()]
+        );
+        assert!(state.retiring_ips.is_empty());
+    }
+
+    #[test]
+    fn ipv6_routes_are_validated_like_the_coordinator() {
+        assert_eq!(
+            validate_advertised_routes(&[
+                "fd42:1::/64".into(),
+                "::/0".into(),
+                "10.1.0.0/16".into(),
+                "2001:db8:7::/48".into(),
+            ])
+            .unwrap(),
+            vec!["10.1.0.0/16", "2001:db8:7::/48", "::/0", "fd42:1::/64"]
+        );
+        for invalid in ["fe80::/64", "fd42::1/64", "2000::/3", "ff02::/16"] {
+            assert!(
+                validate_advertised_routes(&[invalid.into()]).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(validate_advertised_routes(&["fd42::/48".into(), "fd42::/64".into()]).is_err());
     }
 
     #[test]
@@ -2762,6 +3006,8 @@ mod tests {
             exit_node: None,
             exit_node_active: false,
             router_previous_ipv4_forward: None,
+            router_previous_ipv6_forward: None,
+            retiring_ips: Vec::new(),
             peers: vec![expected.clone()],
             relays: vec![],
             relay_token: String::new(),
@@ -2833,6 +3079,8 @@ mod tests {
             exit_node: None,
             exit_node_active: false,
             router_previous_ipv4_forward: None,
+            router_previous_ipv6_forward: None,
+            retiring_ips: Vec::new(),
             peers: vec![],
             relays: vec![],
             relay_token: String::new(),
@@ -2952,6 +3200,7 @@ mod tests {
             revision: Some(9),
             shares: vec![],
             forward_filter: None,
+            retiring_ips: vec![],
         };
         let merged = Coordinator::apply_control_peers(&current, &body);
         assert_eq!(

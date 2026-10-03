@@ -7,6 +7,24 @@ import { can, permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 import { lastSeen, resourceStateLabel } from "./format";
 
+/** IPv6 routes (including the ::/0 exit route) are labelled so they are not mistaken for IPv4. */
+function Routes({ routes }: { routes: string[] }) {
+  if (routes.length === 0) return <>None</>;
+  return (
+    <>
+      {routes.map((route, index) => (
+        <span key={route}>
+          {index ? ", " : null}
+          {route}
+          {route.includes(":") ? (
+            <span className="muted"> ({route === "::/0" ? "IPv6 exit" : "IPv6"})</span>
+          ) : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
 export default async function NetworksPage() {
   const ctx = await requireConsoleContext();
   let overview: NetworksOverview = { resources: [], device_routes: [] };
@@ -115,8 +133,9 @@ export default async function NetworksPage() {
             <p className="muted">
               What each routing peer offers. Unapproved routes are never sent to
               clients. Device-level approvals (on Devices) keep working and go to
-              every device policy lets reach the router; exit nodes (0.0.0.0/0)
-              are only used by clients that choose them.
+              every device policy lets reach the router. IPv6 subnets (unique
+              local or global) are routed like IPv4 ones; exit routes (0.0.0.0/0
+              and ::/0) are only used by clients that choose that exit node.
             </p>
           </div>
           {overview.device_routes.length === 0 ? (
@@ -146,9 +165,15 @@ export default async function NetworksPage() {
                           {device.credential_expired ? "Credential expired" : lastSeen(device.last_seen_at)}
                         </div>
                       </td>
-                      <td className="mono">{device.advertised_routes.join(", ") || "None"}</td>
-                      <td className="mono">{device.approved_routes.join(", ") || "None"}</td>
-                      <td className="mono">{device.unapproved_routes.join(", ") || "None"}</td>
+                      <td className="mono">
+                        <Routes routes={device.advertised_routes} />
+                      </td>
+                      <td className="mono">
+                        <Routes routes={device.approved_routes} />
+                      </td>
+                      <td className="mono">
+                        <Routes routes={device.unapproved_routes} />
+                      </td>
                       <td>
                         {device.forwarding === "enforced" ? (
                           <span className="badge online">Enforced</span>

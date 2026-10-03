@@ -1,18 +1,19 @@
 //! Overlay address management (NetBird-parity draft 26).
 //!
-//! Every device gets one IPv4 host from the organisation pool
-//! `100.64.0.0/24` (inside the CGNAT supernet `100.64.0.0/10`) and the
-//! matching host in the organisation's ULA `/64`, derived from the IPv4 host
-//! number. `ipam_leases` has one row per handed-out IPv4 address and its
-//! primary key is the concurrency guard: two enrolments racing on PostgreSQL
-//! both try to insert the same row and the loser moves to the next address.
-//! Operator reservations are never auto-allocated; a reservation bound to a
-//! device name or WireGuard key is handed to that device when it enrols.
+//! Every device gets one IPv4 host from the organisation's pool (by default
+//! `100.64.0.0/24`; owners can grow it to a `/20`, always inside the CGNAT
+//! supernet `100.64.0.0/10`) and the matching host in the organisation's ULA
+//! `/64`, derived from the IPv4 address's offset inside `100.64.0.0/10`.
+//! `ipam_leases` has one row per handed-out IPv4 address and its primary key
+//! is the concurrency guard: two enrolments racing on PostgreSQL both try to
+//! insert the same row and the loser moves to the next address. Operator
+//! reservations are never auto-allocated; a reservation bound to a device
+//! name or WireGuard key is handed to that device when it enrols.
 
 use crate::{
     append_audit, console_session, hash, ipam, now, org_ula_address,
     permissions::{require, Permission},
-    ApiError, AppState, Session,
+    renumber, ApiError, AppState, Session,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -31,10 +32,13 @@ use uuid::Uuid;
 /// device's address is never handed to a different device while the
 /// tombstone (and any cached peer map or DNS answer naming it) can still exist.
 pub(crate) const ADDRESS_REUSE_GRACE_SECS: i64 = 7 * 24 * 60 * 60;
-const POOL_V4: &str = "100.64.0.0/24";
+pub(crate) const DEFAULT_POOL_V4: &str = "100.64.0.0/24";
 const SUPERNET_V4: &str = "100.64.0.0/10";
-const FIRST_HOST: u8 = 1;
-const LAST_HOST: u8 = 254;
+const CGNAT_BASE: u32 = 0x6440_0000;
+const CGNAT_PREFIX: u8 = 10;
+/// Largest pool an organisation may use (4094 devices).
+pub(crate) const MIN_POOL_PREFIX: u8 = 20;
+pub(crate) const MAX_POOL_PREFIX: u8 = 24;
 const MAX_RESERVATIONS: usize = 128;
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -50,25 +54,116 @@ pub(crate) fn routes() -> Router<AppState> {
         )
 }
 
-fn pool_address(host: u8) -> String {
-    format!("100.64.0.{host}/32")
+/// An organisation's IPv4 device pool: a `/20` to `/24` inside
+/// `100.64.0.0/10`. The network and broadcast addresses are never handed out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Pool {
+    network: u32,
+    prefix: u8,
 }
 
-fn pool_host(address: &str) -> Option<u8> {
+impl Pool {
+    pub(crate) fn parse(cidr: &str) -> Result<Self, String> {
+        let cidr = cidr.trim();
+        let (address, prefix) = cidr
+            .split_once('/')
+            .ok_or_else(|| format!("{cidr} must use CIDR notation"))?;
+        let address: Ipv4Addr = address
+            .parse()
+            .map_err(|_| format!("{cidr} is not an IPv4 CIDR"))?;
+        let prefix: u8 = prefix
+            .parse()
+            .map_err(|_| format!("{cidr} has an invalid prefix"))?;
+        if !(MIN_POOL_PREFIX..=MAX_POOL_PREFIX).contains(&prefix) {
+            return Err(format!(
+                "the device pool must be a /{MIN_POOL_PREFIX} to /{MAX_POOL_PREFIX}"
+            ));
+        }
+        let network = u32::from(address);
+        if network & !mask(prefix) != 0 {
+            return Err(format!(
+                "{cidr} is not a network address; use {}/{prefix}",
+                Ipv4Addr::from(network & mask(prefix))
+            ));
+        }
+        if network & mask(CGNAT_PREFIX) != CGNAT_BASE {
+            return Err(format!("the device pool must be inside {SUPERNET_V4}"));
+        }
+        Ok(Self { network, prefix })
+    }
+
+    pub(crate) fn cidr(&self) -> String {
+        format!("{}/{}", Ipv4Addr::from(self.network), self.prefix)
+    }
+
+    fn broadcast(&self) -> u32 {
+        self.network | !mask(self.prefix)
+    }
+
+    pub(crate) fn usable(&self) -> u32 {
+        self.broadcast() - self.network - 1
+    }
+
+    pub(crate) fn hosts(&self) -> impl Iterator<Item = u32> {
+        self.network + 1..self.broadcast()
+    }
+
+    fn contains_ip(&self, ip: u32) -> bool {
+        ip > self.network && ip < self.broadcast()
+    }
+
+    /// Whether `address` (`a.b.c.d/32`) is a usable host of this pool.
+    pub(crate) fn contains(&self, address: &str) -> bool {
+        v4_host(address).is_some_and(|ip| self.contains_ip(ip))
+    }
+}
+
+fn mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
+}
+
+/// The IPv4 host of an `a.b.c.d/32` overlay address.
+pub(crate) fn v4_host(address: &str) -> Option<u32> {
     let ip: Ipv4Addr = address.strip_suffix("/32")?.parse().ok()?;
-    let octets = ip.octets();
-    (octets[..3] == [100, 64, 0] && (FIRST_HOST..=LAST_HOST).contains(&octets[3]))
-        .then_some(octets[3])
+    Some(u32::from(ip))
 }
 
-fn bare(address: &str) -> String {
+pub(crate) fn host_address(ip: u32) -> String {
+    format!("{}/32", Ipv4Addr::from(ip))
+}
+
+/// Offset of an `a.b.c.d/32` overlay address inside `100.64.0.0/10`; the
+/// IPv6 twin's host part.
+pub(crate) fn cgnat_offset(address: &str) -> Option<u32> {
+    let ip = v4_host(address)?;
+    (ip & mask(CGNAT_PREFIX) == CGNAT_BASE && ip != CGNAT_BASE).then_some(ip - CGNAT_BASE)
+}
+
+/// The organisation ULA address paired with an IPv4 overlay address.
+pub(crate) fn ipv6_twin(org_id: &str, address: &str) -> Option<String> {
+    cgnat_offset(address).map(|offset| org_ula_address(org_id, offset))
+}
+
+pub(crate) async fn load_pool(conn: &mut AnyConnection, org_id: &str) -> Result<Pool, ApiError> {
+    let cidr: Option<String> = sqlx::query_scalar("SELECT ipv4_pool_cidr FROM orgs WHERE id=$1")
+        .bind(org_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Pool::parse(cidr.as_deref().unwrap_or(DEFAULT_POOL_V4)).map_err(|_| ApiError::CorruptData)
+}
+
+pub(crate) fn bare(address: &str) -> String {
     address
         .split_once('/')
         .map_or(address, |(ip, _)| ip)
         .to_owned()
 }
 
-fn org_ula_pool(org_id: &str) -> String {
+pub(crate) fn org_ula_pool(org_id: &str) -> String {
     format!("{}/64", bare(&org_ula_address(org_id, 0)))
 }
 
@@ -82,22 +177,22 @@ fn key_fingerprint(key: &str) -> String {
     format!("{}…", key.chars().take(8).collect::<String>())
 }
 
-struct NodeRow {
-    id: String,
-    name: String,
-    label: String,
+pub(crate) struct NodeRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) label: String,
     wg_public_key: String,
-    addresses: Vec<String>,
+    pub(crate) addresses: Vec<String>,
     revoked_at: Option<i64>,
     deleted_at: Option<i64>,
 }
 
 impl NodeRow {
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.revoked_at.is_none() && self.deleted_at.is_none()
     }
-    fn pool_address(&self) -> Option<&String> {
-        self.addresses.iter().find(|a| pool_host(a).is_some())
+    fn pool_address(&self, pool: &Pool) -> Option<&String> {
+        self.addresses.iter().find(|a| pool.contains(a))
     }
 }
 
@@ -107,9 +202,9 @@ struct LeaseRow {
     released_at: Option<i64>,
 }
 
-struct ReservationRow {
+pub(crate) struct ReservationRow {
     id: String,
-    address: String,
+    pub(crate) address: String,
     bound_name: Option<String>,
     bound_wg_public_key: Option<String>,
     reason: String,
@@ -119,13 +214,19 @@ struct ReservationRow {
 }
 
 impl ReservationRow {
-    fn binds(&self, name: &str, wg_public_key: &str) -> bool {
+    pub(crate) fn binds(&self, name: &str, wg_public_key: &str) -> bool {
         self.bound_name.as_deref() == Some(name)
             || self.bound_wg_public_key.as_deref() == Some(wg_public_key)
     }
+    pub(crate) fn binds_node(&self, node: &NodeRow) -> bool {
+        self.binds(&node.name, &node.wg_public_key)
+    }
 }
 
-async fn load_nodes(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<NodeRow>, ApiError> {
+pub(crate) async fn load_nodes(
+    conn: &mut AnyConnection,
+    org_id: &str,
+) -> Result<Vec<NodeRow>, ApiError> {
     let rows = sqlx::query(
         "SELECT id,name,COALESCE(NULLIF(TRIM(display_name),''),name),wg_public_key,allowed_ips_json,CAST(revoked_at AS BIGINT),CAST(deleted_at AS BIGINT) FROM nodes WHERE org_id=$1 ORDER BY name",
     )
@@ -165,7 +266,7 @@ async fn load_leases(conn: &mut AnyConnection, org_id: &str) -> Result<Vec<Lease
         .collect()
 }
 
-async fn load_reservations(
+pub(crate) async fn load_reservations(
     conn: &mut AnyConnection,
     org_id: &str,
 ) -> Result<Vec<ReservationRow>, ApiError> {
@@ -194,7 +295,11 @@ async fn load_reservations(
 /// Starts the reuse grace period for leases whose device is revoked,
 /// deleted or already purged. Purged rows are stamped when first noticed,
 /// which is never earlier than the deletion itself.
-async fn stamp_releases(conn: &mut AnyConnection, org_id: &str, at: i64) -> Result<(), ApiError> {
+pub(crate) async fn stamp_releases(
+    conn: &mut AnyConnection,
+    org_id: &str,
+    at: i64,
+) -> Result<(), ApiError> {
     sqlx::query(
         "UPDATE ipam_leases SET released_at=(SELECT CAST(COALESCE(n.deleted_at,n.revoked_at) AS BIGINT) FROM nodes n WHERE n.id=ipam_leases.node_id) WHERE org_id=$1 AND released_at IS NULL AND node_id IN (SELECT id FROM nodes WHERE org_id=$1 AND (deleted_at IS NOT NULL OR revoked_at IS NOT NULL))",
     )
@@ -217,6 +322,61 @@ fn lease_held(lease: &LeaseRow, at: i64) -> bool {
         .is_none_or(|released| released > at - ADDRESS_REUSE_GRACE_SECS)
 }
 
+/// Every IPv4 host automatic allocation must skip: device addresses (old and
+/// new during a renumber), leases still held or in grace, and reservations.
+pub(crate) async fn blocked_hosts(
+    conn: &mut AnyConnection,
+    org_id: &str,
+    at: i64,
+) -> Result<BTreeSet<u32>, ApiError> {
+    let mut blocked = BTreeSet::new();
+    blocked.extend(
+        load_nodes(conn, org_id)
+            .await?
+            .iter()
+            .flat_map(|node| node.addresses.iter())
+            .filter_map(|address| v4_host(address)),
+    );
+    blocked.extend(
+        load_leases(conn, org_id)
+            .await?
+            .iter()
+            .filter(|lease| lease_held(lease, at))
+            .filter_map(|lease| v4_host(&lease.address)),
+    );
+    blocked.extend(
+        load_reservations(conn, org_id)
+            .await?
+            .iter()
+            .filter_map(|reservation| v4_host(&reservation.address)),
+    );
+    Ok(blocked)
+}
+
+/// Inserts the lease for `address` unless another device or a lease still
+/// in its grace period holds it. Zero rows means a concurrent enrolment holds
+/// it (on PostgreSQL the insert waits for that transaction to commit).
+pub(crate) async fn take_lease(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: &str,
+    address: &str,
+    node_id: &str,
+    at: i64,
+) -> Result<bool, ApiError> {
+    let inserted = sqlx::query(
+        "INSERT INTO ipam_leases(org_id,address,node_id,allocated_at,released_at) VALUES($1,$2,$3,$4,NULL) ON CONFLICT (org_id,address) DO UPDATE SET node_id=excluded.node_id,allocated_at=excluded.allocated_at,released_at=NULL WHERE ipam_leases.released_at IS NOT NULL AND ipam_leases.released_at<=$5",
+    )
+    .bind(org_id)
+    .bind(address)
+    .bind(node_id)
+    .bind(at)
+    .bind(at - ADDRESS_REUSE_GRACE_SECS)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    Ok(inserted > 0)
+}
+
 /// Picks and leases the overlay addresses for a device being registered in
 /// `tx`. A reservation bound to `name` or `wg_public_key` wins; otherwise
 /// the lowest free host that no device row, held lease or reservation uses.
@@ -229,15 +389,15 @@ pub(crate) async fn allocate(
 ) -> Result<Vec<String>, ApiError> {
     let at = now();
     stamp_releases(tx, org_id, at).await?;
+    let pool = load_pool(tx, org_id).await?;
     let nodes = load_nodes(tx, org_id).await?;
-    let leases = load_leases(tx, org_id).await?;
     let reservations = load_reservations(tx, org_id).await?;
 
     if let Some(reservation) = reservations
         .iter()
         .find(|reservation| reservation.binds(name, wg_public_key))
     {
-        let host = pool_host(&reservation.address).ok_or(ApiError::CorruptData)?;
+        let ipv6 = ipv6_twin(org_id, &reservation.address).ok_or(ApiError::CorruptData)?;
         if let Some(holder) = nodes
             .iter()
             .find(|node| node.active() && node.addresses.contains(&reservation.address))
@@ -266,58 +426,27 @@ pub(crate) async fn allocate(
                 bare(&reservation.address)
             )));
         }
-        return Ok(vec![
-            reservation.address.clone(),
-            org_ula_address(org_id, host),
-        ]);
+        return Ok(vec![reservation.address.clone(), ipv6]);
     }
 
-    let mut blocked = BTreeSet::new();
-    blocked.extend(
-        nodes
-            .iter()
-            .flat_map(|node| node.addresses.iter())
-            .filter_map(|address| pool_host(address)),
-    );
-    blocked.extend(
-        leases
-            .iter()
-            .filter(|lease| lease_held(lease, at))
-            .filter_map(|lease| pool_host(&lease.address)),
-    );
-    blocked.extend(
-        reservations
-            .iter()
-            .filter_map(|reservation| pool_host(&reservation.address)),
-    );
-    let grace_cutoff = at - ADDRESS_REUSE_GRACE_SECS;
-    for host in (FIRST_HOST..=LAST_HOST).filter(|host| !blocked.contains(host)) {
-        let address = pool_address(host);
-        // Zero rows means a concurrent enrolment holds this address (on
-        // PostgreSQL the insert waits for it to commit); try the next one.
-        let inserted = sqlx::query(
-            "INSERT INTO ipam_leases(org_id,address,node_id,allocated_at,released_at) VALUES($1,$2,$3,$4,NULL) ON CONFLICT (org_id,address) DO UPDATE SET node_id=excluded.node_id,allocated_at=excluded.allocated_at,released_at=NULL WHERE ipam_leases.released_at IS NOT NULL AND ipam_leases.released_at<=$5",
-        )
-        .bind(org_id)
-        .bind(&address)
-        .bind(node_id.to_string())
-        .bind(at)
-        .bind(grace_cutoff)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-        if inserted > 0 {
-            return Ok(vec![address, org_ula_address(org_id, host)]);
+    let blocked = blocked_hosts(tx, org_id, at).await?;
+    for ip in pool.hosts().filter(|ip| !blocked.contains(ip)) {
+        let address = host_address(ip);
+        if take_lease(tx, org_id, &address, &node_id.to_string(), at).await? {
+            let ipv6 = ipv6_twin(org_id, &address).ok_or(ApiError::CorruptData)?;
+            return Ok(vec![address, ipv6]);
         }
     }
-    let in_grace = leases
+    let in_grace = load_leases(tx, org_id)
+        .await?
         .iter()
         .filter(|lease| lease.released_at.is_some() && lease_held(lease, at))
         .count();
     Err(ApiError::Conflict(format!(
-        "tailnet address pool exhausted ({} of {} addresses are reserved or in the {}-day reuse grace period)",
+        "tailnet address pool {} exhausted ({} of {} addresses are reserved or in the {}-day reuse grace period); an owner can grow the pool under Networks → Addresses",
+        pool.cidr(),
         in_grace + reservations.len(),
-        LAST_HOST,
+        pool.usable(),
         ADDRESS_REUSE_GRACE_SECS / 86_400
     )))
 }
@@ -339,11 +468,11 @@ pub(crate) struct PoolSummary {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct AddressEntry {
-    address: String,
-    ipv6: String,
-    /// active, revoked, tombstoned or released.
-    state: String,
-    node_id: Option<String>,
+    pub(crate) address: String,
+    pub(crate) ipv6: String,
+    /// active, retiring, revoked, tombstoned or released.
+    pub(crate) state: String,
+    pub(crate) node_id: Option<String>,
     node_name: Option<String>,
     released_at: Option<i64>,
     /// Earliest time automatic allocation may hand the address out again.
@@ -377,12 +506,15 @@ pub(crate) struct AddressConflict {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct IpamView {
-    pools: Vec<PoolSummary>,
-    addresses: Vec<AddressEntry>,
+    pub(crate) pools: Vec<PoolSummary>,
+    pub(crate) addresses: Vec<AddressEntry>,
     reservations: Vec<ReservationView>,
-    conflicts: Vec<AddressConflict>,
+    pub(crate) conflicts: Vec<AddressConflict>,
     reuse_grace_seconds: i64,
     next_free: Option<String>,
+    /// Pool sizes an owner may grow to, as prefix lengths.
+    pool_prefix_range: [u8; 2],
+    pub(crate) renumber: renumber::RenumberSummary,
 }
 
 async fn load_wg_only_allowed(
@@ -405,15 +537,23 @@ async fn load_wg_only_allowed(
         .collect()
 }
 
-async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiError> {
+pub(crate) async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiError> {
     let at = now();
+    let pool = load_pool(conn, org_id).await?;
     let nodes = load_nodes(conn, org_id).await?;
     let leases = load_leases(conn, org_id).await?;
     let reservations = load_reservations(conn, org_id).await?;
+    let renumber = renumber::summary(conn, org_id).await?;
+    let retiring: BTreeSet<String> = renumber
+        .staged
+        .iter()
+        .flat_map(|plan| plan.moves.iter())
+        .flat_map(|change| change.old_addresses.iter().cloned())
+        .collect();
     let ula = org_ula_pool(org_id);
     let ipv6_of = |address: &str| {
-        pool_host(address)
-            .map(|host| bare(&org_ula_address(org_id, host)))
+        ipv6_twin(org_id, address)
+            .map(|ipv6| bare(&ipv6))
             .unwrap_or_default()
     };
     let reservation_for = |address: &str| {
@@ -430,63 +570,72 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
     let mut used = BTreeSet::new();
     let mut in_grace = BTreeSet::new();
     for node in &nodes {
-        let Some(address) = node.pool_address() else {
-            if node.active() {
-                for address in node.addresses.iter().filter(|a| !a.contains(':')) {
+        for address in node.addresses.iter().filter(|a| !a.contains(':')) {
+            let retiring_address = retiring.contains(address);
+            if !pool.contains(address) && !retiring_address {
+                if node.active() {
                     conflicts.push(AddressConflict {
                         address: bare(address),
                         kind: "outside_pool".into(),
                         detail: format!(
-                            "{} uses an address outside {POOL_V4}; it was not assigned by this pool",
-                            node.label
+                            "{} uses an address outside {}; it was not assigned by this pool",
+                            node.label,
+                            pool.cidr()
                         ),
                     });
                 }
+                continue;
             }
-            continue;
-        };
-        let (state, released_at, reusable_at) = match (node.deleted_at, node.revoked_at) {
-            (Some(deleted), _) => (
-                "tombstoned",
-                Some(deleted),
-                Some(deleted + ADDRESS_REUSE_GRACE_SECS),
-            ),
-            (None, Some(revoked)) => ("revoked", Some(revoked), None),
-            (None, None) => ("active", None, None),
-        };
-        if node.active() {
-            active_by_address.entry(address).or_default().push(node);
-            used.insert(address.clone());
-        } else if node.deleted_at.is_some() {
-            in_grace.insert(address.clone());
-        } else {
-            used.insert(address.clone());
+            let (state, released_at, reusable_at) = match (node.deleted_at, node.revoked_at) {
+                (Some(deleted), _) => (
+                    "tombstoned",
+                    Some(deleted),
+                    Some(deleted + ADDRESS_REUSE_GRACE_SECS),
+                ),
+                (None, Some(revoked)) => ("revoked", Some(revoked), None),
+                (None, None) if retiring_address => ("retiring", None, None),
+                (None, None) => ("active", None, None),
+            };
+            if node.active() {
+                if !retiring_address {
+                    active_by_address.entry(address).or_default().push(node);
+                }
+                used.insert(address.clone());
+            } else if node.deleted_at.is_some() {
+                in_grace.insert(address.clone());
+            } else {
+                used.insert(address.clone());
+            }
+            seen.insert(address.clone());
+            addresses.push(AddressEntry {
+                address: bare(address),
+                ipv6: ipv6_of(address),
+                state: state.into(),
+                node_id: Some(node.id.clone()),
+                node_name: Some(node.label.clone()),
+                released_at,
+                reusable_at,
+                reservation_id: reservation_for(address),
+            });
         }
-        seen.insert(address.clone());
-        addresses.push(AddressEntry {
-            address: bare(address),
-            ipv6: ipv6_of(address),
-            state: state.into(),
-            node_id: Some(node.id.clone()),
-            node_name: Some(node.label.clone()),
-            released_at,
-            reusable_at,
-            reservation_id: reservation_for(address),
-        });
     }
     for lease in leases
         .iter()
         .filter(|lease| !seen.contains(&lease.address) && lease_held(lease, at))
     {
-        // A lease with no device row: the tombstone was purged.
-        if lease
-            .node_id
-            .as_ref()
-            .is_some_and(|id| nodes.iter().any(|n| &n.id == id))
+        // A lease no device row names any more: its device was purged, or a
+        // renumber withdrew the address. Either way it waits out the grace.
+        if lease.released_at.is_none()
+            && lease
+                .node_id
+                .as_ref()
+                .is_some_and(|id| nodes.iter().any(|n| &n.id == id))
         {
             continue;
         }
-        in_grace.insert(lease.address.clone());
+        if pool.contains(&lease.address) {
+            in_grace.insert(lease.address.clone());
+        }
         addresses.push(AddressEntry {
             address: bare(&lease.address),
             ipv6: ipv6_of(&lease.address),
@@ -533,9 +682,9 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
         let bound = reservation.bound_name.is_some() || reservation.bound_wg_public_key.is_some();
         let bound_node = nodes
             .iter()
-            .find(|node| node.active() && reservation.binds(&node.name, &node.wg_public_key));
+            .find(|node| node.active() && reservation.binds_node(node));
         let (state, detail) = match (holder, bound_node) {
-            (Some(holder), _) if reservation.binds(&holder.name, &holder.wg_public_key) => (
+            (Some(holder), _) if reservation.binds_node(holder) => (
                 "assigned",
                 format!("in use by {}, as reserved", holder.label),
             ),
@@ -553,9 +702,9 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
             (None, Some(node)) => (
                 "pending_reenrolment",
                 format!(
-                    "{} currently uses {}; it receives this address only when it enrols again",
+                    "{} currently uses {}; renumber it to this address or it receives it when it enrols again",
                     node.label,
-                    node.pool_address().map(|a| bare(a)).unwrap_or_default()
+                    node.pool_address(&pool).map(|a| bare(a)).unwrap_or_default()
                 ),
             ),
             (None, None) if bound => (
@@ -597,20 +746,25 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
         }
     }
 
+    let used: BTreeSet<_> = used
+        .into_iter()
+        .filter(|address| pool.contains(address))
+        .collect();
     let reserved: BTreeSet<_> = reservations
         .iter()
         .map(|reservation| reservation.address.clone())
-        .filter(|address| !used.contains(address))
+        .filter(|address| !used.contains(address) && pool.contains(address))
         .collect();
     let taken: BTreeSet<_> = used
         .union(&in_grace)
         .chain(reserved.iter())
         .cloned()
         .collect();
-    let usable = u32::from(LAST_HOST - FIRST_HOST + 1);
+    let usable = pool.usable();
     let available = usable.saturating_sub(taken.len() as u32);
-    let next_free = (FIRST_HOST..=LAST_HOST)
-        .map(pool_address)
+    let next_free = pool
+        .hosts()
+        .map(host_address)
         .find(|address| !taken.contains(address))
         .map(|address| bare(&address));
     let summary = |family: &str, cidr: String, supernet: &str, note: &str| PoolSummary {
@@ -628,7 +782,7 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
         pools: vec![
             summary(
                 "ipv4",
-                POOL_V4.into(),
+                pool.cidr(),
                 SUPERNET_V4,
                 "Shared CGNAT range; each organisation's peer map is separate, so the same address in another organisation never reaches your devices.",
             ),
@@ -636,7 +790,7 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
                 "ipv6",
                 ula.clone(),
                 "fd00::/8",
-                "Unique local /64 derived from this organisation's ID. Each device's IPv6 host number mirrors its IPv4 host number.",
+                "Unique local /64 derived from this organisation's ID. Each device's IPv6 host part is its IPv4 address's offset inside 100.64.0.0/10.",
             ),
         ],
         addresses,
@@ -644,6 +798,8 @@ async fn view(conn: &mut AnyConnection, org_id: &str) -> Result<IpamView, ApiErr
         conflicts,
         reuse_grace_seconds: ADDRESS_REUSE_GRACE_SECS,
         next_free,
+        pool_prefix_range: [MIN_POOL_PREFIX, MAX_POOL_PREFIX],
+        renumber,
     })
 }
 
@@ -673,17 +829,21 @@ fn optional_text(value: Option<&str>, label: &str) -> Result<Option<String>, Api
     Ok(Some(value.to_owned()))
 }
 
-fn canonical_pool_address(value: &str) -> Result<String, ApiError> {
+/// A usable host of `pool` as `a.b.c.d/32`.
+pub(crate) fn canonical_pool_address(value: &str, pool: &Pool) -> Result<String, ApiError> {
     let value = value.trim();
     let ip = value.strip_suffix("/32").unwrap_or(value);
-    let pool = [ipam::IpamPool {
+    let pools = [ipam::IpamPool {
         name: "devices".into(),
-        cidr: POOL_V4.into(),
+        cidr: pool.cidr(),
         exclusions: Vec::new(),
     }];
-    ipam::validate_reservation(&pool, ip).map_err(|error| {
+    ipam::validate_reservation(&pools, ip).map_err(|error| {
         ApiError::BadRequest(format!(
-            "{error}; reserve a host address in {POOL_V4} (100.64.0.1 to 100.64.0.254)"
+            "{error}; choose a host address in {} ({} to {})",
+            pool.cidr(),
+            Ipv4Addr::from(pool.network + 1),
+            Ipv4Addr::from(pool.broadcast() - 1)
         ))
     })?;
     let parsed: Ipv4Addr = ip
@@ -699,7 +859,6 @@ async fn reserve(
     input: ReserveInput,
 ) -> Result<(StatusCode, ReservationView), ApiError> {
     let org = org_id.to_string();
-    let address = canonical_pool_address(&input.address)?;
     let bound_name = optional_text(input.bound_name.as_deref(), "device name")?;
     let bound_wg_public_key =
         optional_text(input.bound_wg_public_key.as_deref(), "WireGuard public key")?;
@@ -710,6 +869,8 @@ async fn reserve(
         ));
     }
     let mut tx = state.store.pool.begin().await?;
+    let pool = load_pool(&mut tx, &org).await?;
+    let address = canonical_pool_address(&input.address, &pool)?;
     let at = now();
     stamp_releases(&mut tx, &org, at).await?;
     let reservations = load_reservations(&mut tx, &org).await?;
@@ -953,19 +1114,72 @@ mod tests {
 
     #[test]
     fn pool_hosts_are_parsed_strictly() {
-        assert_eq!(pool_host("100.64.0.1/32"), Some(1));
-        assert_eq!(pool_host("100.64.0.254/32"), Some(254));
-        assert_eq!(pool_host("100.64.0.0/32"), None);
-        assert_eq!(pool_host("100.64.0.255/32"), None);
-        assert_eq!(pool_host("100.64.1.5/32"), None);
-        assert_eq!(pool_host("100.64.0.5"), None);
-        assert!(canonical_pool_address("100.64.0.0").is_err());
-        assert!(canonical_pool_address("100.64.0.255").is_err());
-        assert!(canonical_pool_address("10.0.0.1").is_err());
+        let pool = Pool::parse(DEFAULT_POOL_V4).unwrap();
+        assert!(pool.contains("100.64.0.1/32"));
+        assert!(pool.contains("100.64.0.254/32"));
+        assert!(!pool.contains("100.64.0.0/32"));
+        assert!(!pool.contains("100.64.0.255/32"));
+        assert!(!pool.contains("100.64.1.5/32"));
+        assert!(!pool.contains("100.64.0.5"));
+        assert_eq!(pool.usable(), 254);
+        assert!(canonical_pool_address("100.64.0.0", &pool).is_err());
+        assert!(canonical_pool_address("100.64.0.255", &pool).is_err());
+        assert!(canonical_pool_address("10.0.0.1", &pool).is_err());
         assert_eq!(
-            canonical_pool_address(" 100.64.0.9/32 ").unwrap(),
+            canonical_pool_address(" 100.64.0.9/32 ", &pool).unwrap(),
             "100.64.0.9/32"
         );
+
+        let wide = Pool::parse("100.64.0.0/22").unwrap();
+        assert_eq!(wide.usable(), 1022);
+        assert!(wide.contains("100.64.0.255/32"));
+        assert!(wide.contains("100.64.3.254/32"));
+        assert!(!wide.contains("100.64.3.255/32"));
+        assert!(canonical_pool_address("100.64.1.0", &wide).is_ok());
+        for invalid in [
+            "100.64.0.0/25",
+            "100.64.0.0/19",
+            "100.64.1.0/22",
+            "10.0.0.0/24",
+            "100.128.0.0/24",
+        ] {
+            assert!(Pool::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn ipv6_twins_keep_existing_addresses_and_stay_unique_in_wide_pools() {
+        use sha2::Digest;
+        let org = "6a1e0c5e-6f7b-4a1c-9a63-1d4f2b8e9c10";
+        // The pre-growth derivation put the host octet in the last byte.
+        let digest = sha2::Sha256::digest(org.as_bytes());
+        let mut legacy = [0_u8; 16];
+        legacy[0] = 0xfd;
+        legacy[1..8].copy_from_slice(&digest[..7]);
+        for host in 1..=254_u8 {
+            legacy[15] = host;
+            assert_eq!(
+                ipv6_twin(org, &format!("100.64.0.{host}/32")).unwrap(),
+                format!("{}/128", std::net::Ipv6Addr::from(legacy))
+            );
+        }
+        let wide = Pool::parse("100.64.0.0/20").unwrap();
+        let twins: BTreeSet<_> = wide
+            .hosts()
+            .map(|ip| ipv6_twin(org, &host_address(ip)).unwrap())
+            .collect();
+        assert_eq!(twins.len(), wide.usable() as usize);
+        assert!(twins.iter().all(|twin| ipam::address_in_pool(
+            &bare(twin),
+            &ipam::IpamPool {
+                name: "ula".into(),
+                cidr: org_ula_pool(org),
+                exclusions: Vec::new(),
+            }
+        )
+        .unwrap()));
+        assert_eq!(cgnat_offset("100.64.0.0/32"), None);
+        assert_eq!(cgnat_offset("100.65.0.1/32"), Some(65_537));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

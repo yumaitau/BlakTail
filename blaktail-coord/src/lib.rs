@@ -23,6 +23,7 @@ mod post_quantum;
 mod posture;
 mod posture_integrations;
 mod private_services;
+mod renumber;
 mod resources;
 mod service_users;
 mod shares;
@@ -1538,6 +1539,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(peer_lifecycle::routes())
         .merge(resources::routes())
         .merge(address_pool::routes())
+        .merge(renumber::routes())
         .merge(app_connectors::routes())
         .merge(service_users::routes())
         .merge(posture::routes())
@@ -2770,6 +2772,7 @@ async fn register_node(
     if grant.single_use && grant.used {
         return Err(ApiError::Unauthorized);
     }
+    ensure_routes_outside_overlay(&grant.org_id, &advertised_routes)?;
     peer_lifecycle::claim_join_key(&mut tx, &grant.key_id).await?;
     if grant
         .bound_name
@@ -2916,6 +2919,7 @@ async fn update_advertised_routes(
     if suspended_at.is_some() {
         return Err(ApiError::Suspended);
     }
+    ensure_routes_outside_overlay(&org_id, &routes)?;
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -3047,13 +3051,13 @@ async fn approve_node_routes(
         .iter()
         .filter(|(_, expires_at, _)| *expires_at > approval_time)
         .flat_map(|(_, _, json)| serde_json::from_str::<Vec<String>>(json).unwrap_or_default())
-        .filter(|route| route != "0.0.0.0/0")
+        .filter(|route| !resources::is_default_route(route))
         .collect::<Vec<_>>();
     if let Some(route) = approved.iter().find(|route| {
-        route.as_str() != "0.0.0.0/0"
+        !resources::is_default_route(route)
             && other_routes
                 .iter()
-                .any(|other| ipv4_routes_overlap(route, other))
+                .any(|other| routes_overlap(route, other))
     }) {
         return Err(ApiError::Conflict(format!(
             "route {route} overlaps another approved subnet router"
@@ -3061,7 +3065,7 @@ async fn approve_node_routes(
     }
     let approved_subnets: Vec<_> = approved
         .iter()
-        .filter(|route| route.as_str() != "0.0.0.0/0")
+        .filter(|route| !resources::is_default_route(route))
         .collect();
     for (other_id, expires_at, routes_json) in other_nodes {
         if expires_at > approval_time {
@@ -3070,10 +3074,10 @@ async fn approve_node_routes(
         let mut routes: Vec<String> = serde_json::from_str(&routes_json).unwrap_or_default();
         let original_len = routes.len();
         routes.retain(|route| {
-            route == "0.0.0.0/0"
+            resources::is_default_route(route)
                 || !approved_subnets
                     .iter()
-                    .any(|approved| ipv4_routes_overlap(route, approved))
+                    .any(|approved| routes_overlap(route, approved))
         });
         if routes.len() != original_len {
             sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2")
@@ -3099,6 +3103,8 @@ async fn approve_node_routes(
         &serde_json::json!({"approved_routes": approved}),
     )
     .await?;
+    // Long-polling peers and routers only recompile on a revision change.
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     tx.commit().await?;
     info!(%node_id, %org_id, routes = approved.len(), "node routes approved");
     Ok(StatusCode::NO_CONTENT)
@@ -3256,6 +3262,11 @@ struct PeersResponse {
     /// may forward from the overlay when it routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forward_filter: Option<forwarding::ForwardFilter>,
+    /// Overlay addresses (this node's or a peer's) being withdrawn by a
+    /// staged renumber: still routed and accepted, but not answered by
+    /// MagicDNS and not used as this node's primary address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retiring_ips: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3365,6 +3376,8 @@ async fn list_peers(
         .await?;
     expire_ephemeral_nodes(&s.store, &org).await?;
     wg_only::expire_overlaps(&s.store.pool, &org).await?;
+    renumber::complete_due(&s.store.pool, &org).await?;
+    let retiring = renumber::retiring(&s.store.pool, &org).await?;
     let source_capabilities = posture::record_report(
         &s.store,
         &org,
@@ -3509,18 +3522,18 @@ async fn list_peers(
                     || requested == peer.dns_name
             });
             for route in approved {
-                if route == "0.0.0.0/0" {
+                if resources::is_default_route(&route) {
                     if exit_matches {
+                        exit_node_active |= selection.ipv6 || !route.contains(':');
                         peer.allowed_ips.push(route);
-                        exit_node_active = true;
                     }
                 } else {
                     peer.allowed_ips.push(route);
                 }
             }
             for route in resource_routes.routes_via(peer.id, node_id, &source, &acl, exit_matches) {
-                if route == "0.0.0.0/0" {
-                    exit_node_active = true;
+                if resources::is_default_route(&route) {
+                    exit_node_active |= selection.ipv6 || !route.contains(':');
                 }
                 if !peer.allowed_ips.contains(&route) {
                     peer.allowed_ips.push(route);
@@ -3577,6 +3590,12 @@ async fn list_peers(
     )
     .await?;
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
+    let retiring_ips = retiring
+        .iter()
+        .filter(|(id, _)| **id == node_id || visible_ids.contains(id))
+        .flat_map(|(_, addresses)| addresses.iter().cloned())
+        .filter(|address| selection.ipv6 || !address.contains(':'))
+        .collect();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
         peers,
@@ -3594,6 +3613,7 @@ async fn list_peers(
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
         forward_filter,
+        retiring_ips,
     }))
 }
 
@@ -3658,6 +3678,8 @@ async fn list_updates(
     let started = Instant::now();
     loop {
         posture::due(&s.store.pool, &org).await?;
+        // A renumber window ending bumps the revision, so waiters wake.
+        renumber::complete_due(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
@@ -3844,23 +3866,21 @@ fn relay_capability(secret: &[u8], node_id: Uuid, expires_at_unix: u64) -> Strin
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn assigned_ipv4_host(addresses: &[String]) -> Option<u8> {
-    addresses.iter().find_map(|address| {
-        let (address, prefix) = address.split_once('/')?;
-        if prefix != "32" {
-            return None;
-        }
-        let octets = address.parse::<Ipv4Addr>().ok()?.octets();
-        (octets[..3] == [100, 64, 0] && octets[3] != 0).then_some(octets[3])
-    })
+fn assigned_ipv4_host(addresses: &[String]) -> Option<u32> {
+    addresses
+        .iter()
+        .find_map(|address| address_pool::cgnat_offset(address))
 }
 
-fn org_ula_address(org_id: &str, host: u8) -> String {
+/// The device's ULA twin: the organisation's `/64` plus the IPv4 address's
+/// offset inside `100.64.0.0/10`. For `100.64.0.x` the offset is `x`, so
+/// addresses handed out before pools could grow beyond a `/24` are unchanged.
+fn org_ula_address(org_id: &str, offset: u32) -> String {
     let digest = Sha256::digest(org_id.as_bytes());
     let mut octets = [0_u8; 16];
     octets[0] = 0xfd;
     octets[1..8].copy_from_slice(&digest[..7]);
-    octets[15] = host;
+    octets[12..16].copy_from_slice(&offset.to_be_bytes());
     format!("{}/128", Ipv6Addr::from(octets))
 }
 
@@ -3872,29 +3892,46 @@ fn validate_advertised_routes(routes: Vec<String>) -> Result<Vec<String>, ApiErr
     }
     let mut canonical = routes
         .into_iter()
-        .map(|route| canonical_ipv4_route(&route))
+        .map(|route| {
+            if route.contains(':') {
+                canonical_ipv6_route(&route)
+            } else {
+                canonical_ipv4_route(&route)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     canonical.sort();
     canonical.dedup();
     for (index, route) in canonical.iter().enumerate() {
-        if route != "0.0.0.0/0"
-            && !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-                .iter()
-                .any(|private| ipv4_route_is_within(route, private))
+        if resources::is_default_route(route) {
+            continue;
+        }
+        if route.contains(':') {
+            // ULA (fd00::/8) or a global unicast subnet the operator routes;
+            // the org's own device /64 is checked where the org is known.
+            let ula = resources::cidr_within(route, "fd00::/8");
+            let global = resources::cidr_within(route, "2000::/3");
+            if !(ula || global) || route_prefix(route) < 16 {
+                return Err(ApiError::BadRequest(format!(
+                    "route {route} must be a unique local (fd00::/8) or global unicast (2000::/3) subnet of /16 or longer, or ::/0"
+                )));
+            }
+        } else if !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+            .iter()
+            .any(|private| ipv4_route_is_within(route, private))
         {
             return Err(ApiError::BadRequest(format!(
                 "route {route} must be an RFC1918 private subnet or 0.0.0.0/0"
             )));
         }
-        if route != "0.0.0.0/0" && ipv4_routes_overlap(route, "100.64.0.0/10") {
+        if !route.contains(':') && ipv4_routes_overlap(route, "100.64.0.0/10") {
             return Err(ApiError::BadRequest(format!(
                 "route {route} overlaps the BlakTail address pool"
             )));
         }
-        if route != "0.0.0.0/0"
-            && canonical[index + 1..]
-                .iter()
-                .any(|other| other != "0.0.0.0/0" && ipv4_routes_overlap(route, other))
+        if canonical[index + 1..]
+            .iter()
+            .any(|other| !resources::is_default_route(other) && routes_overlap(route, other))
         {
             return Err(ApiError::BadRequest(format!(
                 "advertised route {route} overlaps another advertised route"
@@ -3902,6 +3939,58 @@ fn validate_advertised_routes(routes: Vec<String>) -> Result<Vec<String>, ApiErr
         }
     }
     Ok(canonical)
+}
+
+/// IPv6 advertisements must stay outside the organisation's device `/64`,
+/// which only the coordinator knows.
+fn ensure_routes_outside_overlay(org_id: &str, routes: &[String]) -> Result<(), ApiError> {
+    let overlay = format!(
+        "{}/64",
+        org_ula_address(org_id, 0)
+            .split_once('/')
+            .map_or("", |(address, _)| address)
+    );
+    match routes
+        .iter()
+        .find(|route| !resources::is_default_route(route) && routes_overlap(route, &overlay))
+    {
+        Some(route) => Err(ApiError::BadRequest(format!(
+            "route {route} overlaps this organisation's device IPv6 pool {overlay}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Either family; routes of different families never overlap.
+pub(crate) fn routes_overlap(left: &str, right: &str) -> bool {
+    ipam::pools_overlap(left, right).unwrap_or(false)
+}
+
+fn route_prefix(route: &str) -> u8 {
+    ipam::parse_cidr(route).map_or(0, |(_, prefix)| prefix)
+}
+
+fn canonical_ipv6_route(route: &str) -> Result<String, ApiError> {
+    let route = route.trim();
+    let (address, prefix) = route
+        .split_once('/')
+        .ok_or_else(|| ApiError::BadRequest(format!("route {route} must use CIDR notation")))?;
+    let address: Ipv6Addr = address
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("route {route} must be IPv6 CIDR")))?;
+    let prefix: u8 = prefix
+        .parse()
+        .ok()
+        .filter(|prefix| *prefix <= 128)
+        .ok_or_else(|| ApiError::BadRequest(format!("route {route} has an invalid prefix")))?;
+    let (network, _) = ipam::parse_cidr(&format!("{address}/{prefix}"))
+        .map_err(|_| ApiError::BadRequest(format!("route {route} is not a valid CIDR")))?;
+    if network != std::net::IpAddr::V6(address) {
+        return Err(ApiError::BadRequest(format!(
+            "route {route} is not a network address"
+        )));
+    }
+    Ok(format!("{address}/{prefix}"))
 }
 
 pub(crate) fn canonical_ipv4_route(route: &str) -> Result<String, ApiError> {
@@ -6135,6 +6224,7 @@ mod tests {
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
     mod events_audit;
     mod forwarding;
+    mod ipv6_renumber;
     mod operations;
     mod policy_posture;
     mod posture_integrations;
