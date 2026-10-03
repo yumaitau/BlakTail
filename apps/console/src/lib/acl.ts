@@ -1,8 +1,8 @@
-import type { OrgRole } from "./roles";
+import { ORG_ROLES, type OrgRole } from "./roles";
 
 export type AclTag = "office" | "ranger" | "store";
 
-export const ACL_ROLES: OrgRole[] = ["owner", "admin", "member"];
+export const ACL_ROLES: OrgRole[] = [...ORG_ROLES];
 export const ACL_TAGS: AclTag[] = ["office", "ranger", "store"];
 
 export type AclPerson = {
@@ -25,6 +25,8 @@ export type AclRuleDraft = {
   dst_hosts: string[];
   dst_ports: string[];
   protocols: AclProtocol[];
+  /** Posture checks the source device must pass; allow rules only. */
+  posture: string[];
 };
 
 export const ACL_SSH_ACTIONS = ["allow", "deny", "check"] as const;
@@ -40,6 +42,7 @@ export type AclSshDraft = {
   dst_groups: string[];
   users: string[];
   check_period_secs: string;
+  posture: string[];
 };
 
 export const ACL_DEFAULTS = ["same_tag", "deny"] as const;
@@ -97,6 +100,7 @@ export function emptyRule(): AclRuleDraft {
     dst_hosts: [],
     dst_ports: [],
     protocols: [],
+    posture: [],
   };
 }
 
@@ -111,6 +115,7 @@ export function emptySshRule(): AclSshDraft {
     dst_groups: [],
     users: [],
     check_period_secs: "",
+    posture: [],
   };
 }
 
@@ -146,6 +151,7 @@ export function parseAclPolicy(value: unknown): AclPolicyDraft {
           protocols: asStringArray(row.protocols).filter((item): item is AclProtocol =>
             ACL_PROTOCOLS.includes(item as AclProtocol),
           ),
+          posture: asStringArray(row.posture),
         } satisfies AclRuleDraft;
       })
     : [];
@@ -173,6 +179,7 @@ export function parseAclPolicy(value: unknown): AclPolicyDraft {
               : typeof row.check_period_secs === "string"
                 ? row.check_period_secs
                 : "",
+          posture: asStringArray(row.posture),
         } satisfies AclSshDraft;
       })
     : [];
@@ -315,6 +322,7 @@ export function serializeAclPolicy(policy: AclPolicyDraft): Record<string, unkno
               ...(rule.action === "check" && Number.isFinite(period) && period > 0
                 ? { check_period_secs: period }
                 : {}),
+              ...(rule.action === "deny" ? {} : compact("posture", rule.posture)),
             };
           }),
         }
@@ -330,6 +338,7 @@ export function serializeAclPolicy(policy: AclPolicyDraft): Record<string, unkno
       ...compact("dst_hosts", rule.dst_hosts),
       ...compact("dst_ports", rule.dst_ports),
       ...compact("protocols", rule.protocols),
+      ...(rule.action === "allow" ? compact("posture", rule.posture) : {}),
     })),
   };
 }

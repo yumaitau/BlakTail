@@ -12,8 +12,27 @@ pub const MAX_FLOW_BATCH: usize = 500;
 /// Buckets may span at most one hour.
 pub const MAX_BUCKET_SECS: i64 = 3600;
 
-/// JSON keys that must never appear anywhere in a flow upload.
-const FORBIDDEN_FLOW_KEYS: &[&str] = &["url", "payload", "payload_b64", "body", "content"];
+/// JSON keys that must never appear anywhere in a flow upload: content,
+/// URLs, DNS questions and names that would identify what was visited.
+const FORBIDDEN_FLOW_KEYS: &[&str] = &[
+    "url",
+    "uri",
+    "path",
+    "payload",
+    "payload_b64",
+    "body",
+    "content",
+    "headers",
+    "cookie",
+    "query",
+    "dns_query",
+    "qname",
+    "host",
+    "hostname",
+    "sni",
+];
+/// Service is a short class label (`ssh`, `https`, `dns`), never a name.
+const MAX_SERVICE_CHARS: usize = 32;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FlowError {
@@ -31,6 +50,8 @@ pub enum FlowError {
     BadPort(u16, String),
     #[error("forbidden payload field '{0}' in flow upload")]
     PayloadField(String),
+    #[error("service must be a short lowercase class label such as ssh or https")]
+    BadService,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +94,14 @@ impl FlowRecord {
         }
         if self.service.trim().is_empty() {
             return Err(FlowError::MissingField("service"));
+        }
+        if self.service.len() > MAX_SERVICE_CHARS
+            || !self
+                .service
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            return Err(FlowError::BadService);
         }
         if self.start_bucket < 0 || self.end_bucket < 0 || self.end_bucket < self.start_bucket {
             return Err(FlowError::BucketRange {
@@ -198,6 +227,8 @@ mod tests {
             r#"{"url":"https://x"}"#,
             r#"{"flows":[{"payload":"aGVsbG8="}]}"#,
             r#"{"nested":{"body":"hi"}}"#,
+            r#"{"records":[{"dns_query":"example.org"}]}"#,
+            r#"{"records":[{"sni":"bank.example"}]}"#,
         ] {
             let value: serde_json::Value = serde_json::from_str(raw).unwrap();
             assert!(matches!(
@@ -208,6 +239,17 @@ mod tests {
         let clean: serde_json::Value =
             serde_json::from_str(r#"{"flows":[{"bytes":10,"packets":1}]}"#).unwrap();
         assert!(validate_flow_json(&clean).is_ok());
+    }
+
+    #[test]
+    fn service_must_be_a_class_label_not_a_name() {
+        let mut rec = record();
+        for bad in ["bank.example.org", "https://x", "SSH", &"a".repeat(33)] {
+            rec.service = bad.into();
+            assert_eq!(rec.validate(), Err(FlowError::BadService), "{bad}");
+        }
+        rec.service = "https-alt_2".into();
+        assert!(rec.validate().is_ok());
     }
 
     #[test]

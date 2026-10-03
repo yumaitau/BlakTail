@@ -88,7 +88,9 @@ rechecks the survivor.
   `{ "id": "uuid", "name": "org", "acl": { "rules": [] } }`
 - `POST /v1/orgs/{org_id}/bootstrap-commit` — separate one-use service assertion
   with action `bootstrap.commit`; activates the matching unexpired reservation
-- `POST /v1/orgs/{org_id}/join-keys` — owner/admin bearer session; `{ "expires_in_seconds": 3600, "single_use": true, "tags": ["office"] }`
+- `POST /v1/orgs/{org_id}/join-keys` — owner/admin bearer session; `{ "name": "Ranger tablets", "description": "", "expires_in_seconds": 3600, "single_use": true, "tags": ["office"] }`. Reusable keys set `"single_use": false` and may set `"max_uses": 1..10000` (omit for no limit before expiry). Each enrolment or reauth consumes one use in a single conditional `UPDATE`, so concurrent requests cannot overspend a key.
+- `GET /v1/orgs/{org_id}/join-keys` — owner/admin; inventory of operator keys (name, creator, one-use/reusable, max/remaining uses, expiry, tags, last use, revoke state). Never returns the secret or its hash; browser-approval grants are excluded.
+- `DELETE /v1/orgs/{org_id}/join-keys/{key_id}` — owner/admin; revoke a key (idempotent, audited as `join_key.revoked`)
 - `POST /v1/device-authorizations` — begin a ten-minute browser enrollment for a bound node name and WireGuard key
 - `GET /v1/device-authorizations/{device_code}` — agent poll; reveals only
   pending/approved state and enforces the returned poll interval with `429` plus
@@ -103,6 +105,8 @@ rechecks the survivor.
 - `GET /v1/orgs/{org_id}/audit` — any org user session; latest audit events (`limit=1..200`, optional `before=created_at:id`)
 - `DELETE /v1/orgs/{org_id}/nodes/{node_id}` — owner/admin session; revoke a device
 - `POST /v1/orgs/{org_id}/nodes/{node_id}/tombstone` — owner/admin session; remove a device from default inventory
+- `GET /v1/orgs/{org_id}/nodes/{node_id}` — any org user session; peer detail with heartbeat state computed from coordinator time, agent-reported transport, version guidance, lifecycle state and the latest audit events for that node
+- `POST /v1/orgs/{org_id}/nodes/{node_id}/suspend` (`{ "reason": "" }`) and `.../resume` — owner/admin; reversible suspension. A suspended node keeps its identity, addresses, tags, routes and memberships but is removed from every peer map (control revision bumps), and its `peers`, `updates`, `reauth`, `routes`, `shares`, `relay-endpoint`, `services` and service-certificate calls return `403` with code `suspended`. Suspending revokes the node's private-service certificates. Audited as `node.suspended` / `node.resumed`; webhooks `device.suspended` / `device.resumed`.
 - `GET/POST /v1/orgs/{org_id}/api-clients` and `DELETE /v1/orgs/{org_id}/api-clients/{id}` — owner-created automation credentials
 - `/api/v1/*` — versioned admin API; `Authorization: Bearer bta_…` or a short-lived `bto_` access token plus `X-BlakTail-Organisation`; OpenAPI in [docs/openapi/admin-v1.yaml](openapi/admin-v1.yaml); compatibility policy in [admin-api.md](admin-api.md)
 - `POST /oauth/token` — OAuth client-credentials exchange that mints a hashed `bto_` access token from a `bta_` automation secret

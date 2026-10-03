@@ -14,22 +14,31 @@ Each organisation may enable one HTTPS OpenID Connect issuer. The console:
 - encrypts the client secret with `BETTER_AUTH_SECRET` and never renders it again
 
 Just-in-time membership is off unless an owner enables it. Domain allow-lists
-require a verified email. Two providers that return the same email do not merge
+require a verified email. Once the organisation verifies a sign-in domain by
+DNS TXT, just-in-time membership only accepts that organisation's verified
+domains with `email_verified: true`, and a domain verified by another organisation is never accepted; see
+[roles.md](roles.md#verified-sign-in-domains). Two providers that return the same email do not merge
 accounts; an already-signed-in person can explicitly link an issuer+subject from
-the callback.
+the callback if their session was created within the last 15 minutes (or the
+organisation's tighter re-authentication window).
 
 ## Membership
 
 Membership states are `invited`, `active`, `suspended`, and `removed`. Session
 resolution only includes `active` rows, so a suspend or remove blocks console and
-management actions immediately without deleting devices. The last owner cannot
-be suspended or removed.
+management actions immediately without deleting devices. Roles are owner,
+admin, network admin, auditor and member ([roles.md](roles.md)). The last active
+owner cannot be demoted, suspended or removed, and neither can the last active
+password owner while one exists.
 
 ## Break-glass
 
-Keep at least one password owner. That account is independently rate-limited,
-audited, and scoped to its organisation. Provider outage, JWKS rotation failure,
-or a disabled provider must not prevent that owner from signing in.
+Keep at least one password owner; the console refuses changes that would remove
+the last active one. That account is independently rate-limited, audited, and
+scoped to its organisation. Provider outage, JWKS rotation failure, or a disabled
+provider must not prevent that owner from signing in. If it uses two-step
+verification, keep its recovery codes offline; an organisation's MFA rule never
+blocks sign-in or enrolment, only changes.
 
 ## Claims retained
 

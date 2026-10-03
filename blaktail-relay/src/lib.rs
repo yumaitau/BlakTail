@@ -115,6 +115,73 @@ fn verify_token(auth_secret: &[u8], node_id: &[u8], expires_at_unix: u64, token:
     mac.verify_slice(token).is_ok()
 }
 
+/// Parses an OBSERVED reply addressed to `node_id`.
+pub fn parse_observed(frame: &[u8], node_id: &[u8; ID_LEN]) -> Option<SocketAddr> {
+    if frame.len() != OBSERVED_FRAME || frame[0] != OBSERVED || frame[1..HEADER] != node_id[..] {
+        return None;
+    }
+    let octets: [u8; 16] = frame[HEADER + 1..HEADER + 17].try_into().ok()?;
+    let v6 = std::net::Ipv6Addr::from(octets);
+    let ip = match frame[HEADER] {
+        4 => IpAddr::V4(v6.to_ipv4_mapped()?),
+        6 => IpAddr::V6(v6),
+        _ => return None,
+    };
+    let port = u16::from_be_bytes(frame[HEADER + 17..OBSERVED_FRAME].try_into().ok()?);
+    (port != 0).then(|| SocketAddr::new(ip, port))
+}
+
+/// Authenticated reachability probe: REGISTER then PING from a fresh socket,
+/// returning the reflexive address the relay reports. A relay only answers a
+/// PING from a live registration, so a reply proves the relay is up, accepts
+/// this capability and can reach the prober. Sends at most three attempts
+/// inside `wait`; never carries tunnel payload.
+pub async fn probe(
+    relay: SocketAddr,
+    node_id: &[u8; ID_LEN],
+    expires_at_unix: u64,
+    token: &[u8; TOKEN_LEN],
+    wait: Duration,
+) -> io::Result<SocketAddr> {
+    let socket = UdpSocket::bind(if relay.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .await?;
+    let mut register = Vec::with_capacity(REGISTER_FRAME);
+    register.push(REGISTER);
+    register.extend_from_slice(node_id);
+    register.extend_from_slice(&expires_at_unix.to_be_bytes());
+    register.extend_from_slice(token);
+    let mut ping = vec![PING];
+    ping.extend_from_slice(node_id);
+    let attempt = wait / 3;
+    let mut buf = [0u8; 64];
+    for _ in 0..3 {
+        socket.send_to(&register, relay).await?;
+        socket.send_to(&ping, relay).await?;
+        let reply = tokio::time::timeout(attempt, async {
+            loop {
+                let (len, source) = socket.recv_from(&mut buf).await?;
+                if source == relay {
+                    if let Some(observed) = parse_observed(&buf[..len], node_id) {
+                        return Ok::<_, io::Error>(observed);
+                    }
+                }
+            }
+        })
+        .await;
+        if let Ok(result) = reply {
+            return result;
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "relay did not answer the authenticated probe",
+    ))
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -998,5 +1065,72 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn probe_proves_authenticated_reachability_only() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let task = tokio::spawn(serve(
+            relay,
+            RelayConfig {
+                auth_secret: secret(),
+                ..RelayConfig::default()
+            },
+        ));
+        let id = [0x42; ID_LEN];
+        let expires_at = unix_now() + 60;
+        let token = mint_token(&secret(), &id, expires_at);
+        let observed = probe(relay_addr, &id, expires_at, &token, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(observed.ip(), relay_addr.ip());
+        assert_ne!(observed.port(), 0);
+
+        // A capability minted with another secret gets no answer.
+        let forged = mint_token(b"wrong-secret", &id, expires_at);
+        let refused = probe(
+            relay_addr,
+            &id,
+            expires_at,
+            &forged,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+        task.abort();
+        let _ = task.await;
+        let gone = probe(
+            relay_addr,
+            &id,
+            expires_at,
+            &token,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(gone.is_err());
+    }
+
+    #[test]
+    fn observed_parser_rejects_other_ids_and_zero_ports() {
+        let id = [7u8; ID_LEN];
+        let mut frame = vec![OBSERVED];
+        frame.extend_from_slice(&id);
+        frame.push(4);
+        frame.extend_from_slice(
+            &std::net::Ipv4Addr::new(203, 0, 113, 9)
+                .to_ipv6_mapped()
+                .octets(),
+        );
+        frame.extend_from_slice(&3478u16.to_be_bytes());
+        assert_eq!(
+            parse_observed(&frame, &id),
+            Some("203.0.113.9:3478".parse().unwrap())
+        );
+        assert_eq!(parse_observed(&frame, &[8u8; ID_LEN]), None);
+        let len = frame.len();
+        frame[len - 2..].copy_from_slice(&0u16.to_be_bytes());
+        assert_eq!(parse_observed(&frame, &id), None);
     }
 }

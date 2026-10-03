@@ -1,11 +1,14 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
+use blaktaild::relay_select::{eligible_relays, RelaySelector};
 use blaktaild::{
-    apply_peer_map, configure_system_dns, disable_share, dns_domain, enable_share,
-    ensure_private_key, load_shares, organisation_dns_managed, organisation_resolver_suffixes,
-    overlay_ipv4, peer_key_hex, published_resolver_suffixes, put_share_file, read_state,
-    remove_system_dns, restore_peers, sync_once, validate_advertised_routes, validate_interface,
-    write_state, Coordinator, MagicDns, Network, Registration, RelayMesh, ShareServer,
-    DIRECT_GRACE_SECS, DIRECT_RETRY_SECS, HANDSHAKE_FRESH_SECS,
+    apply_peer_map, configure_system_dns,
+    connector::{self, ConnectorRuntime},
+    disable_share, dns_domain, enable_share, ensure_private_key, load_shares,
+    organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
+    published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
+    sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
+    Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
+    HANDSHAKE_FRESH_SECS,
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -44,9 +47,6 @@ enum Command {
     Up {
         #[arg(long)]
         coord: Option<String>,
-        /// Single-use join key. Omit for browser enrollment or pipe a key on stdin.
-        #[arg(long, hide_env_values = true, env = "BLAKTAIL_JOIN_KEY")]
-        join_key: Option<String>,
         #[arg(long)]
         interface: Option<String>,
         #[arg(long)]
@@ -71,6 +71,10 @@ enum Command {
         /// Delete this node automatically after it has been offline for 24 hours.
         #[arg(long)]
         ephemeral: bool,
+        /// Resolve and forward DNS network resources this Linux node is a
+        /// routing peer for. `--app-connector=false` turns it off again.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        app_connector: Option<bool>,
     },
     /// Resume the persisted enrollment and keep WireGuard peers synchronized.
     Run {
@@ -78,13 +82,14 @@ enum Command {
         poll_seconds: Option<u64>,
     },
     /// Renew this enrollment with a fresh join key without changing its tailnet IP.
-    Reauth {
-        /// Fresh join key. Omit to read it from stdin.
-        #[arg(long, hide_env_values = true, env = "BLAKTAIL_JOIN_KEY")]
-        join_key: Option<String>,
-    },
+    /// Pipe the key on stdin or set BLAKTAIL_JOIN_KEY; it is never an argument.
+    Reauth,
     /// Show persisted node and peer status without exposing credentials.
-    Status,
+    Status {
+        /// Print one JSON object for local tools such as the Linux tray.
+        #[arg(long)]
+        json: bool,
+    },
     /// Publish or withdraw a read-only HTTP/WebDAV folder on the overlay.
     Share {
         #[command(subcommand)]
@@ -160,8 +165,8 @@ impl AgentOverrides {
                 }
             }
             Command::Run { poll_seconds } => overrides.poll_seconds = *poll_seconds,
-            Command::Reauth { .. }
-            | Command::Status
+            Command::Reauth
+            | Command::Status { .. }
             | Command::Share { .. }
             | Command::Pause
             | Command::Down => {}
@@ -314,9 +319,13 @@ fn detect_hostname() -> String {
         .unwrap_or_else(|| "blaktail-node".into())
 }
 
-/// Join keys arrive on stdin (never argv) when the caller is another program.
-fn resolve_optional_join_key(provided: Option<String>) -> Result<Option<String>, blaktaild::Error> {
-    if let Some(key) = provided {
+/// Join keys arrive on stdin or in BLAKTAIL_JOIN_KEY, never in argv, so they
+/// stay out of process listings and shell history.
+fn resolve_optional_join_key() -> Result<Option<String>, blaktaild::Error> {
+    if let Some(key) = std::env::var("BLAKTAIL_JOIN_KEY")
+        .ok()
+        .filter(|key| !key.is_empty())
+    {
         let key = key.trim().to_owned();
         if key.is_empty() {
             return Err(blaktaild::Error::Message(
@@ -340,9 +349,9 @@ fn resolve_optional_join_key(provided: Option<String>) -> Result<Option<String>,
     Ok(Some(key))
 }
 
-fn resolve_join_key(provided: Option<String>) -> Result<String, blaktaild::Error> {
-    resolve_optional_join_key(provided)?.ok_or_else(|| {
-        blaktaild::Error::Message("a fresh join key must be passed or piped to stdin".into())
+fn resolve_join_key() -> Result<String, blaktaild::Error> {
+    resolve_optional_join_key()?.ok_or_else(|| {
+        blaktaild::Error::Message("pipe a fresh join key on stdin or set BLAKTAIL_JOIN_KEY".into())
     })
 }
 
@@ -405,9 +414,11 @@ async fn sync_loop(
     exit_after_join: bool,
 ) -> Result<(), blaktaild::Error> {
     let mut mesh: Option<RelayMesh> = None;
+    let mut relays = RelaySelector::default();
     let mut dns: Option<MagicDns> = None;
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
+    let mut connector = ConnectorRuntime::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -418,7 +429,21 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
-        manage_paths(network, &mut mesh, state, &mut paths).await;
+        if connector::manage(coordinator, network, state, &mut connector).await {
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist app connector routes");
+            }
+        }
+        let transport = manage_paths(network, &mut mesh, &mut relays, state, &mut paths).await;
+        coordinator.set_transport(transport);
+        let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
+        if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
+            state.active_relay = active_relay;
+            state.relay_failovers = relays.failovers();
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist relay selection");
+            }
+        }
         report_relay_endpoint(coordinator, mesh.as_ref(), state, state_dir).await;
         if exit_after_join {
             if let Some(active) = mesh.take() {
@@ -703,45 +728,95 @@ fn path_action(
     }
 }
 
+/// Summarises the paths of peers with a fresh handshake. Peers without one
+/// are not counted, so an idle or broken tunnel reports nothing.
+fn transport_summary(direct: usize, relayed: usize) -> Option<&'static str> {
+    match (direct, relayed) {
+        (0, 0) => None,
+        (_, 0) => Some("direct"),
+        (0, _) => Some("relay"),
+        _ => Some("mixed"),
+    }
+}
+
 /// Keeps each peer on its best available transport. Failed direct paths move
 /// to a relay-assisted localhost forwarder. Encrypted relay traffic continues
 /// while that forwarder attempts a coordinator-mediated UDP hole punch.
+/// Returns the measured transport summary for the coordinator heartbeat.
 async fn manage_paths(
     network: &mut dyn Network,
     mesh: &mut Option<RelayMesh>,
+    selector: &mut RelaySelector,
     state: &blaktaild::NodeState,
     paths: &mut HashMap<Uuid, PeerPath>,
-) {
+) -> Option<&'static str> {
     let now_unix = blaktaild_now();
-    if state.relays.is_empty() || state.relay_token.is_empty() || state.relay_expires_at <= now_unix
-    {
+    let relays = eligible_relays(&state.relays, &state.relay_endpoints);
+    if relays.is_empty() || state.relay_token.is_empty() || state.relay_expires_at <= now_unix {
         disable_relay(network, mesh, state, paths);
-        return;
+        // Without a relay every working path is native WireGuard UDP.
+        let handshakes = network
+            .latest_handshakes(&state.interface)
+            .unwrap_or_default();
+        let fresh = state
+            .peers
+            .iter()
+            .filter(|peer| {
+                handshakes
+                    .get(&peer_key_hex(&peer.wg_public_key).unwrap_or_default())
+                    .is_some_and(|stamp| *stamp > now_unix.saturating_sub(HANDSHAKE_FRESH_SECS))
+            })
+            .count();
+        return transport_summary(fresh, 0);
     }
     let interface = &state.interface;
-    let failed_relay = mesh.as_ref().and_then(|active| {
-        (!active.relay_healthy()).then(|| {
-            let address = active.relay_addr();
-            warn!(%address, "relay health probe expired; trying another endpoint");
-            address
-        })
-    });
-    if failed_relay.is_some() {
-        if let Some(active) = mesh.take() {
-            active.stop();
+    let candidates = selector.candidates(&relays).await;
+    let now = Instant::now();
+    if let Some(active) = mesh.as_ref() {
+        let address = active.relay_addr();
+        if !active.relay_healthy() {
+            let cooldown = selector.record_failure(address, now);
+            selector.note_failover();
+            warn!(
+                %address,
+                cooldown_secs = cooldown.as_secs(),
+                failovers = selector.failovers(),
+                "relay health probe expired; failing over to the next Australian relay"
+            );
+            if let Some(active) = mesh.take() {
+                active.stop();
+            }
+        } else if active.observed_endpoint().is_some() {
+            selector.record_healthy(address);
+            if let Some(preferred) = selector.failback_target(address, &candidates, now) {
+                if probe_relay(preferred, state).await {
+                    selector.note_failback();
+                    info!(
+                        from = %address,
+                        to = %preferred,
+                        failbacks = selector.failbacks(),
+                        "higher-priority relay answered; failing back"
+                    );
+                    if let Some(active) = mesh.take() {
+                        active.stop();
+                    }
+                } else {
+                    selector.record_failure(preferred, now);
+                }
+            }
         }
     }
     if mesh.is_none() {
-        let Some(relay_addr) = resolve_relay(&state.relays, failed_relay).await else {
+        let Some(relay_addr) = selector.choose(&candidates, now) else {
             warn!("could not resolve any advertised relay; direct paths only");
-            return;
+            return None;
         };
         let listen = match network.listen_endpoint(interface) {
             Ok(Some(listen)) => listen,
-            Ok(None) => return,
+            Ok(None) => return None,
             Err(error) => {
                 warn!(%error, "could not read WireGuard listen port; direct paths only");
-                return;
+                return None;
             }
         };
         match RelayMesh::spawn(
@@ -758,9 +833,7 @@ async fn manage_paths(
     } else if let Some(active) = mesh.as_ref() {
         active.update_credentials(&state.relay_token, state.relay_expires_at);
     }
-    let Some(mesh) = mesh.as_ref() else {
-        return;
-    };
+    let mesh = mesh.as_ref()?;
 
     let handshakes = network.latest_handshakes(interface).unwrap_or_default();
     let current_peers: HashSet<Uuid> = state.peers.iter().map(|peer| peer.id).collect();
@@ -774,6 +847,7 @@ async fn manage_paths(
         paths.remove(&peer_id);
     }
 
+    let (mut direct, mut relayed) = (0, 0);
     for peer in &state.peers {
         let stamp = handshakes
             .get(&peer_key_hex(&peer.wg_public_key).unwrap_or_default())
@@ -877,7 +951,16 @@ async fn manage_paths(
         if let Some(next) = next {
             paths.insert(peer.id, next);
         }
+        if fresh {
+            match paths.get(&peer.id) {
+                Some(PeerPath::Relayed { .. }) => relayed += 1,
+                Some(PeerPath::Direct { .. } | PeerPath::PeerDirect { .. }) => direct += 1,
+                // A probe is unproven either way; leave it out of the summary.
+                Some(PeerPath::DirectProbe { .. }) | None => {}
+            }
+        }
     }
+    transport_summary(direct, relayed)
 }
 
 async fn switch_to_relay(
@@ -995,22 +1078,24 @@ fn disable_relay(
     paths.clear();
 }
 
-async fn resolve_relay(
-    relays: &[String],
-    excluded: Option<std::net::SocketAddr>,
-) -> Option<std::net::SocketAddr> {
-    let mut fallback = None;
-    for relay in relays {
-        if let Ok(mut addresses) = tokio::net::lookup_host(relay).await {
-            for address in &mut addresses {
-                fallback.get_or_insert(address);
-                if Some(address) != excluded {
-                    return Some(address);
-                }
-            }
-        }
-    }
-    fallback
+/// Authenticated reachability check before failing back to a preferred
+/// relay. Uses this node's own capability, so it proves the relay would
+/// accept the real registration.
+async fn probe_relay(relay: std::net::SocketAddr, state: &blaktaild::NodeState) -> bool {
+    let Some(token) = blaktaild::relay_client::hex_decode(&state.relay_token)
+        .and_then(|raw| <[u8; blaktail_relay::TOKEN_LEN]>::try_from(raw).ok())
+    else {
+        return false;
+    };
+    blaktail_relay::probe(
+        relay,
+        state.node_id.as_bytes(),
+        state.relay_expires_at,
+        &token,
+        Duration::from_secs(2),
+    )
+    .await
+    .is_ok()
 }
 
 fn blaktaild_now() -> u64 {
@@ -1028,7 +1113,6 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
     match cli.command {
         Command::Up {
             coord,
-            join_key,
             interface,
             name,
             endpoint,
@@ -1038,6 +1122,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             poll_seconds,
             exit_after_join,
             ephemeral,
+            app_connector,
         } => {
             let coord = coord
                 .or_else(|| operator_config.coordinator_url.clone())
@@ -1081,6 +1166,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 let value = value.trim();
                 (!value.is_empty() && !value.eq_ignore_ascii_case("none")).then(|| value.to_owned())
             });
+            if app_connector == Some(true) && !cfg!(target_os = "linux") {
+                return Err(blaktaild::Error::Message(
+                    "app connectors are currently supported on Linux only".into(),
+                ));
+            }
             #[cfg(target_os = "macos")]
             if !requested_routes.is_empty() || requested_exit_node.is_some() {
                 return Err(blaktaild::Error::Message(
@@ -1116,7 +1206,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 Err(blaktaild::Error::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound =>
                 {
-                    let mut join_key = match resolve_optional_join_key(join_key)? {
+                    let mut join_key = match resolve_optional_join_key()? {
                         Some(join_key) => join_key,
                         None => browser_join_key(&coordinator, &name, &public_key).await?,
                     };
@@ -1137,6 +1227,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
                 Err(error) => return Err(error),
             };
+            if let Some(enabled) = app_connector {
+                state.app_connector = enabled;
+            }
             let mut network = make_network();
             let interface_addresses = state.interface_addresses();
             if let Err(error) = network.setup(&interface, &key_path, &interface_addresses) {
@@ -1146,6 +1239,8 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 return Err(error);
             }
             let previous_ipv4_forward = state.router_previous_ipv4_forward;
+            // Known allow-list first, so routing never starts unfiltered.
+            network.apply_forward_filter(&interface, state.forward_filter.as_ref())?;
             match network.configure_router(
                 &interface,
                 &previous_routes,
@@ -1209,9 +1304,13 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             let mut network = make_network();
             network.setup(&state.interface, &key_path, &state.interface_addresses())?;
+            network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
+            // Connector host routes are re-added after the first report.
+            let mut previous_routes = state.advertised_routes.clone();
+            previous_routes.append(&mut state.connector_routes);
             state.router_previous_ipv4_forward = network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &previous_routes,
                 &state.advertised_routes,
                 state.router_previous_ipv4_forward,
             )?;
@@ -1231,10 +1330,10 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             )
             .await?;
         }
-        Command::Reauth { join_key } => {
+        Command::Reauth => {
             let mut state = read_state(state_dir)?;
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
-            let mut join_key = resolve_join_key(join_key)?;
+            let mut join_key = resolve_join_key()?;
             let result = coordinator.reauth(&mut state, &join_key).await;
             join_key.zeroize();
             result?;
@@ -1244,7 +1343,14 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 credential_status(state.credential_expires_at, blaktaild_now() as i64)
             );
         }
-        Command::Status => {
+        Command::Status { json: true } => {
+            let summary = match read_state(state_dir) {
+                Ok(state) => status_json(&state, blaktaild_now() as i64),
+                Err(_) => serde_json::json!({ "joined": false }),
+            };
+            println!("{summary}");
+        }
+        Command::Status { json: false } => {
             let state = read_state(state_dir)?;
             println!(
                 "joined\nnode: {}\ninterface: {}\naddress: {}\nipv6 address: {}\ndns: {}\ncoordinator: {}\ncredential: {}\nadvertised routes: {}\nexit node: {}\npeers: {}",
@@ -1354,9 +1460,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 )?;
             }
             let mut network = make_network();
+            let mut forwarded = state.advertised_routes.clone();
+            forwarded.extend(state.connector_routes.iter().cloned());
             network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &forwarded,
                 &[],
                 state.router_previous_ipv4_forward,
             )?;
@@ -1379,9 +1487,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             }
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
             let mut network = make_network();
+            let mut forwarded = state.advertised_routes.clone();
+            forwarded.extend(state.connector_routes.iter().cloned());
             network.configure_router(
                 &state.interface,
-                &state.advertised_routes,
+                &forwarded,
                 &[],
                 state.router_previous_ipv4_forward,
             )?;
@@ -1392,6 +1502,35 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
         }
     }
     Ok(())
+}
+
+/// Machine-readable status for local tools. Carries no node token, relay
+/// capability, private key or join secret.
+fn status_json(state: &blaktaild::NodeState, now: i64) -> serde_json::Value {
+    serde_json::json!({
+        "joined": true,
+        "node_id": state.node_id,
+        "interface": state.interface,
+        "address": state.assigned_ip,
+        "ipv6_address": state.ipv6_address(),
+        "dns_name": state.dns_name,
+        "coordinator": state.coord,
+        "credential_expires_at": state.credential_expires_at,
+        "credential": credential_status(state.credential_expires_at, now),
+        "credential_expired": state.credential_expires_at != 0 && state.credential_expires_at <= now,
+        "advertised_routes": state.advertised_routes,
+        "exit_node": state.exit_node,
+        "exit_node_active": state.exit_node_active,
+        "dns_health": state.dns_degraded.as_deref().map_or("ok", |_| "degraded"),
+        "relays": eligible_relays(&state.relays, &state.relay_endpoints),
+        "active_relay": state.active_relay,
+        "relay_failovers": state.relay_failovers,
+        "peers": state.peers.iter().map(|peer| serde_json::json!({
+            "name": peer.name,
+            "endpoint": peer.endpoint,
+            "allowed_ips": peer.allowed_ips,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn credential_status(expires_at: i64, now: i64) -> String {
@@ -1408,6 +1547,25 @@ fn credential_status(expires_at: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_key_is_never_a_command_line_argument() {
+        for argv in [
+            vec!["blaktaild", "up", "--join-key", "btk_secret"],
+            vec!["blaktaild", "reauth", "--join-key", "btk_secret"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        assert!(Cli::try_parse_from(["blaktaild", "reauth"]).is_ok());
+    }
+
+    #[test]
+    fn transport_summary_reports_only_measured_paths() {
+        assert_eq!(transport_summary(0, 0), None);
+        assert_eq!(transport_summary(2, 0), Some("direct"));
+        assert_eq!(transport_summary(0, 1), Some("relay"));
+        assert_eq!(transport_summary(1, 1), Some("mixed"));
+    }
 
     #[test]
     fn pause_is_distinct_from_destructive_down() {
@@ -1514,13 +1672,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_resolution_rotates_away_from_failed_address() {
+    async fn relay_selection_rotates_away_from_failed_address() {
         let first = std::net::SocketAddr::from(([127, 0, 0, 1], 3478));
         let second = std::net::SocketAddr::from(([127, 0, 0, 2], 3478));
         let relays = vec![first.to_string(), second.to_string()];
-        assert_eq!(resolve_relay(&relays, None).await, Some(first));
-        assert_eq!(resolve_relay(&relays, Some(first)).await, Some(second));
-        assert_eq!(resolve_relay(&relays[..1], Some(first)).await, Some(first));
+        let mut selector = RelaySelector::default();
+        let candidates = selector.candidates(&relays).await;
+        let now = Instant::now();
+        assert_eq!(selector.choose(&candidates, now), Some(first));
+        selector.record_failure(first, now);
+        assert_eq!(selector.choose(&candidates, now), Some(second));
+        assert_eq!(selector.choose(&candidates[..1], now), Some(first));
+    }
+
+    #[test]
+    fn status_json_reports_relay_selection_without_credentials() {
+        let state: blaktaild::NodeState = serde_json::from_value(serde_json::json!({
+            "node_id": Uuid::from_u128(7),
+            "node_token": "btn_node-token-secret",
+            "coord": "https://coord.example.org.au",
+            "interface": "blaktail0",
+            "assigned_ip": "100.64.0.7/32",
+            "credential_expires_at": 1_000,
+            "relays": ["relay-b:3478", "relay-x:3478"],
+            "relay_endpoints": [
+                {"endpoint": "relay-b:3478", "region": "australiaeast"},
+                {"endpoint": "relay-x:3478", "region": "us-east-1"}
+            ],
+            "relay_token": "ab".repeat(32),
+            "active_relay": "192.0.2.2:3478",
+            "relay_failovers": 2
+        }))
+        .unwrap();
+        let summary = status_json(&state, 2_000);
+        assert_eq!(summary["joined"], true);
+        assert_eq!(summary["credential_expired"], true);
+        assert_eq!(summary["relays"], serde_json::json!(["relay-b:3478"]));
+        assert_eq!(summary["active_relay"], "192.0.2.2:3478");
+        assert_eq!(summary["relay_failovers"], 2);
+        let text = summary.to_string();
+        assert!(!text.contains("node-token-secret"));
+        assert!(!text.contains(&"ab".repeat(32)));
     }
 
     #[test]

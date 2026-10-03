@@ -1,5 +1,8 @@
 # Windows node agent plan (issue #11)
 
+**Status: experimental.** No Windows binary has been built or run from this
+tree; see [platform-support.md](platform-support.md).
+
 The windowed Windows client is not built. The tool that is built is
 `blaktail-windows` (same sign-in callback as the Mac and iPhone apps) plus
 `packaging/windows/install-blaktail-service.ps1` for `blaktaild run`.

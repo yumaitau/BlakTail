@@ -57,6 +57,13 @@
       "when": 1787788800000,
       "tag": "0007_oidc_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791100800000,
+      "tag": "0008_roles_and_sign_in_policy",
+      "breakpoints": true
     }
   ]
 }

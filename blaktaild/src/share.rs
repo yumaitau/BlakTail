@@ -1197,22 +1197,33 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "blaktail-share-{}-{}",
             std::process::id(),
-            UuidLike::now()
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
     }
 
-    struct UuidLike;
-    impl UuidLike {
-        fn now() -> u128 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+    // Probing a free port then binding races with parallel tests, so retry.
+    async fn spawn_on_free_port(mut share: LocalShare) -> ShareServer {
+        for _ in 0..20 {
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            share.port = probe.local_addr().unwrap().port();
+            drop(probe);
+            if let Ok(server) = ShareServer::spawn(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                std::slice::from_ref(&share),
+            )
+            .await
+            {
+                return server;
+            }
         }
+        panic!("no free localhost port for share test");
     }
+
+    // Parallel tests can read the same clock value; a counter cannot collide.
+    static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     #[test]
     fn rejects_relative_and_duplicate_labels() {
@@ -1244,15 +1255,8 @@ mod tests {
         fs::write(root.join("note.txt"), "hello-share").unwrap();
         fs::create_dir_all(root.join("nested")).unwrap();
         fs::write(root.join("nested").join("inner.txt"), "inner").unwrap();
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let mut share = validate_local_share(&root, Some("files"), DEFAULT_SHARE_PORT).unwrap();
-        share.port = port;
-        let served = vec![share];
-        let server = ShareServer::spawn(IpAddr::V4(Ipv4Addr::LOCALHOST), &served)
-            .await
-            .unwrap();
+        let share = validate_local_share(&root, Some("files"), DEFAULT_SHARE_PORT).unwrap();
+        let server = spawn_on_free_port(share).await;
         let listing = http_get(server.listen_addr(), "/files/").await;
         assert!(listing.contains("note.txt"), "{listing}");
         assert!(listing.contains("nested/"), "{listing}");
@@ -1270,14 +1274,8 @@ mod tests {
         fs::write(root.join("note.txt"), "hello-share").unwrap();
         fs::create_dir_all(root.join("nested")).unwrap();
         fs::write(root.join("nested").join("inner.txt"), "inner").unwrap();
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let mut share = validate_local_share(&root, Some("files"), DEFAULT_SHARE_PORT).unwrap();
-        share.port = port;
-        let server = ShareServer::spawn(IpAddr::V4(Ipv4Addr::LOCALHOST), &[share])
-            .await
-            .unwrap();
+        let share = validate_local_share(&root, Some("files"), DEFAULT_SHARE_PORT).unwrap();
+        let server = spawn_on_free_port(share).await;
         let addr = server.listen_addr();
 
         let options = http_exchange(addr, "OPTIONS", "/files/", &[]).await;
@@ -1313,15 +1311,9 @@ mod tests {
         assert!(put.starts_with("HTTP/1.1 403"), "{put}");
         assert!(put.contains("read-only"), "{put}");
 
-        let write_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let write_port = write_probe.local_addr().unwrap().port();
-        drop(write_probe);
-        let mut writable =
-            validate_local_share_mode(&root, Some("drop"), write_port, false).unwrap();
-        writable.port = write_port;
-        let writable_server = ShareServer::spawn(IpAddr::V4(Ipv4Addr::LOCALHOST), &[writable])
-            .await
-            .unwrap();
+        let writable =
+            validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let writable_server = spawn_on_free_port(writable).await;
         let write_addr = writable_server.listen_addr();
         let sent = put_share_file(
             &format!("http://{write_addr}/drop/arrived.txt"),

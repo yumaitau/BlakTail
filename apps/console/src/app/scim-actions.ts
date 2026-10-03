@@ -4,6 +4,8 @@ import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db/client";
 import { scimToken } from "@/lib/db/schema";
 import { newScimToken } from "@/lib/scim-core";
+import { requireSecurityAssurance } from "@/lib/auth-policy";
+import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 export async function mintScimTokenAction(): Promise<
@@ -11,9 +13,11 @@ export async function mintScimTokenAction(): Promise<
 > {
   try {
     const ctx = await requireConsoleContext();
-    if (ctx.role !== "owner") {
-      return { ok: false, error: "Only an owner can mint a SCIM token." };
+    const denied = permissionReason(ctx.role, "manage_security");
+    if (denied) {
+      return { ok: false, error: denied };
     }
+    await requireSecurityAssurance(ctx);
     const minted = newScimToken();
     await db().insert(scimToken).values({
       id: crypto.randomUUID(),

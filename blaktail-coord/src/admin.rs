@@ -1,3 +1,4 @@
+use crate::permissions::{require, Permission};
 use crate::{
     append_audit, bearer_value, bump_control_revision, conflict, console_session, hash,
     load_audit_events, load_nodes, load_org_dns, load_org_dns_tx, load_previous_dns_tx, now,
@@ -16,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-const API_PREFIX: &str = "bta";
+pub(crate) const API_PREFIX: &str = "bta";
 const ACCESS_PREFIX: &str = "bto";
 const ACCESS_TOKEN_TTL_SECS: i64 = 3600;
-const DEFAULT_TOKEN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
-const MAX_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
+pub(crate) const DEFAULT_TOKEN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
+pub(crate) const MAX_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,8 @@ pub(crate) enum Scope {
     DevicesWrite,
     #[serde(rename = "keys:write")]
     KeysWrite,
+    #[serde(rename = "keys:read")]
+    KeysRead,
     #[serde(rename = "routes:write")]
     RoutesWrite,
     #[serde(rename = "policy:write")]
@@ -39,6 +42,8 @@ pub(crate) enum Scope {
     DnsWrite,
     #[serde(rename = "audit:read")]
     AuditRead,
+    #[serde(rename = "audit:export")]
+    AuditExport,
     #[serde(rename = "status:read")]
     StatusRead,
     #[serde(rename = "webhooks:read")]
@@ -53,10 +58,12 @@ impl Scope {
             Self::DevicesRead => "devices:read",
             Self::DevicesWrite => "devices:write",
             Self::KeysWrite => "keys:write",
+            Self::KeysRead => "keys:read",
             Self::RoutesWrite => "routes:write",
             Self::PolicyWrite => "policy:write",
             Self::DnsWrite => "dns:write",
             Self::AuditRead => "audit:read",
+            Self::AuditExport => "audit:export",
             Self::StatusRead => "status:read",
             Self::WebhooksRead => "webhooks:read",
             Self::WebhooksWrite => "webhooks:write",
@@ -101,6 +108,8 @@ pub(crate) struct ApiClientRecord {
     last_used_at: Option<i64>,
     expires_at: Option<i64>,
     revoked: bool,
+    suspended: bool,
+    rotated_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -159,35 +168,80 @@ pub(crate) fn api_routes() -> Router<AppState> {
             "/api/v1/webhooks/deliveries/:delivery_id/replay",
             post(crate::webhooks::replay_delivery),
         )
+        .route(
+            "/api/v1/network-resources",
+            get(crate::resources::api_list).post(crate::resources::api_create),
+        )
+        .route(
+            "/api/v1/network-resources/:resource_id",
+            get(crate::resources::api_get)
+                .put(crate::resources::api_update)
+                .delete(crate::resources::api_delete),
+        )
+        // Drafts 17, 18 and 22: audit export and chain, event subscriptions,
+        // posture checks, join-key metadata and DNS draft validation.
+        .route("/api/v1/audit/export", get(crate::audit_log::api_export))
+        .route("/api/v1/audit/verify", get(crate::audit_log::api_verify))
+        .route(
+            "/api/v1/events/catalogue",
+            get(crate::notifications::api_catalogue),
+        )
+        .route(
+            "/api/v1/webhooks/:destination_id/subscriptions",
+            put(crate::notifications::api_subscriptions),
+        )
+        .route(
+            "/api/v1/posture-checks",
+            get(crate::automation::api_list_posture_checks)
+                .post(crate::automation::api_create_posture_check),
+        )
+        .route(
+            "/api/v1/posture-checks/:check_id",
+            put(crate::automation::api_update_posture_check)
+                .delete(crate::automation::api_delete_posture_check),
+        )
+        .route("/api/v1/keys", get(crate::automation::api_list_join_keys))
+        .route(
+            "/api/v1/keys/:key_id",
+            axum::routing::delete(crate::automation::api_revoke_join_key),
+        )
+        .route(
+            "/api/v1/dns/validate",
+            post(crate::automation::api_validate_dns),
+        )
         .layer(DefaultBodyLimit::max(ADMIN_API_MAX_BODY_BYTES))
 }
 
 pub(crate) fn require_scope(caller: &ApiCaller, scope: Scope) -> Result<(), ApiError> {
     if caller.client_id.is_none() {
-        if scope_is_write(scope) && caller.session.role == Role::Member {
-            return Err(ApiError::Forbidden);
-        }
-        return Ok(());
+        return require(&caller.session, scope_permission(scope));
     }
     if caller.scopes.contains(&scope)
         || (scope == Scope::DevicesRead && caller.scopes.contains(&Scope::DevicesWrite))
         || (scope == Scope::WebhooksRead && caller.scopes.contains(&Scope::WebhooksWrite))
+        || (scope == Scope::KeysRead && caller.scopes.contains(&Scope::KeysWrite))
     {
         return Ok(());
     }
     Err(ApiError::Forbidden)
 }
 
-fn scope_is_write(scope: Scope) -> bool {
-    matches!(
-        scope,
-        Scope::DevicesWrite
-            | Scope::KeysWrite
-            | Scope::RoutesWrite
-            | Scope::PolicyWrite
-            | Scope::DnsWrite
-            | Scope::WebhooksWrite
-    )
+/// The organisation permission a human console session needs for a scope.
+/// Read scopes stay open to every role, as they were before roles split,
+/// except webhook reads, which need the integrations permission.
+fn scope_permission(scope: Scope) -> Permission {
+    match scope {
+        Scope::DevicesRead | Scope::StatusRead => Permission::ViewNetwork,
+        Scope::AuditRead => Permission::ViewAudit,
+        Scope::AuditExport => Permission::ExportAudit,
+        Scope::DevicesWrite => Permission::ManagePeers,
+        Scope::KeysWrite | Scope::KeysRead => Permission::ManageJoinKeys,
+        Scope::RoutesWrite => Permission::ManageNetworks,
+        Scope::PolicyWrite => Permission::ManagePolicy,
+        Scope::DnsWrite => Permission::ManageDns,
+        // Webhook endpoints carry delivery URLs and signing metadata.
+        Scope::WebhooksRead | Scope::WebhooksWrite => Permission::ManageIntegrations,
+    }
 }
 
 async fn authenticate(
@@ -230,7 +284,7 @@ async fn api_token_session(
 ) -> Result<ApiCaller, ApiError> {
     let current_time = now();
     let row = sqlx::query(
-        "SELECT id,name,scopes_json,expires_at FROM api_clients WHERE token_hash=$1 AND org_id=$2 AND revoked_at IS NULL",
+        "SELECT id,name,scopes_json,expires_at FROM api_clients WHERE token_hash=$1 AND org_id=$2 AND revoked_at IS NULL AND suspended_at IS NULL",
     )
     .bind(hash(token))
     .bind(org_id.to_string())
@@ -277,7 +331,7 @@ async fn access_token_session(
 ) -> Result<ApiCaller, ApiError> {
     let current_time = now();
     let row = sqlx::query(
-        "SELECT t.api_client_id, c.name, t.scopes_json, t.expires_at, c.revoked_at, c.expires_at
+        "SELECT t.api_client_id, c.name, t.scopes_json, t.expires_at, c.revoked_at, c.expires_at, c.suspended_at
          FROM oauth_access_tokens t
          JOIN api_clients c ON c.id = t.api_client_id AND c.org_id = t.org_id
          WHERE t.token_hash=$1 AND t.org_id=$2",
@@ -294,7 +348,11 @@ async fn access_token_session(
     let access_expires_at: i64 = row.try_get(3)?;
     let revoked_at: Option<i64> = row.try_get(4)?;
     let client_expires_at: Option<i64> = row.try_get(5)?;
+    let suspended_at: Option<i64> = row.try_get(6)?;
+    // Checked on every request, so suspension or revocation of the client
+    // invalidates already-issued access tokens immediately.
     if revoked_at.is_some()
+        || suspended_at.is_some()
         || access_expires_at <= current_time
         || client_expires_at.is_some_and(|expires| expires <= current_time)
     {
@@ -347,9 +405,7 @@ pub(crate) async fn create_api_client(
     Json(input): Json<CreateApiClient>,
 ) -> Result<(StatusCode, Json<ApiClientCreated>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     insert_api_client(&s.store, org_id, &session, input).await
 }
 
@@ -429,15 +485,13 @@ pub(crate) async fn list_api_clients(
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApiClientRecord>>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     Ok(Json(load_api_clients(&s.store, org_id).await?))
 }
 
 async fn load_api_clients(store: &Store, org_id: Uuid) -> Result<Vec<ApiClientRecord>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,token_prefix,scopes_json,created_at,last_used_at,expires_at,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END FROM api_clients WHERE org_id=$1 ORDER BY name",
+        "SELECT id,name,token_prefix,scopes_json,created_at,last_used_at,expires_at,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,CASE WHEN suspended_at IS NOT NULL THEN 1 ELSE 0 END,rotated_at FROM api_clients WHERE org_id=$1 ORDER BY name",
     )
     .bind(org_id.to_string())
     .fetch_all(&store.pool)
@@ -455,6 +509,8 @@ async fn load_api_clients(store: &Store, org_id: Uuid) -> Result<Vec<ApiClientRe
                 last_used_at: row.try_get(5)?,
                 expires_at: row.try_get(6)?,
                 revoked: row.try_get::<i64, _>(7)? != 0,
+                suspended: row.try_get::<i64, _>(8)? != 0,
+                rotated_at: row.try_get(9)?,
             })
         })
         .collect()
@@ -466,9 +522,7 @@ pub(crate) async fn revoke_api_client(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageApiClients)?;
     let mut tx = s.store.pool.begin().await?;
     let changed = sqlx::query(
         "UPDATE api_clients SET revoked_at=$1,token_hash=$2 WHERE id=$3 AND org_id=$4 AND revoked_at IS NULL",
@@ -648,7 +702,7 @@ pub(crate) async fn oauth_token(
     }
     let current_time = now();
     let row = sqlx::query(
-        "SELECT org_id,name,scopes_json,expires_at FROM api_clients WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+        "SELECT org_id,name,scopes_json,expires_at FROM api_clients WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND suspended_at IS NULL",
     )
     .bind(client_id.to_string())
     .bind(hash(&client_secret))
@@ -882,8 +936,9 @@ async fn rename_device(
     session: &Session,
     friendly_name: &str,
 ) -> Result<StatusCode, ApiError> {
-    if session.role == Role::Member && !session.user_id.starts_with("api:") {
-        return Err(ApiError::Forbidden);
+    // API clients reach here only after `require_scope(DevicesWrite)`.
+    if !session.user_id.starts_with("api:") {
+        require(session, Permission::ManagePeers)?;
     }
     let value = friendly_name.trim();
     let friendly_name = if value.is_empty() {
@@ -983,7 +1038,7 @@ struct MintedKey {
     single_use: bool,
 }
 
-fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+pub(crate) fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     let Some(value) = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -1127,6 +1182,7 @@ async fn api_approve_routes(
             )));
         }
     }
+    crate::resources::ensure_routes_free(&mut tx, org_id, &body.approved_routes).await?;
     sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2 AND org_id=$3")
         .bind(serde_json::to_string(&body.approved_routes).unwrap())
         .bind(node_id.to_string())
@@ -1186,6 +1242,8 @@ async fn api_put_policy(
     let (org_id, caller) = authenticate_org_header(&s, &headers).await?;
     require_scope(&caller, Scope::PolicyWrite)?;
     let mut tx = s.store.pool.begin().await?;
+    // Lock the org row before reading the policy (see `put_acl`).
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let current = crate::load_acl_row_tx(&mut tx, org_id).await?;
     let expected = value
         .get("etag")
@@ -1208,7 +1266,6 @@ async fn api_put_policy(
     };
     let acl: crate::Acl = serde_json::from_str(&next).map_err(|_| ApiError::CorruptData)?;
     crate::publish_acl_tx(&mut tx, org_id, &current.json, &next, current.revision).await?;
-    bump_control_revision(&mut tx, org_id.to_string()).await?;
     append_audit(
         &mut tx,
         org_id,
@@ -1401,4 +1458,20 @@ async fn api_rotate_wg_only(
     Ok(Json(
         crate::wg_only::rotate_for_org(&s, org_id, peer_id, &caller.session, input).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_reads_need_the_integrations_permission() {
+        assert_eq!(
+            scope_permission(Scope::WebhooksRead),
+            Permission::ManageIntegrations
+        );
+        assert!(!Role::Member.can(scope_permission(Scope::WebhooksRead)));
+        assert!(Role::Admin.can(scope_permission(Scope::WebhooksRead)));
+        assert!(Role::Member.can(scope_permission(Scope::DevicesRead)));
+    }
 }

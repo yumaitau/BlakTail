@@ -22,7 +22,7 @@ import {
   type AclRuleDraft,
   type AclSshDraft,
 } from "@/lib/acl";
-import { canMutateTailnet, roleLabel, type OrgRole } from "@/lib/roles";
+import { can, roleLabel, type OrgRole } from "@/lib/roles";
 
 function toggleValue<T extends string>(values: T[], value: T): T[] {
   return values.includes(value)
@@ -71,13 +71,15 @@ export function AclEditor({
   initialAcl,
   role,
   people,
+  postureChecks = [],
 }: {
   initialAcl: string;
   role: OrgRole;
   people: AclPerson[];
+  postureChecks?: string[];
 }) {
   const router = useRouter();
-  const canMutate = canMutateTailnet(role);
+  const canMutate = can(role, "manage_policy");
   const parsedInitial = useMemo(() => {
     try {
       return parseAclPolicy(JSON.parse(initialAcl) as unknown);
@@ -93,6 +95,11 @@ export function AclEditor({
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const groupNames = policy.groups.map((group) => group.name);
+  // Keep names the policy already references visible even if the check was
+  // removed, so a missing check reads as a failing requirement.
+  const postureOptions = (selected: string[]) => [
+    ...new Set([...postureChecks, ...selected]),
+  ];
 
   function updateRule(index: number, next: AclRuleDraft) {
     setPolicy((current) => ({
@@ -595,6 +602,17 @@ export function AclEditor({
                       }
                     />
                   </label>
+                  {rule.action === "allow" ? (
+                    <SelectorSet
+                      legend="Source must pass posture"
+                      values={rule.posture}
+                      options={postureOptions(rule.posture)}
+                      disabled={!canMutate}
+                      labelFor={(name) => name}
+                      emptyHint="No posture checks yet. Create one under Posture checks."
+                      onChange={(posture) => updateRule(index, { ...rule, posture })}
+                    />
+                  ) : null}
                 </div>
               </li>
             ))}
@@ -624,9 +642,26 @@ export function AclEditor({
           <h2>SSH</h2>
           <p className="muted">
             Decide which operating-system users a source may open on a
-            destination. Check requires periodic re-authentication. Agents do
-            not yet enforce these rules; tests can already assert them.
+            destination. SSH rules govern TCP 22 on every destination they
+            select: sources without an SSH grant are rejected there even if a
+            port rule allows 22.
           </p>
+          <ul className="audit-details" aria-label="Where SSH rules are enforced">
+            <li>
+              <span className="badge online">Linux agent</span> Rejects TCP 22
+              from sources without a grant.
+            </li>
+            <li>
+              <span className="badge online">Linux agent with ssh-users</span>{" "}
+              Also limits logins per source through a verified sshd drop-in.
+              Without it, user-limited grants keep TCP 22 closed.
+            </li>
+            <li>
+              <span className="badge pending">macOS, iOS and other clients</span>{" "}
+              Do not filter inbound traffic, so these rules are not enforced
+              there. Use Explain access to check a specific device.
+            </li>
+          </ul>
         </div>
         {policy.ssh.length === 0 ? (
           <p className="muted">No SSH rules yet.</p>
@@ -649,7 +684,7 @@ export function AclEditor({
                     >
                       {ACL_SSH_ACTIONS.map((action) => (
                         <option key={action} value={action}>
-                          {action}
+                          {action === "check" ? "check (recent credential renewal)" : action}
                         </option>
                       ))}
                     </select>
@@ -741,9 +776,25 @@ export function AclEditor({
                       }
                     />
                   </label>
+                  {rule.action !== "deny" ? (
+                    <SelectorSet
+                      legend="Source must pass posture"
+                      values={rule.posture}
+                      options={postureOptions(rule.posture)}
+                      disabled={!canMutate}
+                      labelFor={(name) => name}
+                      emptyHint="No posture checks yet. Create one under Posture checks."
+                      onChange={(posture) => updateSsh(index, { ...rule, posture })}
+                    />
+                  ) : null}
                   {rule.action === "check" ? (
                     <label className="acl-selector">
-                      <span>Check period (seconds)</span>
+                      <span>
+                        Check period (seconds). The source device&apos;s
+                        credential must have been renewed within it; this is
+                        not an interactive person re-authentication. Default
+                        43200.
+                      </span>
                       <input
                         value={rule.check_period_secs}
                         disabled={!canMutate}

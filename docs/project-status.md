@@ -62,10 +62,21 @@ See [console.md](console.md).
 - Stable technical and MagicDNS identity, with editable audited friendly names
 - Tags, people groups, ACL rules, advertised-route approval, revoke, and tombstone
 - Linux subnet routers and opt-in IPv4 exit nodes
+- Named network resources with routing-peer failover, access selection and overlap checks ([limits](network-resources.md#current-limits))
 - Dual-stack overlay addresses (CGNAT IPv4 plus an organisation ULA `/64`)
-- Device posture: last-seen/online, OS, agent version, search
+- Device inventory: last-seen/online, OS, agent version, search
+- Versioned posture checks that gate policy rules on self-reported agent/OS
+  version and coordinator-observed credential state (not attestation)
+- Explain access, and SSH rules enforced at Linux destinations (per-user
+  limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials
-- Prometheus metrics and an actor-attributed audit log
+- Prometheus metrics and an actor-attributed, paged, filterable audit log with
+  audited export and a per-organisation hash chain (tamper-evident, not
+  tamper-proof)
+- Signed HTTPS webhooks with an event catalogue and per-destination
+  subscriptions (no email or chat delivery)
+- Owner opt-in traffic diagnostics endpoint and page; current agents do not
+  report traffic yet
 - Single-host SQLite or concurrent PostgreSQL coordinator storage
 - A disposable Sydney AWS proof harness, not a production SaaS
 - An iPhone client that joins a network as a WireGuard node and still administers All networks
@@ -74,11 +85,10 @@ See [console.md](console.md).
 
 - Not a released product; source builds are the only supported install path
 - Not a hosted SaaS or a closed-source agent
-- Not a Windows agent, and not a Windows or Linux desktop app
-- Scaffold note (2026-09-03, history above unchanged): `apps/linux-tray/`
-  (issue #12) and `docs/windows-agent.md` plus `blaktaild/windows-service.md`
-  (issue #11) now exist as honest scaffolds/notes only — no functional agent
-  or desktop app ships yet.
+- Not a proven Windows or Android client: both exist in code as experimental,
+  with no physical-device or clean-host proof; the Linux tray controls the
+  local agent but has not been validated on a clean desktop. See
+  [platform-support.md](platform-support.md)
 - Not a completed iPhone relay path: the phone joins as a WireGuard client over
   direct UDP; Australian relay fallback and hole punch are still the Mac/Linux
   agent cut
@@ -86,7 +96,11 @@ See [console.md](console.md).
 - Not an anonymity network; the coordinator and relay can still see metadata
 - Not a production-verified NAT claim: agents have hole punching and relay
   fallback, but a forced-relay proof across two independent NAT paths is still
-  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24)
+  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24). Multi-relay
+  failover is implemented and unit-tested; its single-host drill
+  (`deploy/homelab/prove-relay-failover.sh`) has not yet been recorded
+- No HTTPS/WebSocket relay transport: networks that block all UDP cannot
+  connect (ADR 0004)
 - Not an IPv6-only product yet: dual-stack passed on private AWS agents, but
   the drill that removes each BlakTail IPv4 address is still open in
   [#32](https://github.com/jusso-dev/BlakTail/issues/32)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Enrol two Linux agents and prove a port-scoped allow, an adjacent denied
-# port, and an unauthorised SSH user.
+# port, and an unauthorised SSH user. The store agent manages a verified
+# sshd drop-in (BLAKTAIL_SSHD_DROPIN); until it proves that drop-in active,
+# the coordinator and agent keep TCP 22 closed to user-limited sources.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -12,6 +14,7 @@ WORKDIR="/tmp/blaktail-acl-services-prove"
 COORD="https://coord:8443"
 LISTEN_PORT=51820
 SSH_PASS="prove-ssh"
+SSHD_DROPIN="/var/lib/blaktail/sshd_policy.conf"
 suffix="$(openssl rand -hex 2)"
 office_name="office-svc-${suffix}"
 store_name="store-svc-${suffix}"
@@ -122,19 +125,21 @@ expect_refused() {
 wait_ssh_policy() {
   local deadline=$((SECONDS + 45))
   while (( SECONDS < deadline )); do
-    if "${COMPOSE[@]}" exec -T agent-store sh -c 'grep -q "AllowUsers blaktail" /var/lib/blaktail/sshd_blaktail.conf'; then
-      echo "ok store ssh policy written"
+    if "${COMPOSE[@]}" exec -T agent-store sh -c "grep -q 'AllowUsers blaktail' ${SSHD_DROPIN}"; then
+      echo "ok store ssh policy written and verified"
       return 0
     fi
     sleep 3
   done
   echo "FAIL store ssh policy missing" >&2
-  "${COMPOSE[@]}" exec -T agent-store sh -c 'cat /var/lib/blaktail/sshd_blaktail.conf' >&2 || true
+  "${COMPOSE[@]}" exec -T agent-store sh -c "cat ${SSHD_DROPIN} /var/lib/blaktail/sshd_blaktail.conf" >&2 || true
   status_of agent-store >&2 || true
   return 1
 }
 
-start_sshd() {
+# Users, host keys and auth settings exist before the agent writes and
+# verifies its drop-in with sshd -t / sshd -T.
+prepare_sshd() {
   "${COMPOSE[@]}" exec -T agent-store sh -ceu '
     useradd -m blaktail 2>/dev/null || true
     useradd -m intruder 2>/dev/null || true
@@ -148,13 +153,33 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication no
 PermitRootLogin no
 UsePAM yes
-Include /var/lib/blaktail/sshd_blaktail.conf
 EOF
+    # As documented: one Include at the end of sshd_config, file owned by the agent.
+    touch /var/lib/blaktail/sshd_policy.conf
+    grep -qx "Include /var/lib/blaktail/sshd_policy.conf" /etc/ssh/sshd_config \
+      || echo "Include /var/lib/blaktail/sshd_policy.conf" >> /etc/ssh/sshd_config
+    sshd -t
+  '
+}
+
+start_sshd() {
+  "${COMPOSE[@]}" exec -T agent-store sh -ceu '
     sshd -t
     if ! pgrep -x sshd >/dev/null; then
       /usr/sbin/sshd
     fi
   '
+}
+
+wait_ssh_allowed() {
+  local deadline=$((SECONDS + 45))
+  while (( SECONDS < deadline )); do
+    if ssh_as blaktail >/tmp/blaktail-svc-ssh-allow.log 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
 }
 
 ssh_as() {
@@ -218,8 +243,11 @@ echo "== enrol ${store_name} at ${store_ip_lan}:${LISTEN_PORT}"
   shred -u /tmp/store.key || rm -f /tmp/store.key
 '
 
+install_tools
+prepare_sshd
 "${COMPOSE[@]}" exec -d agent-office blaktaild --coord-ca /certs/ca.crt run --poll-seconds 5
-"${COMPOSE[@]}" exec -d agent-store blaktaild --coord-ca /certs/ca.crt run --poll-seconds 5
+"${COMPOSE[@]}" exec -d -e "BLAKTAIL_SSHD_DROPIN=${SSHD_DROPIN}" agent-store \
+  blaktaild --coord-ca /certs/ca.crt run --poll-seconds 5
 for _ in $(seq 1 15); do
   if "${COMPOSE[@]}" exec -T agent-office wg show blaktail0 >/dev/null 2>&1 \
     && "${COMPOSE[@]}" exec -T agent-store wg show blaktail0 >/dev/null 2>&1; then
@@ -255,16 +283,16 @@ acl "$(python3 -c "import json; print(json.dumps({
 wait_for "service policy lists ${store_name}" present
 wait_ssh_policy
 
-install_tools
 start_listeners
 start_sshd
 wait_connect "TCP 8080 allowed under testers service rule" 8080
 expect_refused "TCP 8081 denied next to the allowed service" 8081
 
-if ! ssh_as blaktail >/tmp/blaktail-svc-ssh-allow.log 2>&1; then
+if ! wait_ssh_allowed; then
   echo "FAIL authorised SSH user blaktail" >&2
   cat /tmp/blaktail-svc-ssh-allow.log >&2 || true
-  "${COMPOSE[@]}" exec -T agent-store sh -c 'cat /var/lib/blaktail/sshd_blaktail.conf' >&2 || true
+  "${COMPOSE[@]}" exec -T agent-store sh -c "cat ${SSHD_DROPIN}" >&2 || true
+  "${COMPOSE[@]}" exec -T agent-store iptables -S BLAKTAIL-ACL >&2 || true
   exit 1
 fi
 echo "ok SSH user blaktail allowed"

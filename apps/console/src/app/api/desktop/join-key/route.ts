@@ -4,7 +4,7 @@ import {
   requireConsoleContextFromSession,
   sessionFromBearer,
 } from "@/lib/desktop-auth";
-import { canMutateTailnet } from "@/lib/roles";
+import { can, permissionReason } from "@/lib/roles";
 import {
   activeOrganisationIdFromRequest,
   OrganisationAccessError,
@@ -30,9 +30,9 @@ export async function POST(request: Request) {
       session,
       activeOrganisationIdFromRequest(request) ?? body.organisationId,
     );
-    if (!canMutateTailnet(ctx.role)) {
+    if (!can(ctx.role, "manage_join_keys")) {
       return NextResponse.json(
-        { error: "Only owners and admins can mint join keys." },
+        { error: permissionReason(ctx.role, "manage_join_keys") },
         { status: 403 },
       );
     }

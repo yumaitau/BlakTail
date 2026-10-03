@@ -8,7 +8,7 @@ import {
   revokeWgOnlyPeerAction,
 } from "@/app/actions";
 import { ACL_TAGS } from "@/lib/acl";
-import { canMutateTailnet, type OrgRole } from "@/lib/roles";
+import { can, type OrgRole } from "@/lib/roles";
 import type { NetworkWgOnlyPeer } from "@/lib/coord";
 
 export function WgOnlyManager({
@@ -23,7 +23,7 @@ export function WgOnlyManager({
   organisationId: string;
 }) {
   const router = useRouter();
-  const canMutate = canMutateTailnet(role);
+  const canMutate = can(role, "manage_peers");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 

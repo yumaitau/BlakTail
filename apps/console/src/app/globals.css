@@ -307,7 +307,21 @@ label:has(> input[type="checkbox"]) input {
 
 .nav nav {
   display: grid;
+  gap: 0.8rem;
+}
+
+.nav-group {
+  display: grid;
   gap: 0.2rem;
+}
+
+.nav-group-label {
+  margin: 0;
+  padding: 0 0.7rem;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .nav a {
@@ -1331,4 +1345,97 @@ button.quiet-danger:hover:not(:disabled),
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+.dns-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin: 0;
+}
+
+.dns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.dns-assign {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.dns-hint {
+  display: block;
+  font-size: 12px;
+}
+
+.dns-pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+.dns-diff {
+  margin: 0;
+}
+
+.dns-diff-added {
+  color: var(--blaktail-eucalyptus-400);
+}
+
+.dns-diff-removed {
+  color: var(--destructive);
+}
+
+/* Topology graph: static, no motion; the page list is its text equivalent. */
+.topology-graph {
+  width: 100%;
+  max-height: 70vh;
+  background: var(--blaktail-night-900);
+  border-radius: 0.5rem;
+}
+
+.topology-heading,
+.topology-label {
+  fill: var(--blaktail-sand-200);
+  font-size: 12px;
+}
+
+.topology-heading {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.topology-dot {
+  fill: var(--blaktail-orange-500);
+}
+
+.topology-line {
+  stroke: var(--blaktail-sand-300);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.topology-line-resource {
+  stroke: var(--blaktail-wattle-400);
+  stroke-dasharray: 4 3;
+}
+
+.topology-graph a:focus-visible .topology-dot {
+  stroke: var(--blaktail-sand-100);
+  stroke-width: 3;
+}
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
 }

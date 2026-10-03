@@ -28,6 +28,19 @@ scopes; the access token still carries the registered set. Revoking the
 client rejects later access tokens. Webhook destinations are minted separately
 and their signing secrets are not OAuth credentials.
 
+Clients are service users: they cannot sign in to the console, and their writes
+are audited as `api:<client id>` with actor role `api_client`. Owners can rotate
+a client (`POST /v1/orgs/{org}/api-clients/{id}/rotate`, optional
+`{"expires_in_seconds": n}`), which returns a new shown-once secret and
+invalidates the old secret and all its access tokens at once, or suspend and
+resume it (`…/suspend`, `…/resume`). Suspension blocks token minting and
+rejects already-issued access tokens on their next request. These are console
+routes authorised by the signed console assertion, not `/api/v1` operations.
+Human console sessions calling `/api/v1` need the role permission matching
+each write scope ([roles.md](roles.md)). `webhooks:read` is the one read
+scope that also needs a permission (`manage_integrations`), because webhook
+listings expose delivery URLs.
+
 ## Writes
 
 - Policy PUT requires the current `etag`. `{"rollback": true}` restores the
@@ -38,11 +51,38 @@ and their signing secrets are not OAuth credentials.
   revision.
 - `POST /api/v1/keys` honours `Idempotency-Key` (8–128 characters). Reusing a
   key with a different body returns `409`.
+- `/api/v1/network-resources` creates named routes: `POST` honours
+  `Idempotency-Key` and `dry_run`, `PUT` requires the current `etag` (`412`
+  when stale), and `DELETE` accepts `If-Match`. See
+  [network-resources.md](network-resources.md).
 - Request bodies are rejected above 64 KiB (`413`).
 - Each `bta_` client is limited to 120 requests per 60-second window (`429`).
 - Errors use `{ error, code, message, request_id }`.
 - CI runs `scripts/admin-openapi-drift.sh` so `docs/openapi/admin-v1.yaml`
   stays aligned with `api_routes()` in `blaktail-coord`.
+
+## Operations added for parity (drafts 17, 18, 22)
+
+These call the same functions as the console routes, so the role check and
+validation are shared; a coordinator test proves both paths return the same
+error for the same invalid input.
+
+| Operation | Scope | Notes |
+| --- | --- | --- |
+| `GET /api/v1/audit` filters | `audit:read` | `actor`, `action` (`node.*` prefix), `target_type`, `target_id`, `since`, `until` |
+| `GET /api/v1/audit/export` | `audit:export` | `format=json|csv`, same filters, ≤10,000 rows, audited |
+| `GET /api/v1/audit/verify` | `audit:read` | Hash-chain report |
+| `GET`/`POST /api/v1/posture-checks`, `PUT`/`DELETE /api/v1/posture-checks/{id}` | `devices:read` / `policy:write` | `PUT` needs the `version` you read (`412` when stale) |
+| `GET /api/v1/keys` | `keys:read` (or `keys:write`) | Join-key metadata; never the secret |
+| `DELETE /api/v1/keys/{id}` | `keys:write` | Idempotent revoke |
+| `POST /api/v1/dns/validate` | `devices:read` | Canonicalises a draft and returns warnings; nothing is published |
+| `GET /api/v1/events/catalogue` | `webhooks:read` | Event types and severity |
+| `PUT /api/v1/webhooks/{id}/subscriptions` | `webhooks:write` | Choose event types per destination |
+
+Not exposed to automation: traffic settings and data (owner console only),
+DNS revision history and preview, private services and service-user
+lifecycle. Copyable curl and Terraform examples live in
+[../examples/automation](../examples/automation/README.md).
 
 A disposable smoke against a running coordinator:
 

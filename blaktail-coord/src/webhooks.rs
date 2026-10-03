@@ -1,4 +1,5 @@
-use crate::{hash, now, secret, ApiError, AppState, Role, Session};
+use crate::permissions::{require, Permission};
+use crate::{hash, now, secret, ApiError, AppState, Session};
 use axum::{
     extract::{Path as UrlPath, State},
     http::{HeaderMap, StatusCode},
@@ -13,10 +14,10 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{AnyConnection, Row};
 use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::{Duration, Instant},
 };
 use tokio::net::lookup_host;
 use tracing::warn;
@@ -28,9 +29,10 @@ const SEALED_SECRET_PREFIX: &str = "bte1.";
 const MAX_DESTINATIONS: i64 = 8;
 const MAX_ATTEMPTS: i64 = 8;
 const MAX_CONSOLE_EVENT_PAYLOAD: usize = 4_096;
-const ALLOWED_CONSOLE_EVENTS: &[&str] = &["membership.updated"];
+const ALLOWED_CONSOLE_EVENTS: &[&str] = &["membership.updated", "membership.role_changed"];
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 fn webhook_seal_key(master: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -82,6 +84,9 @@ pub(crate) struct WebhookDestination {
     pub secret_prefix: String,
     pub enabled: bool,
     pub created_at: i64,
+    /// Catalogued event types this destination receives; `["*"]` is all.
+    #[serde(default)]
+    pub event_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
 }
@@ -91,6 +96,8 @@ pub(crate) struct WebhookDestination {
 pub(crate) struct CreateWebhook {
     name: String,
     url: String,
+    #[serde(default)]
+    event_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,43 +120,81 @@ pub(crate) struct WebhookDelivery {
     pub dead_lettered_at: Option<i64>,
 }
 
+/// Queues one logical event for every enabled destination subscribed to it.
+/// Runs inside the caller's transaction (transactional outbox).
 pub(crate) async fn enqueue(
-    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    connection: &mut AnyConnection,
     org_id: Uuid,
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<(), ApiError> {
     let event_id = Uuid::new_v4().to_string();
+    enqueue_once(connection, org_id, event_type, &event_id, payload).await?;
+    Ok(())
+}
+
+/// Like `enqueue` with a caller-chosen event id: a second call with the same
+/// id is a no-op per destination. Returns the number of rows queued.
+pub(crate) async fn enqueue_once(
+    connection: &mut AnyConnection,
+    org_id: Uuid,
+    event_type: &str,
+    event_id: &str,
+    payload: &serde_json::Value,
+) -> Result<usize, ApiError> {
+    debug_assert!(
+        crate::notifications::find(event_type).is_some(),
+        "{event_type} is not in the event catalogue"
+    );
     let created_at = now();
     let destinations = sqlx::query(
-        "SELECT id FROM webhook_destinations WHERE org_id=$1 AND enabled=1 ORDER BY created_at,id",
+        "SELECT id,event_types_json FROM webhook_destinations WHERE org_id=$1 AND enabled=1 ORDER BY created_at,id",
     )
     .bind(org_id.to_string())
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *connection)
     .await?;
+    let mut queued = 0;
     for row in destinations {
         let destination_id: String = row.try_get(0)?;
-        sqlx::query(
+        let event_types: Vec<String> =
+            serde_json::from_str(&row.try_get::<String, _>(1)?).unwrap_or_default();
+        if !crate::notifications::subscribed(&event_types, event_type) {
+            continue;
+        }
+        queued += sqlx::query(
             "INSERT INTO webhook_outbox(id,org_id,destination_id,event_id,event_type,payload_json,created_at,next_attempt_at,attempts)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$7,0)",
+             VALUES($1,$2,$3,$4,$5,$6,$7,$7,0) ON CONFLICT (destination_id,event_id) DO NOTHING",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(org_id.to_string())
         .bind(destination_id)
-        .bind(&event_id)
+        .bind(event_id)
         .bind(event_type)
         .bind(payload.to_string())
         .bind(created_at)
-        .execute(&mut **tx)
-        .await?;
+        .execute(&mut *connection)
+        .await?
+        .rows_affected() as usize;
     }
-    Ok(())
+    Ok(queued)
 }
 
 pub(crate) async fn delivery_loop(state: AppState) {
+    let mut last_sweep: Option<Instant> = None;
     loop {
         if let Err(error) = deliver_due(&state).await {
             warn!(%error, "webhook delivery poll failed");
+        }
+        if last_sweep.is_none_or(|at| at.elapsed() >= SWEEP_INTERVAL) {
+            last_sweep = Some(Instant::now());
+            if let Err(error) =
+                crate::notifications::enqueue_expiring_credentials(&state.store, now()).await
+            {
+                warn!(%error, "credential expiry sweep failed");
+            }
+            if let Err(error) = crate::traffic::purge_expired(&state.store).await {
+                warn!(%error, "traffic retention purge failed");
+            }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -238,18 +283,28 @@ struct DeliveryJob<'a> {
 
 async fn deliver_one(job: DeliveryJob<'_>) -> Result<(), ApiError> {
     let parsed = validate_destination_url(job.url, cfg!(test))?;
-    revalidate_resolved_ips(&parsed).await?;
+    let pinned = revalidate_resolved_ips(&parsed).await?;
     let timestamp = now();
     let signature = sign_payload(job.signing_secret, timestamp, job.payload);
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(DELIVERY_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    // Connect to the address that was checked, so a DNS answer that changes
+    // between the check and the connection cannot reach a blocked target.
+    if let (Some(host), Some(addr)) = (parsed.host_str(), pinned) {
+        builder = builder.resolve(host, addr);
+    }
+    let client = builder
         .build()
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let severity = crate::notifications::find(job.event_type)
+        .map(|kind| kind.severity.as_str())
+        .unwrap_or("info");
     let response = client
         .post(parsed)
         .header("content-type", "application/json")
         .header("x-blaktail-event", job.event_type)
+        .header("x-blaktail-severity", severity)
         .header("x-blaktail-delivery", job.delivery_id)
         .header("x-blaktail-event-id", job.event_id)
         .header("x-blaktail-organisation", job.org_id)
@@ -295,51 +350,59 @@ pub(crate) fn validate_destination_url(raw: &str, allow_private: bool) -> Result
             "webhook URL cannot include credentials".into(),
         ));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest("webhook URL must include a host".into()))?;
-    if is_blocked_hostname(host) {
-        return Err(ApiError::BadRequest(
-            "webhook URL host is not allowed".into(),
-        ));
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip, allow_private) {
-            return Err(ApiError::BadRequest(
-                "webhook URL target is not allowed".into(),
-            ));
+    // `host()` sees IPv6 literals and numeric IPv4 forms that a string
+    // parse of `host_str()` would miss.
+    let ip = match url.host() {
+        Some(url::Host::Domain(host)) => {
+            if is_blocked_hostname(host) {
+                return Err(ApiError::BadRequest(
+                    "webhook URL host is not allowed".into(),
+                ));
+            }
+            None
         }
+        Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        None => {
+            return Err(ApiError::BadRequest(
+                "webhook URL must include a host".into(),
+            ))
+        }
+    };
+    if ip.is_some_and(|ip| is_blocked_ip(ip, allow_private)) {
+        return Err(ApiError::BadRequest(
+            "webhook URL target is not allowed".into(),
+        ));
     }
     Ok(url)
 }
 
-async fn revalidate_resolved_ips(url: &Url) -> Result<(), ApiError> {
+async fn revalidate_resolved_ips(url: &Url) -> Result<Option<SocketAddr>, ApiError> {
     let host = url
         .host_str()
         .ok_or_else(|| ApiError::BadRequest("webhook URL must include a host".into()))?;
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+    if host.parse::<IpAddr>().is_ok() || host.starts_with('[') {
+        return Ok(None);
     }
     let port = url.port_or_known_default().unwrap_or(443);
     let addrs = lookup_host((host, port))
         .await
         .map_err(|_| ApiError::BadRequest("webhook URL host could not be resolved".into()))?;
-    let mut any = false;
+    let mut first = None;
     for addr in addrs {
-        any = true;
         if is_blocked_ip(addr.ip(), cfg!(test)) {
             return Err(ApiError::BadRequest(
                 "webhook URL resolved to a blocked address".into(),
             ));
         }
-        let _unused: SocketAddr = addr;
+        first.get_or_insert(addr);
     }
-    if !any {
-        return Err(ApiError::BadRequest(
+    match first {
+        Some(addr) => Ok(Some(addr)),
+        None => Err(ApiError::BadRequest(
             "webhook URL host could not be resolved".into(),
-        ));
+        )),
     }
-    Ok(())
 }
 
 fn is_blocked_hostname(host: &str) -> bool {
@@ -353,6 +416,14 @@ fn is_blocked_hostname(host: &str) -> bool {
 }
 
 fn is_blocked_ip(ip: IpAddr, allow_private: bool) -> bool {
+    // An IPv4-mapped IPv6 literal must not bypass the IPv4 rules.
+    let ip = match ip {
+        IpAddr::V6(value) => value
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(value)),
+        other => other,
+    };
     if is_metadata_ip(ip) {
         return true;
     }
@@ -361,26 +432,43 @@ fn is_blocked_ip(ip: IpAddr, allow_private: bool) -> bool {
     }
     match ip {
         IpAddr::V4(value) => {
+            let [a, b, ..] = value.octets();
             value.is_loopback()
                 || value.is_private()
                 || value.is_link_local()
                 || value.is_unspecified()
                 || value.is_broadcast()
-                || value.octets()[0] == 0
+                || value.is_multicast()
+                || value.is_documentation()
+                || a == 0
+                // Shared/CGNAT space, which also holds the BlakTail overlay.
+                || (a == 100 && (64..=127).contains(&b))
+                // Benchmarking and reserved ranges.
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 240
         }
         IpAddr::V6(value) => {
+            let segments = value.segments();
             value.is_loopback()
                 || value.is_unique_local()
                 || value.is_unicast_link_local()
                 || value.is_unspecified()
+                || value.is_multicast()
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                // IPv4-compatible (deprecated) addresses.
+                || segments[..6].iter().all(|segment| *segment == 0)
         }
     }
 }
 
+const AWS_IPV6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+const ALIBABA_METADATA: Ipv4Addr = Ipv4Addr::new(100, 100, 100, 200);
+
 fn is_metadata_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(value) => value.octets() == [169, 254, 169, 254],
-        IpAddr::V6(_) => false,
+        // Cloud instance metadata: AWS, GCP, Azure, OpenStack and Alibaba.
+        IpAddr::V4(value) => value.octets() == [169, 254, 169, 254] || value == ALIBABA_METADATA,
+        IpAddr::V6(value) => value == AWS_IPV6_METADATA,
     }
 }
 
@@ -402,9 +490,7 @@ pub(crate) async fn list_destinations_console(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WebhookDestination>>, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     Ok(Json(load_destinations(&s, org_id).await?))
 }
 
@@ -413,7 +499,7 @@ async fn load_destinations(
     org_id: Uuid,
 ) -> Result<Vec<WebhookDestination>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,url,secret_prefix,enabled,created_at FROM webhook_destinations WHERE org_id=$1 ORDER BY created_at,id",
+        "SELECT id,name,url,secret_prefix,enabled,created_at,event_types_json FROM webhook_destinations WHERE org_id=$1 ORDER BY created_at,id",
     )
     .bind(org_id.to_string())
     .fetch_all(&state.store.pool)
@@ -428,6 +514,7 @@ async fn load_destinations(
             secret_prefix: row.try_get(3)?,
             enabled: row.try_get::<i64, _>(4)? != 0,
             created_at: row.try_get(5)?,
+            event_types: serde_json::from_str(&row.try_get::<String, _>(6)?).unwrap_or_default(),
             secret: None,
         });
     }
@@ -451,9 +538,7 @@ pub(crate) async fn enqueue_console_event(
     Json(input): Json<ConsoleWebhookEvent>,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role != Role::Owner {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageSecurity)?;
     if !ALLOWED_CONSOLE_EVENTS.contains(&input.event_type.as_str()) {
         return Err(ApiError::BadRequest("event type is not allowed".into()));
     }
@@ -496,9 +581,7 @@ pub(crate) async fn create_destination_console(
     Json(input): Json<CreateWebhook>,
 ) -> Result<(StatusCode, Json<WebhookDestination>), ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     insert_destination(&s, org_id, &session, input).await
 }
 
@@ -515,6 +598,12 @@ async fn insert_destination(
         ));
     }
     let url = validate_destination_url(&input.url, cfg!(test))?;
+    let event_types = crate::notifications::validate_event_types(
+        input
+            .event_types
+            .as_deref()
+            .unwrap_or(&[crate::notifications::ALL_EVENTS.to_owned()]),
+    )?;
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM webhook_destinations WHERE org_id=$1 AND enabled=1",
     )
@@ -533,8 +622,8 @@ async fn insert_destination(
     let created_at = now();
     let mut tx = state.store.pool.begin().await?;
     sqlx::query(
-        "INSERT INTO webhook_destinations(id,org_id,name,url,signing_secret,secret_hash,secret_prefix,enabled,created_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,1,$8)",
+        "INSERT INTO webhook_destinations(id,org_id,name,url,signing_secret,secret_hash,secret_prefix,enabled,created_at,event_types_json)
+         VALUES($1,$2,$3,$4,$5,$6,$7,1,$8,$9)",
     )
     .bind(id.to_string())
     .bind(org_id.to_string())
@@ -544,6 +633,7 @@ async fn insert_destination(
     .bind(hash(&signing_secret))
     .bind(&prefix)
     .bind(created_at)
+    .bind(serde_json::to_string(&event_types).map_err(|_| ApiError::CorruptData)?)
     .execute(&mut *tx)
     .await
     .map_err(|error| {
@@ -560,7 +650,7 @@ async fn insert_destination(
         "webhook.created",
         "webhook",
         Some(&id.to_string()),
-        &serde_json::json!({"name": name, "url_host": url.host_str()}),
+        &serde_json::json!({"name": name, "url_host": url.host_str(), "event_types": event_types}),
     )
     .await?;
     tx.commit().await?;
@@ -573,6 +663,7 @@ async fn insert_destination(
             secret_prefix: prefix,
             enabled: true,
             created_at,
+            event_types,
             secret: Some(signing_secret),
         }),
     ))
@@ -594,9 +685,7 @@ pub(crate) async fn delete_destination_console(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     disable_destination(&s, org_id, &session, destination_id).await
 }
 
@@ -651,9 +740,7 @@ pub(crate) async fn list_deliveries_console(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WebhookDelivery>>, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     Ok(Json(load_deliveries(&s, org_id, destination_id).await?))
 }
 
@@ -714,9 +801,7 @@ pub(crate) async fn replay_delivery_console(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = crate::console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageIntegrations)?;
     reset_delivery(&s, org_id, &session, delivery_id).await
 }
 
@@ -767,6 +852,45 @@ mod tests {
         assert!(validate_destination_url("https://localhost/hook", true).is_err());
         assert!(validate_destination_url("https://example.com/hook", false).is_ok());
         assert!(validate_destination_url("http://127.0.0.1:9/hook", true).is_ok());
+    }
+
+    #[test]
+    fn webhook_urls_reject_mapped_cgnat_and_cloud_metadata_targets() {
+        for blocked in [
+            "https://[::ffff:127.0.0.1]/hook",
+            "https://[::ffff:10.1.2.3]/hook",
+            "https://[::1]/hook",
+            "https://[fd00:ec2::254]/latest",
+            "https://100.64.0.1/hook",
+            "https://100.100.100.200/latest",
+            "https://169.254.10.1/hook",
+            "https://192.168.1.10/hook",
+            "https://172.16.0.1/hook",
+            "https://0.0.0.0/hook",
+            "https://224.0.0.1/hook",
+            "https://metadata.google.internal/computeMetadata",
+            "https://printer.local/hook",
+            "https://user:pass@example.com/hook",
+            "ftp://example.com/hook",
+        ] {
+            assert!(
+                validate_destination_url(blocked, false).is_err(),
+                "{blocked} must be rejected"
+            );
+        }
+        // Metadata stays blocked even where private targets are allowed.
+        for metadata in [
+            "https://[::ffff:169.254.169.254]/latest",
+            "https://[fd00:ec2::254]/latest",
+            "https://100.100.100.200/latest",
+        ] {
+            assert!(
+                validate_destination_url(metadata, true).is_err(),
+                "{metadata}"
+            );
+        }
+        assert!(validate_destination_url("https://[2606:4700::1111]/hook", false).is_ok());
+        assert!(validate_destination_url("https://hooks.example.org/x", false).is_ok());
     }
 
     #[test]

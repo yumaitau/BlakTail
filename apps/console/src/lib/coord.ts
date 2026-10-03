@@ -1,6 +1,8 @@
 import "server-only";
 
+import { requireWriteAssurance } from "./auth-policy";
 import { signCoordAssertion } from "./coord-assertion";
+import { can, permissionReason } from "./roles";
 import {
   organisationContext,
   type ConsoleContext,
@@ -27,6 +29,7 @@ export type CoordNode = {
   expired: boolean;
   expires_soon: boolean;
   revoked: boolean;
+  suspended?: boolean;
   deleted?: boolean;
   online?: boolean;
   last_seen_at?: number | null;
@@ -57,6 +60,8 @@ export type ApiClient = {
   last_used_at: number | null;
   expires_at: number | null;
   revoked: boolean;
+  suspended?: boolean;
+  rotated_at?: number | null;
 };
 
 export type ApiClientCreated = ApiClient & {
@@ -70,6 +75,8 @@ export type WebhookDestination = {
   secret_prefix: string;
   enabled: boolean;
   created_at: number;
+  /** Catalogued event types, or ["*"] for every event. */
+  event_types?: string[];
   secret?: string | null;
 };
 
@@ -137,13 +144,18 @@ function coordBaseUrl(): string {
   return url.replace(/\/$/, "");
 }
 
-async function coordFetch(
+export async function coordFetch(
   path: string,
   init: RequestInit & { ctx?: ConsoleContext } = {},
 ): Promise<Response> {
   const { ctx, headers: initHeaders, ...rest } = init;
   const headers = new Headers(initHeaders);
   if (ctx) {
+    const method = (rest.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      // The organisation's MFA rule gates every coordinator write.
+      await requireWriteAssurance(ctx);
+    }
     headers.set("Authorization", `Bearer ${signCoordAssertion(ctx)}`);
   }
   if (!headers.has("content-type") && rest.body) {
@@ -156,7 +168,7 @@ async function coordFetch(
   });
 }
 
-async function readError(res: Response): Promise<string> {
+export async function readError(res: Response): Promise<string> {
   try {
     const body = (await res.json()) as { error?: string };
     if (body.error) return body.error;
@@ -259,8 +271,9 @@ export async function revokeNode(
   ctx: ConsoleContext,
   nodeId: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot revoke devices.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}`, {
     method: "DELETE",
@@ -275,8 +288,9 @@ export async function tombstoneNode(
   ctx: ConsoleContext,
   nodeId: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot delete devices.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/tombstone`,
@@ -293,8 +307,9 @@ export async function tombstoneNode(
 export async function listApiClients(
   ctx: ConsoleContext,
 ): Promise<ApiClient[]> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot list automation credentials.");
+  const denied = permissionReason(ctx.role, "manage_api_clients");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/api-clients`, {
     method: "GET",
@@ -310,8 +325,9 @@ export async function createApiClient(
   ctx: ConsoleContext,
   input: { name: string; scopes: string[] },
 ): Promise<ApiClientCreated> {
-  if (ctx.role !== "owner") {
-    throw new Error("Only owners can create automation credentials.");
+  const denied = permissionReason(ctx.role, "manage_api_clients");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/api-clients`, {
     method: "POST",
@@ -327,8 +343,9 @@ export async function createApiClient(
 export async function listWebhooks(
   ctx: ConsoleContext,
 ): Promise<WebhookDestination[]> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot list webhook destinations.");
+  const denied = permissionReason(ctx.role, "manage_integrations");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks`, {
     method: "GET",
@@ -344,8 +361,9 @@ export async function createWebhook(
   ctx: ConsoleContext,
   input: { name: string; url: string },
 ): Promise<WebhookDestination> {
-  if (ctx.role === "member") {
-    throw new Error("Only owners and admins can create webhook destinations.");
+  const denied = permissionReason(ctx.role, "manage_integrations");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks`, {
     method: "POST",
@@ -362,8 +380,9 @@ export async function disableWebhook(
   ctx: ConsoleContext,
   destinationId: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Only owners and admins can disable webhook destinations.");
+  const denied = permissionReason(ctx.role, "manage_integrations");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/webhooks/${destinationId}`,
@@ -381,8 +400,9 @@ export async function listWebhookDeliveries(
   ctx: ConsoleContext,
   destinationId: string,
 ): Promise<WebhookDelivery[]> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot list webhook deliveries.");
+  const denied = permissionReason(ctx.role, "manage_integrations");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/webhooks/${destinationId}/deliveries`,
@@ -399,22 +419,28 @@ export async function listWebhookDeliveries(
 
 export async function emitMembershipUpdated(
   ctx: ConsoleContext,
-  payload: { membership_id: string; role: string; status: string },
+  payload: { membership_id: string; role: string; status: string; previous_role?: string },
 ): Promise<void> {
-  if (ctx.role !== "owner") {
+  if (!can(ctx.role, "manage_security")) {
     return;
   }
+  const events = ["membership.updated"];
+  if (payload.previous_role && payload.previous_role !== payload.role) {
+    events.push("membership.role_changed");
+  }
   try {
-    const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks/events`, {
-      method: "POST",
-      ctx,
-      body: JSON.stringify({
-        event_type: "membership.updated",
-        payload,
-      }),
-    });
-    if (!res.ok) {
-      console.warn(`membership webhook enqueue failed: ${await readError(res)}`);
+    for (const eventType of events) {
+      const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/webhooks/events`, {
+        method: "POST",
+        ctx,
+        body: JSON.stringify({
+          event_type: eventType,
+          payload,
+        }),
+      });
+      if (!res.ok) {
+        console.warn(`membership webhook enqueue failed: ${await readError(res)}`);
+      }
     }
   } catch (error) {
     console.warn(
@@ -429,8 +455,9 @@ export async function replayWebhookDelivery(
   ctx: ConsoleContext,
   deliveryId: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Only owners and admins can replay webhook deliveries.");
+  const denied = permissionReason(ctx.role, "manage_integrations");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/webhooks/deliveries/${deliveryId}/replay`,
@@ -448,8 +475,9 @@ export async function revokeApiClient(
   ctx: ConsoleContext,
   clientId: string,
 ): Promise<void> {
-  if (ctx.role !== "owner") {
-    throw new Error("Only owners can revoke automation credentials.");
+  const denied = permissionReason(ctx.role, "manage_api_clients");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/api-clients/${clientId}`,
@@ -468,8 +496,9 @@ export async function updateNodeFriendlyName(
   nodeId: string,
   friendlyName: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot rename devices.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/friendly-name`,
@@ -489,8 +518,9 @@ export async function approveNodeRoutes(
   nodeId: string,
   approvedRoutes: string[],
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot approve subnet or exit-node routes.");
+  const denied = permissionReason(ctx.role, "manage_networks");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/routes`,
@@ -513,8 +543,9 @@ export async function mintJoinKey(
     tags?: DeviceTag[];
   },
 ): Promise<JoinKeyResult> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot mint join keys.");
+  const denied = permissionReason(ctx.role, "manage_join_keys");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/join-keys`, {
     method: "POST",
@@ -584,6 +615,32 @@ export type OrgDnsSettings = {
   split: { suffix: string; resolvers: string[] }[];
   search_domains: string[];
   records: { name: string; type: "A" | "AAAA"; value: string }[];
+  nameserver_groups?: NameserverGroup[];
+  zones?: DnsZone[];
+};
+
+export type NameserverGroup = {
+  name: string;
+  resolvers: string[];
+  match_domains: string[];
+  enabled: boolean;
+  all_devices: boolean;
+  tags: DeviceTag[];
+};
+
+export type ZoneRecordType = "A" | "AAAA" | "CNAME" | "TXT";
+
+export type ZoneRecord = {
+  name: string;
+  type: ZoneRecordType;
+  value: string;
+  ttl?: number;
+};
+
+export type DnsZone = {
+  name: string;
+  enabled: boolean;
+  records: ZoneRecord[];
 };
 
 export type OrgDnsResponse = {
@@ -595,32 +652,13 @@ export type OrgDnsResponse = {
   record_preview?: { name: string; split_suffix: string | null }[];
   applied?: number;
   enrolled?: number;
+  warnings?: string[];
 };
 
 export async function getDns(ctx: ConsoleContext): Promise<OrgDnsResponse> {
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/dns`, {
     method: "GET",
     ctx,
-  });
-  if (!res.ok) {
-    throw new Error(await readError(res));
-  }
-  return res.json() as Promise<OrgDnsResponse>;
-}
-
-export async function putDns(
-  ctx: ConsoleContext,
-  body: { dns?: OrgDnsSettings; rollback?: boolean },
-  etag: string,
-): Promise<OrgDnsResponse> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot publish DNS settings.");
-  }
-  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/dns`, {
-    method: "PUT",
-    ctx,
-    headers: { "If-Match": etag },
-    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(await readError(res));
@@ -714,8 +752,9 @@ export async function createWgOnlyPeer(
     tags: DeviceTag[];
   },
 ): Promise<WireGuardOnlyPeer> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot add unmanaged WireGuard peers.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers`,
@@ -739,8 +778,9 @@ export async function rotateWgOnlyPeer(
   peerId: string,
   input: { wg_public_key: string; overlap_seconds?: number },
 ): Promise<WireGuardOnlyPeer> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot rotate unmanaged WireGuard peers.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${peerId}/rotate`,
@@ -760,8 +800,9 @@ export async function revokeWgOnlyPeer(
   ctx: ConsoleContext,
   peerId: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot revoke unmanaged WireGuard peers.");
+  const denied = permissionReason(ctx.role, "manage_peers");
+  if (denied) {
+    throw new Error(denied);
   }
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${peerId}`,
@@ -777,8 +818,9 @@ export async function putAcl(
   acl: unknown,
   etag?: string,
 ): Promise<void> {
-  if (ctx.role === "member") {
-    throw new Error("Members cannot edit ACL rules.");
+  const denied = permissionReason(ctx.role, "manage_policy");
+  if (denied) {
+    throw new Error(denied);
   }
   const headers = new Headers();
   if (etag) {

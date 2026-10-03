@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useEffect, useState, useTransition } from "react";
 import { PathMotif } from "@/components/path-motif";
+import { TwoFactorChallenge } from "@/components/two-factor-challenge";
 import { Wordmark } from "@/components/wordmark";
 import { authClient } from "@/lib/auth-client";
 import { TAGLINE } from "@/lib/tagline";
@@ -15,6 +16,10 @@ function DesktopAuthInner() {
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const [checking, setChecking] = useState(true);
+  const [secondStep, setSecondStep] = useState(false);
+  const finish = () => {
+    window.location.href = `/api/desktop/auth/callback?redirect_uri=${encodeURIComponent(redirectURI)}`;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -47,7 +52,11 @@ function DesktopAuthInner() {
         );
         return;
       }
-      window.location.href = `/api/desktop/auth/callback?redirect_uri=${encodeURIComponent(redirectURI)}`;
+      if ((result.data as { twoFactorRedirect?: boolean } | null)?.twoFactorRedirect) {
+        setSecondStep(true);
+        return;
+      }
+      finish();
       router.refresh();
     });
   }
@@ -76,6 +85,9 @@ function DesktopAuthInner() {
               <h1>Desktop sign-in</h1>
               <p className="tagline">{TAGLINE}</p>
             </div>
+            {secondStep ? (
+              <TwoFactorChallenge onVerified={finish} onCancel={() => setSecondStep(false)} />
+            ) : (
             <form onSubmit={onSubmit}>
               <label>
                 Email
@@ -105,6 +117,7 @@ function DesktopAuthInner() {
                 {pending ? "Signing in…" : "Sign in and return to the app"}
               </button>
             </form>
+            )}
             <p className="muted">
               Sessions stay in your onshore Postgres. The Mac app stores the session
               token in Keychain and never logs the join key.

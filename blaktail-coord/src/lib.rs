@@ -1,18 +1,37 @@
+mod address_pool;
 mod admin;
+mod app_connectors;
+mod audit_log;
+mod automation;
+mod change_drafts;
 pub mod connectors;
+mod dns_workspace;
 pub mod flows;
+mod forwarding;
 pub mod https_fallback;
 pub mod https_services;
 pub mod ipam;
 mod metrics;
+mod notifications;
+mod operations;
 mod org_dns;
+mod peer_lifecycle;
+mod permissions;
+mod policy_explain;
+mod posture;
+mod private_services;
+mod resources;
+mod service_users;
 mod shares;
 pub mod tailnet_lock;
+mod topology;
+mod traffic;
 mod webhooks;
 mod wg_only;
 
 pub use metrics::CoordMetrics;
 pub use org_dns::{check_dns_document, DnsCheckReport};
+use permissions::{require, Permission};
 
 #[derive(Debug, Serialize)]
 pub struct PolicyCheckReport {
@@ -71,7 +90,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 18;
+pub const CURRENT_SCHEMA_VERSION: i64 = 28;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -127,6 +146,8 @@ struct Migration {
     version: i64,
     name: &'static str,
     postgres_sql: &'static str,
+    /// SQLite DDL for migrations that do not need a hand-written Rust step.
+    sqlite_sql: Option<&'static str>,
 }
 
 const MIGRATIONS: &[Migration] = &[
@@ -134,91 +155,177 @@ const MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "consolidated baseline",
         postgres_sql: include_str!("../migrations/postgres/0001_baseline.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 2,
         name: "friendly device names",
         postgres_sql: include_str!("../migrations/postgres/0002_friendly_device_names.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 3,
         name: "console assertion replay protection",
         postgres_sql: include_str!("../migrations/postgres/0003_console_assertion_nonces.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 4,
         name: "bootstrap reservations and device poll throttling",
         postgres_sql: include_str!("../migrations/postgres/0004_bootstrap_and_poll_throttling.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 5,
         name: "device inventory, audit retention, and automation clients",
         postgres_sql: include_str!("../migrations/postgres/0005_inventory_admin_api.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 6,
         name: "organisation DNS settings",
         postgres_sql: include_str!("../migrations/postgres/0006_org_dns.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 7,
         name: "wireguard-only peers",
         postgres_sql: include_str!("../migrations/postgres/0007_wireguard_only_peers.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 8,
         name: "organisation control revision",
         postgres_sql: include_str!("../migrations/postgres/0008_control_revision.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 9,
         name: "oauth access tokens",
         postgres_sql: include_str!("../migrations/postgres/0009_oauth_access_tokens.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 10,
         name: "policy revision and previous document",
         postgres_sql: include_str!("../migrations/postgres/0010_acl_revision.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 11,
         name: "organisation webhook destinations and outbox",
         postgres_sql: include_str!("../migrations/postgres/0011_webhooks.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 12,
         name: "wireguard-only public-key overlap rotation",
         postgres_sql: include_str!("../migrations/postgres/0012_wg_only_overlap.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 13,
         name: "node shares and applied DNS revision",
         postgres_sql: include_str!("../migrations/postgres/0013_shares_and_dns_applied.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 14,
         name: "organisation IPAM pools and reservations",
         postgres_sql: include_str!("../migrations/postgres/0014_ipam.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 15,
         name: "opt-in flow visibility settings and records",
         postgres_sql: include_str!("../migrations/postgres/0015_flows.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 16,
         name: "domain application connectors",
         postgres_sql: include_str!("../migrations/postgres/0016_connectors.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 17,
         name: "private HTTPS services and CSRs",
         postgres_sql: include_str!("../migrations/postgres/0017_https_services.sql"),
+        sqlite_sql: None,
     },
     Migration {
         version: 18,
         name: "tailnet lock admission roots",
         postgres_sql: include_str!("../migrations/postgres/0018_tailnet_lock.sql"),
+        sqlite_sql: None,
+    },
+    Migration {
+        version: 19,
+        name: "network resources and routes",
+        postgres_sql: include_str!("../migrations/postgres/0019_network_resources.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0019_network_resources.sql"
+        )),
+    },
+    Migration {
+        version: 20,
+        name: "IPAM leases, reservations and connector leases",
+        postgres_sql: include_str!("../migrations/postgres/0020_ipam_connectors.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0020_ipam_connectors.sql"
+        )),
+    },
+    Migration {
+        version: 21,
+        name: "policy enforcement and posture",
+        postgres_sql: include_str!("../migrations/postgres/0021_policy_posture.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0021_policy_posture.sql")),
+    },
+    Migration {
+        version: 22,
+        name: "change drafts",
+        postgres_sql: include_str!("../migrations/postgres/0022_change_drafts.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0022_change_drafts.sql")),
+    },
+    Migration {
+        version: 23,
+        name: "DNS revision history",
+        postgres_sql: include_str!("../migrations/postgres/0023_dns_zones.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0023_dns_zones.sql")),
+    },
+    Migration {
+        version: 24,
+        name: "private service lifecycle",
+        postgres_sql: include_str!("../migrations/postgres/0024_private_services.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0024_private_services.sql"
+        )),
+    },
+    Migration {
+        version: 25,
+        name: "peer lifecycle and enrolment",
+        postgres_sql: include_str!("../migrations/postgres/0025_peer_lifecycle.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0025_peer_lifecycle.sql")),
+    },
+    Migration {
+        version: 26,
+        name: "roles and service users",
+        postgres_sql: include_str!("../migrations/postgres/0026_roles_identity.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0026_roles_identity.sql")),
+    },
+    Migration {
+        version: 27,
+        name: "audit, traffic and notifications",
+        postgres_sql: include_str!("../migrations/postgres/0027_events_notifications.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0027_events_notifications.sql"
+        )),
+    },
+    Migration {
+        version: 28,
+        name: "operator health and releases",
+        postgres_sql: include_str!("../migrations/postgres/0028_operations.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0028_operations.sql")),
     },
 ];
 
@@ -381,6 +488,12 @@ async fn validate_schema_version(
 }
 
 async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
+    apply_sqlite_migrations_to(pool, CURRENT_SCHEMA_VERSION).await
+}
+
+/// Applies SQLite migrations up to `target`. Only upgrade tests stop short of
+/// the current version, to build a database exactly as an older release left it.
+async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), StoreError> {
     let found: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
         .await?;
@@ -394,7 +507,7 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
     let mut applied = found;
     for migration in MIGRATIONS
         .iter()
-        .filter(|migration| migration.version > found)
+        .filter(|migration| migration.version > found && migration.version <= target)
     {
         let expected = applied + 1;
         if migration.version != expected {
@@ -423,6 +536,15 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             16 => migrate_sqlite_to_v16(&mut tx).await?,
             17 => migrate_sqlite_to_v17(&mut tx).await?,
             18 => migrate_sqlite_to_v18(&mut tx).await?,
+            19..=28 => {
+                let sql = migration
+                    .sqlite_sql
+                    .ok_or(StoreError::InvalidMigrationPlan {
+                        expected,
+                        found: migration.version,
+                    })?;
+                sqlx::raw_sql(sql).execute(&mut *tx).await?;
+            }
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -446,6 +568,16 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
             16 => "PRAGMA user_version=16",
             17 => "PRAGMA user_version=17",
             18 => "PRAGMA user_version=18",
+            19 => "PRAGMA user_version=19",
+            20 => "PRAGMA user_version=20",
+            21 => "PRAGMA user_version=21",
+            22 => "PRAGMA user_version=22",
+            23 => "PRAGMA user_version=23",
+            24 => "PRAGMA user_version=24",
+            25 => "PRAGMA user_version=25",
+            26 => "PRAGMA user_version=26",
+            27 => "PRAGMA user_version=27",
+            28 => "PRAGMA user_version=28",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -459,9 +591,9 @@ async fn apply_sqlite_migrations(pool: &AnyPool) -> Result<(), StoreError> {
         );
         applied = migration.version;
     }
-    if applied != CURRENT_SCHEMA_VERSION {
+    if applied != target {
         return Err(StoreError::InvalidMigrationPlan {
-            expected: CURRENT_SCHEMA_VERSION,
+            expected: target,
             found: applied,
         });
     }
@@ -1151,6 +1283,9 @@ pub(crate) struct AppState {
     relay_auth_secret: Arc<[u8]>,
     /// Advertised relay endpoints (host:port, UDP) handed to nodes.
     relays: Arc<Vec<String>>,
+    /// The same relays with their declared Australian region, in priority order.
+    relay_directory: Arc<Vec<operations::RelayEntry>>,
+    region: Arc<String>,
     console_url: Arc<String>,
     api_rate: ApiRateLimiter,
     control_views: Arc<Mutex<ControlViewMap>>,
@@ -1202,19 +1337,27 @@ pub fn app_with_relays_and_console(
 
 pub fn app_with_relays_console_and_metrics(
     store: Store,
-    _region: String,
+    region: String,
     auth_hmac_secret: impl Into<Vec<u8>>,
     relay_auth_secret: impl Into<Vec<u8>>,
     relays: Vec<String>,
     console_url: String,
     metrics: Arc<CoordMetrics>,
 ) -> Router {
+    let relay_directory = operations::relay_directory(&relays, &region);
     let state = AppState {
         store,
         metrics,
         auth_hmac_secret: auth_hmac_secret.into().into(),
         relay_auth_secret: relay_auth_secret.into().into(),
-        relays: Arc::new(relays),
+        relays: Arc::new(
+            relay_directory
+                .iter()
+                .map(|relay| relay.endpoint.clone())
+                .collect(),
+        ),
+        relay_directory: Arc::new(relay_directory),
+        region: Arc::new(region),
         console_url: Arc::new(console_url.trim_end_matches('/').to_owned()),
         api_rate: ApiRateLimiter::default(),
         control_views: Arc::new(Mutex::new(HashMap::new())),
@@ -1300,7 +1443,22 @@ pub fn app_with_relays_console_and_metrics(
             "/v1/orgs/:org_id/webhooks/deliveries/:delivery_id/replay",
             post(webhooks::replay_delivery_console),
         )
+        .merge(peer_lifecycle::routes())
+        .merge(resources::routes())
+        .merge(address_pool::routes())
+        .merge(app_connectors::routes())
+        .merge(service_users::routes())
+        .merge(posture::routes())
+        .merge(policy_explain::routes())
         .merge(admin::api_routes())
+        .merge(dns_workspace::routes())
+        .merge(private_services::routes())
+        .merge(topology::routes())
+        .merge(change_drafts::routes())
+        .merge(operations::routes())
+        .merge(audit_log::routes())
+        .merge(traffic::routes())
+        .merge(notifications::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -1433,6 +1591,8 @@ pub(crate) enum ApiError {
     CredentialExpired,
     #[error("permission denied")]
     Forbidden,
+    #[error("node is suspended by an organisation administrator")]
+    Suspended,
     #[error("resource not found")]
     NotFound,
     #[error("device authorization expired; run blaktaild up again")]
@@ -1456,7 +1616,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::CredentialExpired => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::Suspended => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Gone => StatusCode::GONE,
             Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
@@ -1469,6 +1629,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized | Self::CredentialExpired => "unauthorized",
             Self::Forbidden => "forbidden",
+            Self::Suspended => "suspended",
             Self::NotFound => "not_found",
             Self::Gone => "gone",
             Self::PreconditionFailed => "precondition_failed",
@@ -1754,10 +1915,12 @@ async fn approve_device_authorization(
     let session = console_session(&s, &headers, org_id).await?;
     let code = normalise_user_code(&user_code)
         .ok_or_else(|| ApiError::BadRequest("device code must contain eight characters".into()))?;
-    let tags = if session.role == Role::Member {
-        Vec::new()
-    } else {
+    // Anyone in the organisation may approve their own device; only peer
+    // managers may tag it.
+    let tags = if session.role.can(Permission::ManagePeers) {
         canonical_tags(input.tags)
+    } else {
+        Vec::new()
     };
     let acl = load_org_acl(&s.store, org_id).await?;
     authorize_tag_assignment(&acl, &session, &tags)?;
@@ -1977,17 +2140,22 @@ pub(crate) async fn publish_acl_tx(
     next_json: &str,
     revision: i64,
 ) -> Result<(), ApiError> {
-    let changed =
-        sqlx::query("UPDATE orgs SET acl_json=$1,acl_revision=$2,acl_previous_json=$3 WHERE id=$4")
-            .bind(next_json)
-            .bind(revision + 1)
-            .bind(current_json)
-            .bind(org_id.to_string())
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
+    // Compare-and-swap on the revision the caller read: a concurrent publish
+    // in between (possible on Postgres under READ COMMITTED) fails with 412
+    // instead of being silently overwritten.
+    let changed = sqlx::query(
+        "UPDATE orgs SET acl_json=$1,acl_revision=$2,acl_previous_json=$3 WHERE id=$4 AND acl_revision=$5",
+    )
+    .bind(next_json)
+    .bind(revision + 1)
+    .bind(current_json)
+    .bind(org_id.to_string())
+    .bind(revision)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
     if changed == 0 {
-        return Err(ApiError::NotFound);
+        return Err(ApiError::PreconditionFailed);
     }
     Ok(())
 }
@@ -2224,6 +2392,13 @@ struct MintJoinKey {
     single_use: bool,
     #[serde(default)]
     tags: Vec<DeviceTag>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    /// Reusable keys only; omitted means unlimited until expiry or revoke.
+    #[serde(default)]
+    max_uses: Option<i64>,
 }
 fn default_expiry() -> i64 {
     3600
@@ -2237,6 +2412,10 @@ struct JoinKeyResponse {
     key: String,
     expires_at: i64,
     single_use: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    max_uses: Option<i64>,
 }
 async fn mint_join_key(
     State(s): State<AppState>,
@@ -2245,9 +2424,13 @@ async fn mint_join_key(
     Json(input): Json<MintJoinKey>,
 ) -> Result<(StatusCode, Json<JoinKeyResponse>), ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    permissions::require(&session, permissions::Permission::ManageJoinKeys)?;
+    let metadata = peer_lifecycle::JoinKeyMetadata::validate(
+        &input.name,
+        &input.description,
+        input.single_use,
+        input.max_uses,
+    )?;
     if !(1..=2_592_000).contains(&input.expires_in_seconds) {
         return Err(ApiError::BadRequest(
             "expires_in_seconds must be between 1 and 2592000".into(),
@@ -2260,7 +2443,7 @@ async fn mint_join_key(
     let acl = load_org_acl(&s.store, org_id).await?;
     authorize_tag_assignment(&acl, &session, &tags)?;
     let mut tx = s.store.pool.begin().await?;
-    let changed = sqlx::query("INSERT INTO join_keys(id,org_id,key_hash,expires_at,single_use,created_at,user_id,user_role,tags_json) SELECT $1,id,$2,$3,$4,$5,$6,$7,$8 FROM orgs WHERE id=$9")
+    let changed = sqlx::query("INSERT INTO join_keys(id,org_id,key_hash,expires_at,single_use,created_at,user_id,user_role,tags_json,name,description,max_uses) SELECT $1,id,$2,$3,$4,$5,$6,$7,$8,$10,$11,$12 FROM orgs WHERE id=$9")
         .bind(id.to_string())
         .bind(hash(&key))
         .bind(expires_at)
@@ -2270,6 +2453,9 @@ async fn mint_join_key(
         .bind(session.role.as_str())
         .bind(serde_json::to_string(&tags).unwrap())
         .bind(org_id.to_string())
+        .bind(&metadata.name)
+        .bind(&metadata.description)
+        .bind(metadata.max_uses)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -2286,6 +2472,8 @@ async fn mint_join_key(
         &serde_json::json!({
             "expires_at": expires_at,
             "single_use": input.single_use,
+            "max_uses": metadata.max_uses,
+            "name": metadata.name,
             "source": "console",
             "tags": tags,
         }),
@@ -2299,6 +2487,8 @@ async fn mint_join_key(
             key,
             expires_at,
             single_use: input.single_use,
+            name: metadata.name,
+            max_uses: metadata.max_uses,
         }),
     ))
 }
@@ -2343,11 +2533,13 @@ struct RegistrationGrant {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Owner,
     Admin,
     Member,
+    NetworkAdmin,
+    Auditor,
 }
 impl Role {
     pub(crate) fn as_str(self) -> &'static str {
@@ -2355,6 +2547,8 @@ impl Role {
             Self::Owner => "owner",
             Self::Admin => "admin",
             Self::Member => "member",
+            Self::NetworkAdmin => "network_admin",
+            Self::Auditor => "auditor",
         }
     }
 }
@@ -2365,6 +2559,8 @@ impl std::str::FromStr for Role {
             "owner" => Ok(Self::Owner),
             "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
+            "network_admin" => Ok(Self::NetworkAdmin),
+            "auditor" => Ok(Self::Auditor),
             _ => Err(()),
         }
     }
@@ -2426,6 +2622,9 @@ struct RegisterResponse {
     /// Advertised relay endpoints plus a capability token for them.
     #[serde(default)]
     relays: Vec<String>,
+    /// `relays` with declared regions, for agents that select by region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relay_endpoints: Vec<operations::RelayEntry>,
     #[serde(default)]
     relay_token: String,
     #[serde(default)]
@@ -2476,6 +2675,7 @@ async fn register_node(
     if grant.single_use && grant.used {
         return Err(ApiError::Unauthorized);
     }
+    peer_lifecycle::claim_join_key(&mut tx, &grant.key_id).await?;
     if grant
         .bound_name
         .as_deref()
@@ -2492,7 +2692,14 @@ async fn register_node(
     }
     let id = Uuid::new_v4();
     let token = secret("btn");
-    let allowed_ips = allocate_ips(&mut tx, &grant.org_id).await?;
+    let allowed_ips = address_pool::allocate(
+        &mut tx,
+        &grant.org_id,
+        id,
+        input.name.trim(),
+        input.wg_public_key.trim(),
+    )
+    .await?;
     let assigned_ip = allowed_ips[0].clone();
     let dns_name = magic_dns_name(input.name.trim(), &grant.org_id);
     let registered_at = now();
@@ -2522,13 +2729,6 @@ async fn register_node(
         .execute(&mut *tx)
         .await
         .map_err(conflict("node name, DNS name, public key, or address already exists in org"))?;
-    if grant.single_use {
-        sqlx::query("UPDATE join_keys SET used_at=$1 WHERE id=$2")
-            .bind(now())
-            .bind(&grant.key_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     sqlx::query("UPDATE device_authorizations SET consumed_at=$1 WHERE device_code_hash=$2")
         .bind(now())
         .bind(input_key_hash)
@@ -2547,6 +2747,20 @@ async fn register_node(
         }),
     )
     .await?;
+    if grant.bound_name.is_none() {
+        // Browser approvals are bound to a device; this was a join key.
+        webhooks::enqueue(
+            &mut tx,
+            org_id,
+            "join_key.used",
+            &serde_json::json!({
+                "join_key_id": grant.key_id,
+                "device_id": id,
+                "name": input.name.trim(),
+            }),
+        )
+        .await?;
+    }
     tx.commit().await?;
     info!(node_id=%id, org_id=%grant.org_id, "node registered");
     let (relay_token, relay_expires_at) = relay_credentials(&s, id);
@@ -2561,6 +2775,7 @@ async fn register_node(
             dns_name,
             credential_expires_at,
             relays: s.relays.as_ref().clone(),
+            relay_endpoints: s.relay_directory.as_ref().clone(),
             relay_token,
             relay_expires_at,
         }),
@@ -2587,7 +2802,7 @@ async fn update_advertised_routes(
 ) -> Result<StatusCode, ApiError> {
     let routes = validate_advertised_routes(input.advertised_routes)?;
     let token = bearer(&headers)?;
-    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL")
+    let row = sqlx::query("SELECT credential_expires_at,approved_routes_json,suspended_at,org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL")
         .bind(node_id.to_string())
         .bind(token)
         .fetch_optional(&s.store.pool)
@@ -2596,10 +2811,16 @@ async fn update_advertised_routes(
             Ok::<_, sqlx::Error>((
                 row.try_get::<i64, _>(0)?,
                 row.try_get::<String, _>(1)?,
+                row.try_get::<Option<i64>, _>(2)?,
+                row.try_get::<String, _>(3)?,
             ))
         })
         .transpose()?;
-    let (credential_expires_at, approved_json) = row.ok_or(ApiError::Unauthorized)?;
+    let (credential_expires_at, approved_json, suspended_at, org_id) =
+        row.ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -2608,12 +2829,22 @@ async fn update_advertised_routes(
         .into_iter()
         .filter(|route| routes.contains(route))
         .collect();
-    sqlx::query("UPDATE nodes SET advertised_routes_json=$1,approved_routes_json=$2 WHERE id=$3")
-        .bind(serde_json::to_string(&routes).unwrap())
-        .bind(serde_json::to_string(&retained_approvals).unwrap())
+    let advertised_json = serde_json::to_string(&routes).unwrap();
+    let retained_json = serde_json::to_string(&retained_approvals).unwrap();
+    let mut tx = s.store.pool.begin().await?;
+    let changed = sqlx::query("UPDATE nodes SET advertised_routes_json=$1,approved_routes_json=$2 WHERE id=$3 AND (advertised_routes_json<>$1 OR approved_routes_json<>$2)")
+        .bind(&advertised_json)
+        .bind(&retained_json)
         .bind(node_id.to_string())
-        .execute(&s.store.pool)
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    // Advertisements feed route distribution and exit-node deny sets, so
+    // peers and routers must recompile rather than wait for an unrelated change.
+    if changed > 0 {
+        bump_control_revision(&mut tx, &org_id).await?;
+    }
+    tx.commit().await?;
     info!(%node_id, routes = routes.len(), "node route advertisements updated");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2628,17 +2859,24 @@ async fn update_node_shares(
     let token = bearer(&headers)?;
     let mut tx = s.store.pool.begin().await?;
     let row = sqlx::query(
-        "SELECT org_id,credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT org_id,credential_expires_at,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&mut *tx)
     .await?
     .map(|row| {
-        Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)?))
+        Ok::<_, sqlx::Error>((
+            row.try_get::<String, _>(0)?,
+            row.try_get::<i64, _>(1)?,
+            row.try_get::<Option<i64>, _>(2)?,
+        ))
     })
     .transpose()?;
-    let (org_id, credential_expires_at) = row.ok_or(ApiError::Unauthorized)?;
+    let (org_id, credential_expires_at, suspended_at) = row.ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -2660,9 +2898,7 @@ async fn approve_node_routes(
     Json(input): Json<ApprovedRoutesUpdate>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManageNetworks)?;
     let approved = validate_advertised_routes(input.approved_routes)?;
     let approval_time = now();
     let mut tx = s.store.pool.begin().await?;
@@ -2700,6 +2936,7 @@ async fn approve_node_routes(
             "approved routes must be a subset of the node's advertisements".into(),
         ));
     }
+    resources::ensure_routes_free(&mut tx, org_id, &approved).await?;
     let rows = sqlx::query(
         "SELECT id,credential_expires_at,approved_routes_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL",
     )
@@ -2792,14 +3029,19 @@ async fn reauth_node(
 ) -> Result<Json<ReauthResponse>, ApiError> {
     let old_token_hash = bearer(&headers)?;
     let mut tx = s.store.pool.begin().await?;
-    let org_id: String = sqlx::query_scalar(
-        "SELECT org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+    let (org_id, suspended) = sqlx::query(
+        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(old_token_hash)
     .fetch_optional(&mut *tx)
     .await?
+    .map(|row| Ok::<_, sqlx::Error>((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)? != 0)))
+    .transpose()?
     .ok_or(ApiError::Unauthorized)?;
+    if suspended {
+        return Err(ApiError::Suspended);
+    }
     let reauth_query = match s.store.backend {
         DatabaseBackend::Sqlite => "SELECT k.id,k.single_use,CASE WHEN k.used_at IS NULL THEN 0 ELSE 1 END,k.user_id,k.user_role,k.tags_json,o.node_key_ttl_seconds FROM join_keys k JOIN orgs o ON o.id=k.org_id WHERE k.key_hash=$1 AND k.org_id=$2 AND k.revoked_at IS NULL AND k.expires_at>$3 AND NOT EXISTS(SELECT 1 FROM device_authorizations d WHERE d.device_code_hash=k.key_hash)",
         DatabaseBackend::Postgres => "SELECT k.id,k.single_use,CASE WHEN k.used_at IS NULL THEN 0 ELSE 1 END,k.user_id,k.user_role,k.tags_json,o.node_key_ttl_seconds FROM join_keys k JOIN orgs o ON o.id=k.org_id WHERE k.key_hash=$1 AND k.org_id=$2 AND k.revoked_at IS NULL AND k.expires_at>$3 AND NOT EXISTS(SELECT 1 FROM device_authorizations d WHERE d.device_code_hash=k.key_hash) FOR UPDATE OF k",
@@ -2827,10 +3069,11 @@ async fn reauth_node(
     if single_use && used {
         return Err(ApiError::Unauthorized);
     }
+    peer_lifecycle::claim_join_key(&mut tx, &join_id).await?;
     let node_token = secret("btn");
     let credential_expires_at = now() + ttl;
     sqlx::query(
-        "UPDATE nodes SET token_hash=$1,credential_expires_at=$2,user_id=$3,user_role=$4,tags_json=$5 WHERE id=$6",
+        "UPDATE nodes SET token_hash=$1,credential_expires_at=$2,user_id=$3,user_role=$4,tags_json=$5,credential_issued_at=$7 WHERE id=$6",
     )
     .bind(hash(&node_token))
     .bind(credential_expires_at)
@@ -2838,15 +3081,11 @@ async fn reauth_node(
     .bind(user_role)
     .bind(tags_json)
     .bind(node_id.to_string())
+    .bind(now())
     .execute(&mut *tx)
     .await?;
-    if single_use {
-        sqlx::query("UPDATE join_keys SET used_at=$1 WHERE id=$2")
-            .bind(now())
-            .bind(join_id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    // Renewal can satisfy credential-age posture and SSH check rules again.
+    bump_control_revision(&mut tx, &org_id).await?;
     tx.commit().await?;
     info!(%node_id, "node credential renewed");
     Ok(Json(ReauthResponse {
@@ -2889,6 +3128,8 @@ struct PeerIngress {
     deny_icmp: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ssh_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ssh_deny_users: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct PeersResponse {
@@ -2901,6 +3142,8 @@ struct PeersResponse {
     /// Advertised relay endpoints plus a refreshed capability token.
     #[serde(default)]
     relays: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relay_endpoints: Vec<operations::RelayEntry>,
     #[serde(default)]
     relay_token: String,
     #[serde(default)]
@@ -2911,6 +3154,10 @@ struct PeersResponse {
     shares: Vec<shares::PublishedShare>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     control_updates: Option<ControlUpdatesCapability>,
+    /// Present only for agents reporting `forward-filter`: what this node
+    /// may forward from the overlay when it routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forward_filter: Option<forwarding::ForwardFilter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2938,6 +3185,15 @@ struct PeerSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    #[serde(default)]
+    transport: Option<String>,
+    /// Comma-separated capabilities the agent currently provides.
+    #[serde(default)]
+    capabilities: Option<String>,
+    #[serde(default)]
+    agent_version: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2954,6 +3210,13 @@ struct UpdateSelection {
     ipv6: bool,
     #[serde(default)]
     dns_revision: Option<i64>,
+    #[serde(default)]
+    transport: Option<String>,
+    capabilities: Option<String>,
+    #[serde(default)]
+    agent_version: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
 }
 
 async fn list_peers(
@@ -2963,7 +3226,7 @@ async fn list_peers(
     headers: HeaderMap,
 ) -> Result<Json<PeersResponse>, ApiError> {
     let token = bearer(&headers)?;
-    let source_row = sqlx::query("SELECT n.org_id,n.user_id,n.user_role,n.tags_json,o.acl_json,n.credential_expires_at,n.dns_name,n.allowed_ips_json,o.dns_json,o.dns_revision FROM nodes n JOIN orgs o ON o.id=n.org_id WHERE n.id=$1 AND n.token_hash=$2 AND n.revoked_at IS NULL AND n.deleted_at IS NULL")
+    let source_row = sqlx::query("SELECT n.org_id,n.user_id,n.user_role,n.tags_json,o.acl_json,n.credential_expires_at,n.dns_name,n.allowed_ips_json,o.dns_json,o.dns_revision,CASE WHEN n.suspended_at IS NULL THEN 0 ELSE 1 END FROM nodes n JOIN orgs o ON o.id=n.org_id WHERE n.id=$1 AND n.token_hash=$2 AND n.revoked_at IS NULL AND n.deleted_at IS NULL")
         .bind(node_id.to_string())
         .bind(token)
         .fetch_optional(&s.store.pool)
@@ -2979,9 +3242,13 @@ async fn list_peers(
     let source_addresses: String = source_row.try_get(7)?;
     let org_dns_json: String = source_row.try_get(8).unwrap_or_default();
     let org_dns_revision: i64 = source_row.try_get(9).unwrap_or(0);
+    if source_row.try_get::<i64, _>(10)? != 0 {
+        return Err(ApiError::Suspended);
+    }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
+    peer_lifecycle::record_transport(&s.store, node_id, selection.transport.as_deref()).await?;
     sqlx::query("UPDATE nodes SET last_seen_at=$1,dns_applied_revision=CASE WHEN $3>=0 THEN $3 ELSE dns_applied_revision END WHERE id=$2")
         .bind(now())
         .bind(node_id.to_string())
@@ -2990,18 +3257,48 @@ async fn list_peers(
         .await?;
     expire_ephemeral_nodes(&s.store, &org).await?;
     wg_only::expire_overlaps(&s.store.pool, &org).await?;
-    let source = Subject::new(
+    let source_capabilities = posture::record_report(
+        &s.store,
+        &org,
+        node_id,
+        selection.capabilities.as_deref(),
+        selection.agent_version.clone(),
+        selection.os_version.clone(),
+    )
+    .await?;
+    let ssh_users_enforced = source_capabilities
+        .iter()
+        .any(|capability| capability == posture::CAP_SSH_USERS);
+    let posture = posture::PostureContext::load(&s.store.pool, &org).await?;
+    let mut source = Subject::new(
         source_role.parse().map_err(|_| ApiError::CorruptData)?,
         serde_json::from_str(&source_tags).unwrap_or_default(),
     )
     .with_user(source_user_id);
+    posture.apply(node_id, &mut source);
     let acl: Acl = serde_json::from_str(&acl_json).map_err(|_| ApiError::CorruptData)?;
+    let resource_routes = resources::load_distribution(&s.store.pool, &org).await?;
     let requested_exit = selection
         .exit_node
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let rows = sqlx::query("SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CASE WHEN relay_endpoint_updated_at>$3 THEN relay_endpoint ELSE NULL END,approved_routes_json,shares_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL AND deleted_at IS NULL AND credential_expires_at>$4 ORDER BY name")
+    {
+        let mut tx = s.store.pool.begin().await?;
+        if forwarding::record_exit_selection(&mut tx, node_id, requested_exit).await? {
+            bump_control_revision(&mut tx, &org).await?;
+        }
+        tx.commit().await?;
+    }
+    let forward_router = if forwarding::enforces(&source_capabilities) {
+        Some(forwarding::load_router(&s.store.pool, node_id).await?)
+    } else {
+        None
+    };
+    let mut forward_filter = forward_router
+        .as_ref()
+        .map(|_| forwarding::ForwardFilter::default());
+    let rows = sqlx::query("SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CASE WHEN relay_endpoint_updated_at>$3 THEN relay_endpoint ELSE NULL END,approved_routes_json,shares_json FROM nodes WHERE org_id=$1 AND id!=$2 AND revoked_at IS NULL AND deleted_at IS NULL AND suspended_at IS NULL AND credential_expires_at>$4 ORDER BY name")
         .bind(org.clone())
         .bind(node_id.to_string())
         .bind(now() - RELAY_ENDPOINT_FRESH_SECS)
@@ -3019,31 +3316,39 @@ async fn list_peers(
                 serde_json::from_str(&row.try_get::<String, _>(10)?).unwrap_or_default();
             let dest_shares =
                 shares::parse_shares(&row.try_get::<String, _>(11).unwrap_or_else(|_| "[]".into()));
+            let id = Uuid::parse_str(&id).map_err(|_| ApiError::CorruptData)?;
+            let mut subject = Subject::new(
+                row.try_get::<String, _>(7)?
+                    .parse()
+                    .map_err(|_| ApiError::CorruptData)?,
+                tags.clone(),
+            )
+            .with_user(row.try_get::<String, _>(6)?);
+            posture.apply(id, &mut subject);
             Ok::<_, ApiError>((
                 Peer {
-                    id: Uuid::parse_str(&id).map_err(|_| ApiError::CorruptData)?,
+                    id,
                     name: row.try_get(1)?,
                     wg_public_key: row.try_get(2)?,
                     endpoint: row.try_get(3)?,
                     allowed_ips: serde_json::from_str(&ips).map_err(|_| ApiError::CorruptData)?,
                     dns_name: row.try_get(5)?,
-                    tags: tags.clone(),
+                    tags,
                     relay_endpoint: row.try_get(9)?,
                     kind: String::new(),
                     ingress: None,
                 },
-                Subject::new(
-                    row.try_get::<String, _>(7)?
-                        .parse()
-                        .map_err(|_| ApiError::CorruptData)?,
-                    tags,
-                )
-                .with_user(row.try_get::<String, _>(6)?),
+                subject,
                 approved,
                 dest_shares,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let exit_selections = if forward_router.is_some() {
+        forwarding::exit_selections(&s.store.pool, &org).await?
+    } else {
+        HashMap::new()
+    };
     let mut exit_node_active = false;
     let mut peers = candidates
         .into_iter()
@@ -3051,7 +3356,29 @@ async fn list_peers(
             if !acl.allows(&source, &destination) {
                 return None;
             }
-            let mut ingress = acl.peer_ingress(&destination, &source);
+            if let (Some(router_row), Some(filter)) = (&forward_router, forward_filter.as_mut()) {
+                let exit_request = exit_selections.get(&peer.id).cloned();
+                forwarding::compile_client(
+                    &acl,
+                    &resource_routes,
+                    &forwarding::RouterView {
+                        id: node_id,
+                        name: &router_row.name,
+                        dns_name: &dns_name,
+                        subject: &source,
+                        approved: &router_row.approved,
+                        advertised: &router_row.advertised,
+                    },
+                    &forwarding::ClientView {
+                        id: peer.id,
+                        subject: &destination,
+                        overlay: &peer.allowed_ips,
+                        exit_request: exit_request.as_deref(),
+                    },
+                    filter,
+                );
+            }
+            let mut ingress = acl.peer_ingress_for(&destination, &source, ssh_users_enforced);
             shares::grant_share_ports(
                 &mut ingress.tcp,
                 &ingress.deny_tcp,
@@ -3071,6 +3398,14 @@ async fn list_peers(
                         exit_node_active = true;
                     }
                 } else {
+                    peer.allowed_ips.push(route);
+                }
+            }
+            for route in resource_routes.routes_via(peer.id, node_id, &source, &acl, exit_matches) {
+                if route == "0.0.0.0/0" {
+                    exit_node_active = true;
+                }
+                if !peer.allowed_ips.contains(&route) {
                     peer.allowed_ips.push(route);
                 }
             }
@@ -3103,7 +3438,7 @@ async fn list_peers(
             tags,
             relay_endpoint: None,
             kind: wg_only::KIND.into(),
-            ingress: Some(acl.peer_ingress(&destination, &source)),
+            ingress: Some(acl.peer_ingress_for(&destination, &source, ssh_users_enforced)),
         });
     }
     let mut assigned_ips: Vec<String> = serde_json::from_str(&source_addresses).unwrap_or_default();
@@ -3111,9 +3446,11 @@ async fn list_peers(
         assigned_ips.retain(|address| !address.contains(':'));
     }
     let (relay_token, relay_expires_at) = relay_credentials(&s, node_id);
-    let dns = org_dns::parse_settings(&org_dns_json)
-        .ok()
-        .map(|settings| settings.agent_view(&org, org_dns_revision));
+    let dns = org_dns::parse_settings(&org_dns_json).ok().map(|settings| {
+        let device_tags: Vec<String> = serde_json::from_str(&source_tags).unwrap_or_default();
+        settings.agent_view(&org, org_dns_revision, &device_tags)
+    });
+    posture::record_deadline(&s.store.pool, &org, posture.next_deadline(&acl)).await?;
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
@@ -3123,6 +3460,7 @@ async fn list_peers(
         credential_expires_at,
         exit_node_active,
         relays: s.relays.as_ref().clone(),
+        relay_endpoints: s.relay_directory.as_ref().clone(),
         relay_token,
         relay_expires_at,
         dns,
@@ -3130,6 +3468,7 @@ async fn list_peers(
         control_updates: Some(ControlUpdatesCapability {
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
+        forward_filter,
     }))
 }
 
@@ -3148,17 +3487,44 @@ async fn list_updates(
         ));
     }
     let token = bearer(&headers)?;
-    let org: String = sqlx::query_scalar(
-        "SELECT org_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+    let (org, suspended, credential_expires_at) = sqlx::query(
+        "SELECT org_id,CASE WHEN suspended_at IS NULL THEN 0 ELSE 1 END,credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            row.try_get::<String, _>(0)?,
+            row.try_get::<i64, _>(1)? != 0,
+            row.try_get::<i64, _>(2)?,
+        ))
+    })
+    .transpose()?
     .ok_or(ApiError::Unauthorized)?;
+    if suspended {
+        return Err(ApiError::Suspended);
+    }
+    // An expired credential must not refresh posture or capabilities.
+    if credential_expires_at <= now() {
+        return Err(ApiError::CredentialExpired);
+    }
+    // Record reported capabilities before waiting: a change bumps the
+    // revision so this same request returns the recompiled snapshot.
+    posture::record_report(
+        &s.store,
+        &org,
+        node_id,
+        selection.capabilities.as_deref(),
+        selection.agent_version.clone(),
+        selection.os_version.clone(),
+    )
+    .await?;
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
+        posture::due(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
@@ -3177,6 +3543,10 @@ async fn list_updates(
                     exit_node: selection.exit_node,
                     ipv6: selection.ipv6,
                     dns_revision: selection.dns_revision,
+                    transport: selection.transport,
+                    capabilities: selection.capabilities,
+                    agent_version: selection.agent_version,
+                    os_version: selection.os_version,
                 }),
                 headers,
             )
@@ -3288,14 +3658,21 @@ async fn update_relay_endpoint(
         ));
     }
     let token = bearer(&headers)?;
-    let expires_at: i64 = sqlx::query_scalar(
-        "SELECT credential_expires_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL",
+    let (expires_at, suspended_at) = sqlx::query(
+        "SELECT credential_expires_at,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
     .fetch_optional(&s.store.pool)
     .await?
-        .ok_or(ApiError::Unauthorized)?;
+    .map(|row| {
+        Ok::<_, sqlx::Error>((row.try_get::<i64, _>(0)?, row.try_get::<Option<i64>, _>(1)?))
+    })
+    .transpose()?
+    .ok_or(ApiError::Unauthorized)?;
+    if suspended_at.is_some() {
+        return Err(ApiError::Suspended);
+    }
     if expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -3332,30 +3709,6 @@ fn relay_capability(secret: &[u8], node_id: Uuid, expires_at_unix: u64) -> Strin
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-async fn allocate_ips(
-    connection: &mut AnyConnection,
-    org_id: &str,
-) -> Result<Vec<String>, ApiError> {
-    let mut used = std::collections::HashSet::new();
-    let rows =
-        sqlx::query_scalar::<_, String>("SELECT allowed_ips_json FROM nodes WHERE org_id=$1")
-            .bind(org_id)
-            .fetch_all(connection)
-            .await?;
-    for row in rows {
-        for ip in serde_json::from_str::<Vec<String>>(&row).unwrap_or_default() {
-            used.insert(ip);
-        }
-    }
-    let ipv4 = (1..=254)
-        .map(|host| format!("100.64.0.{host}/32"))
-        .find(|ip| !used.contains(ip))
-        .ok_or_else(|| ApiError::Conflict("tailnet address pool exhausted".into()))?;
-    let host = assigned_ipv4_host(std::slice::from_ref(&ipv4))
-        .expect("coordinator-generated IPv4 address is valid");
-    Ok(vec![ipv4, org_ula_address(org_id, host)])
-}
-
 fn assigned_ipv4_host(addresses: &[String]) -> Option<u8> {
     addresses.iter().find_map(|address| {
         let (address, prefix) = address.split_once('/')?;
@@ -3552,6 +3905,8 @@ pub(crate) struct NodeRow {
     shares: Vec<shares::NodeShare>,
     #[serde(default)]
     dns_applied_revision: i64,
+    #[serde(default)]
+    suspended: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -3584,7 +3939,7 @@ pub(crate) async fn load_nodes(
     let limit = i64::from(query.limit.unwrap_or(200).clamp(1, 200));
     let current_time = now();
     let rows = sqlx::query(
-        "SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CAST(created_at AS BIGINT),credential_expires_at,CASE WHEN credential_expires_at<=$2 THEN 1 ELSE 0 END,CASE WHEN credential_expires_at<=$3 THEN 1 ELSE 0 END,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,advertised_routes_json,approved_routes_json,display_name,last_seen_at,os,os_version,agent_version,hostname,capabilities_json,ephemeral,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END,shares_json,dns_applied_revision FROM nodes WHERE org_id=$1 ORDER BY LOWER(COALESCE(NULLIF(TRIM(display_name),''),name)),name",
+        "SELECT id,name,wg_public_key,endpoint,allowed_ips_json,dns_name,user_id,user_role,tags_json,CAST(created_at AS BIGINT),credential_expires_at,CASE WHEN credential_expires_at<=$2 THEN 1 ELSE 0 END,CASE WHEN credential_expires_at<=$3 THEN 1 ELSE 0 END,CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END,advertised_routes_json,approved_routes_json,display_name,last_seen_at,os,os_version,agent_version,hostname,capabilities_json,ephemeral,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END,shares_json,dns_applied_revision,CASE WHEN suspended_at IS NOT NULL THEN 1 ELSE 0 END FROM nodes WHERE org_id=$1 ORDER BY LOWER(COALESCE(NULLIF(TRIM(display_name),''),name)),name",
     )
     .bind(org_id.to_string())
     .bind(current_time)
@@ -3650,6 +4005,7 @@ pub(crate) async fn load_nodes(
                     &row.try_get::<String, _>(25).unwrap_or_else(|_| "[]".into()),
                 ),
                 dns_applied_revision: row.try_get::<i64, _>(26).unwrap_or(0),
+                suspended: row.try_get::<i64, _>(27)? != 0,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -3659,7 +4015,8 @@ pub(crate) async fn load_nodes(
         }
         if let Some(state) = state.as_deref() {
             let matches = match state {
-                "active" => !node.revoked && !node.deleted && !node.expired,
+                "active" => !node.revoked && !node.deleted && !node.expired && !node.suspended,
+                "suspended" => node.suspended && !node.revoked && !node.deleted,
                 "online" => node.online,
                 "offline" => !node.online && !node.deleted && !node.revoked,
                 "revoked" => node.revoked && !node.deleted,
@@ -3737,9 +4094,7 @@ async fn update_node_friendly_name(
     Json(input): Json<FriendlyNameUpdate>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     let friendly_name = normalise_friendly_name(&input.friendly_name)?;
     let mut tx = s.store.pool.begin().await?;
     let current = sqlx::query(
@@ -3801,9 +4156,7 @@ async fn admin_revoke_node(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     let mut tx = s.store.pool.begin().await?;
     let changed = sqlx::query(
         "UPDATE nodes SET revoked_at=$1 WHERE id=$2 AND org_id=$3 AND revoked_at IS NULL AND deleted_at IS NULL",
@@ -3846,9 +4199,7 @@ async fn admin_tombstone_node(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     tombstone_node(&s.store, org_id, node_id, &session).await
 }
 
@@ -3956,10 +4307,11 @@ async fn put_acl(
     Json(value): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePolicy)?;
     let mut tx = s.store.pool.begin().await?;
+    // Take the org row lock before reading the policy, so concurrent writers
+    // serialise and the If-Match check sees the latest revision.
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     let current = load_acl_row_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
         .get("if-match")
@@ -3984,7 +4336,6 @@ async fn put_acl(
     };
     let acl: Acl = serde_json::from_str(&next).map_err(|_| ApiError::CorruptData)?;
     publish_acl_tx(&mut tx, org_id, &current.json, &next, current.revision).await?;
-    bump_control_revision(&mut tx, org_id.to_string()).await?;
     append_audit(
         &mut tx,
         org_id,
@@ -4038,9 +4389,7 @@ async fn put_dns(
     Json(value): Json<serde_json::Value>,
 ) -> Result<Json<org_dns::OrgDnsResponse>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    permissions::require(&session, permissions::Permission::ManageDns)?;
     let mut tx = s.store.pool.begin().await?;
     let current = load_org_dns_tx(&mut tx, org_id).await?;
     if let Some(expected) = headers
@@ -4054,11 +4403,15 @@ async fn put_dns(
             return Err(ApiError::PreconditionFailed);
         }
     }
-    let rollback = value
-        .get("rollback")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let next = if rollback {
+    let rollback_to = value.get("rollback_to").and_then(|value| value.as_i64());
+    let rollback = rollback_to.is_some()
+        || value
+            .get("rollback")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    let next = if let Some(revision) = rollback_to {
+        dns_workspace::load_revision_tx(&mut tx, org_id, revision).await?
+    } else if rollback {
         load_previous_dns_tx(&mut tx, org_id).await?
     } else {
         let settings = value.get("dns").cloned().unwrap_or(value);
@@ -4081,6 +4434,9 @@ async fn put_dns(
             "managed": next.managed,
             "split": next.split.len(),
             "records": next.records.len(),
+            "nameserver_groups": next.nameserver_groups.len(),
+            "zones": next.zones.len(),
+            "rollback_to": rollback_to,
         }),
     )
     .await?;
@@ -4115,6 +4471,8 @@ pub(crate) async fn load_org_dns(
     let (applied, enrolled) = shares::dns_applied_counts(store, org_id, response.revision).await?;
     response.applied = applied;
     response.enrolled = enrolled;
+    let route_warnings = dns_workspace::route_warnings(store, org_id, &response.dns).await?;
+    response.warnings.extend(route_warnings);
     Ok(response)
 }
 
@@ -4153,7 +4511,9 @@ fn org_dns_from_row(
 ) -> Result<org_dns::OrgDnsResponse, ApiError> {
     let dns = org_dns::parse_settings(&dns_json).unwrap_or_else(|_| org_dns::default_settings());
     let record_preview = dns.record_preview();
+    let warnings = dns.warnings();
     Ok(org_dns::OrgDnsResponse {
+        warnings,
         revision,
         etag: hash(&format!("{revision}:{dns_json}")),
         has_previous: previous.as_deref().is_some_and(|value| !value.is_empty()),
@@ -4166,6 +4526,19 @@ fn org_dns_from_row(
 }
 
 pub(crate) async fn publish_org_dns(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: Uuid,
+    current: &org_dns::OrgDnsResponse,
+    next: &org_dns::OrgDnsSettings,
+) -> Result<(), ApiError> {
+    write_org_dns_tx(tx, org_id, current, next).await?;
+    bump_control_revision(tx, org_id.to_string()).await?;
+    Ok(())
+}
+
+/// Writes the DNS document and its revision history without bumping the
+/// control revision, so a multi-surface publish can bump it once.
+pub(crate) async fn write_org_dns_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     org_id: Uuid,
     current: &org_dns::OrgDnsResponse,
@@ -4185,7 +4558,7 @@ pub(crate) async fn publish_org_dns(
     if changed == 0 {
         return Err(ApiError::NotFound);
     }
-    bump_control_revision(tx, org_id.to_string()).await?;
+    dns_workspace::record_revision(tx, org_id, current.revision + 1, &next_json).await?;
     Ok(())
 }
 
@@ -4213,9 +4586,7 @@ async fn put_security_policy(
     Json(policy): Json<SecurityPolicy>,
 ) -> Result<StatusCode, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
-    if session.role == Role::Member {
-        return Err(ApiError::Forbidden);
-    }
+    require(&session, Permission::ManagePeers)?;
     validate_node_key_ttl(policy.node_key_ttl_seconds)?;
     let mut tx = s.store.pool.begin().await?;
     let previous: Option<i64> =
@@ -4250,10 +4621,28 @@ async fn put_security_policy(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize, Clone)]
 pub(crate) struct AuditQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     limit: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     before: Option<String>,
+    /// Actor user id, email (case-insensitive) or display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    /// Exact action, or a prefix when it ends in `.` or `*` (`node.*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_id: Option<String>,
+    /// Inclusive lower bound, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<i64>,
+    /// Exclusive upper bound, Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    until: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -4276,7 +4665,8 @@ async fn list_audit_events(
     headers: HeaderMap,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEvent>>, ApiError> {
-    console_session(&s, &headers, org_id).await?;
+    let session = console_session(&s, &headers, org_id).await?;
+    permissions::require(&session, permissions::Permission::ViewAudit)?;
     purge_expired_audit(&s.store, org_id).await?;
     Ok(Json(load_audit_events(&s.store, org_id, &query).await?))
 }
@@ -4287,63 +4677,7 @@ pub(crate) async fn load_audit_events(
     query: &AuditQuery,
 ) -> Result<Vec<AuditEvent>, ApiError> {
     let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 200));
-    let before = query
-        .before
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let (before_created_at, before_id) = match before {
-        Some(cursor) => {
-            let (created_at, id) = cursor
-                .split_once(':')
-                .ok_or_else(|| ApiError::BadRequest("before must be created_at:id".into()))?;
-            let created_at = created_at
-                .parse::<i64>()
-                .map_err(|_| ApiError::BadRequest("before created_at is invalid".into()))?;
-            if id.is_empty() {
-                return Err(ApiError::BadRequest("before id is required".into()));
-            }
-            (Some(created_at), Some(id.to_owned()))
-        }
-        None => (None, None),
-    };
-    let rows = if let (Some(created_at), Some(id)) = (before_created_at, before_id) {
-        sqlx::query(
-            "SELECT id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at FROM audit_events WHERE org_id=$1 AND (created_at<$2 OR (created_at=$2 AND id<$3)) ORDER BY created_at DESC,id DESC LIMIT $4",
-        )
-        .bind(org_id.to_string())
-        .bind(created_at)
-        .bind(id)
-        .bind(limit)
-        .fetch_all(&store.pool)
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at FROM audit_events WHERE org_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2",
-        )
-        .bind(org_id.to_string())
-        .bind(limit)
-        .fetch_all(&store.pool)
-        .await?
-    };
-    rows.into_iter()
-        .map(|row| {
-            let details_json: String = row.try_get(8)?;
-            Ok::<_, sqlx::Error>(AuditEvent {
-                id: row.try_get(0)?,
-                actor_user_id: row.try_get(1)?,
-                actor_name: row.try_get(2)?,
-                actor_email: row.try_get(3)?,
-                actor_role: row.try_get(4)?,
-                action: row.try_get(5)?,
-                target_type: row.try_get(6)?,
-                target_id: row.try_get(7)?,
-                details: serde_json::from_str(&details_json).unwrap_or_default(),
-                created_at: row.try_get(9)?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ApiError::Database)
+    audit_log::query_events(store, org_id, query, limit).await
 }
 
 pub(crate) async fn purge_expired_tombstones(store: &Store, org_id: Uuid) -> Result<u64, ApiError> {
@@ -4383,23 +4717,27 @@ pub(crate) async fn append_audit(
     target_id: Option<&str>,
     details: &serde_json::Value,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO audit_events(id,org_id,actor_user_id,actor_name,actor_email,actor_role,action,target_type,target_id,details_json,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(org_id.to_string())
-    .bind(&session.user_id)
-    .bind(&session.name)
-    .bind(&session.email)
-    .bind(session.role.as_str())
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(details.to_string())
-    .bind(now())
-    .execute(connection)
-    .await?;
-    Ok(())
+    let entry = audit_log::ChainEntry {
+        org_id: org_id.to_string(),
+        id: Uuid::new_v4().to_string(),
+        actor_user_id: session.user_id.clone(),
+        actor_name: session.name.clone(),
+        actor_email: session.email.clone(),
+        // Service users act with a scope-limited admin session; never let
+        // their audit rows read as a human admin.
+        actor_role: if session.user_id.starts_with("api:") {
+            "api_client".into()
+        } else {
+            session.role.as_str().into()
+        },
+        action: action.into(),
+        target_type: target_type.into(),
+        target_id: target_id.map(str::to_owned),
+        details_json: details.to_string(),
+        created_at: now(),
+    };
+    audit_log::insert_chained(connection, &entry).await?;
+    notifications::enqueue_for_audit(connection, org_id, &entry, details).await
 }
 
 pub(crate) async fn bump_control_revision(
@@ -4650,6 +4988,9 @@ struct AclTest {
     protocol: Option<AclProtocol>,
     #[serde(default)]
     ssh_user: String,
+    /// Posture checks the simulated source passes. Omitted means none.
+    #[serde(default)]
+    src_posture: Vec<String>,
     allow: bool,
 }
 
@@ -4693,6 +5034,9 @@ struct AclRule {
     dst_ports: Vec<String>,
     #[serde(default)]
     protocols: Vec<AclProtocol>,
+    /// Posture checks the source device must pass for this allow rule.
+    #[serde(default)]
+    posture: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4714,6 +5058,8 @@ struct AclSshRule {
     users: Vec<String>,
     #[serde(default)]
     check_period_secs: Option<u64>,
+    #[serde(default)]
+    posture: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -4730,7 +5076,7 @@ enum Action {
     Deny,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum AclProtocol {
     Tcp,
@@ -4742,6 +5088,10 @@ struct Subject {
     tags: Vec<DeviceTag>,
     user_id: String,
     email: String,
+    /// Posture checks this source currently passes. Empty fails closed.
+    passed_posture: BTreeSet<String>,
+    /// Last credential issuance, used by SSH `check` rules. None fails closed.
+    authenticated_at: Option<i64>,
 }
 impl Subject {
     fn new(role: Role, tags: Vec<DeviceTag>) -> Self {
@@ -4750,6 +5100,8 @@ impl Subject {
             tags,
             user_id: String::new(),
             email: String::new(),
+            passed_posture: BTreeSet::new(),
+            authenticated_at: None,
         }
     }
     fn with_user(mut self, user_id: impl Into<String>) -> Self {
@@ -4908,6 +5260,7 @@ impl Acl {
                     "ACL ICMP rules cannot name destination ports".into(),
                 ));
             }
+            validate_posture_refs(&rule.posture, rule.action == Action::Allow)?;
         }
         if self.ssh.len() > 32 {
             return Err(ApiError::BadRequest(
@@ -4939,6 +5292,7 @@ impl Acl {
                     "ACL SSH rules must name 1-16 operating-system users".into(),
                 ));
             }
+            validate_posture_refs(&rule.posture, rule.action != AclSshAction::Deny)?;
             for user in &rule.users {
                 if !valid_ssh_os_user(user) {
                     return Err(ApiError::BadRequest(format!(
@@ -4993,8 +5347,13 @@ impl Acl {
                     test.ssh_user
                 )));
             }
+            validate_posture_refs(&test.src_posture, true)?;
+            // A simulated source has just authenticated and passes only the
+            // posture checks the test names.
             let src = Subject {
                 email: test.src_email.clone(),
+                passed_posture: test.src_posture.iter().cloned().collect(),
+                authenticated_at: Some(now()),
                 ..Subject::new(test.src_role.unwrap_or(Role::Member), test.src_tags.clone())
                     .with_user(test.src_user.clone())
             };
@@ -5029,7 +5388,9 @@ impl Acl {
         Ok(())
     }
     fn allows(&self, s: &Subject, d: &Subject) -> bool {
-        let ingress = self.peer_ingress(s, d);
+        // Pairing follows policy intent. Whether TCP 22 opens also depends on
+        // the destination agent and is decided by `peer_ingress_for`.
+        let ingress = self.peer_ingress_for(s, d, true);
         ingress.all || ingress.icmp || !ingress.tcp.is_empty() || !ingress.udp.is_empty()
     }
 
@@ -5047,6 +5408,14 @@ impl Acl {
             .filter(|r| self.rule_matches(r, s, d, port, protocol, host))
             .collect();
         if matching.iter().any(|r| r.action == Action::Deny) {
+            return false;
+        }
+        if host.is_none()
+            && port == Some(SSH_PORT)
+            && matches!(protocol, None | Some(AclProtocol::Tcp))
+            && self.ssh_governed(s, d)
+            && self.ssh_grant(s, d).0.is_empty()
+        {
             return false;
         }
         if matching.iter().any(|r| r.action == Action::Allow) {
@@ -5081,7 +5450,8 @@ impl Acl {
             &rule.src_groups,
             s,
             &self.groups,
-        ) {
+        ) || !posture_satisfied(&rule.posture, s)
+        {
             return false;
         }
         match host {
@@ -5134,8 +5504,20 @@ impl Acl {
             .any(|rule| matches!(rule.action, AclSshAction::Allow | AclSshAction::Check))
     }
 
+    #[cfg(test)]
     fn peer_ingress(&self, s: &Subject, d: &Subject) -> PeerIngress {
-        let ssh_users = self.ssh_users_for(s, d);
+        self.peer_ingress_for(s, d, false)
+    }
+
+    /// Compiles what `s` may send to `d`. `ssh_users_enforced` says whether
+    /// the destination agent proved it enforces per-user SSH limits; without
+    /// it, any user-limited SSH grant keeps TCP 22 closed (fail closed).
+    fn peer_ingress_for(&self, s: &Subject, d: &Subject, ssh_users_enforced: bool) -> PeerIngress {
+        let (ssh_users, ssh_deny_users) = self.ssh_grant(s, d);
+        let ssh_restricted =
+            !(ssh_users.len() == 1 && ssh_users[0] == "*" && ssh_deny_users.is_empty());
+        let ssh_open = !ssh_users.is_empty() && (ssh_users_enforced || !ssh_restricted);
+        let close_ssh = self.ssh_governed(s, d) && !ssh_open;
         let matching: Vec<_> = self
             .rules
             .iter()
@@ -5148,6 +5530,7 @@ impl Acl {
         {
             return PeerIngress {
                 ssh_users,
+                ssh_deny_users,
                 ..PeerIngress::default()
             };
         }
@@ -5178,8 +5561,11 @@ impl Acl {
         if deny_icmp {
             icmp = false;
         }
-        if !all && !ssh_users.is_empty() && !specs_cover(&deny_tcp, 22) && !specs_cover(&tcp, 22) {
-            tcp.insert("22".into());
+        if close_ssh && !specs_cover(&deny_tcp, SSH_PORT) {
+            deny_tcp.insert(SSH_PORT.to_string());
+        }
+        if !all && ssh_open && !specs_cover(&deny_tcp, SSH_PORT) && !specs_cover(&tcp, SSH_PORT) {
+            tcp.insert(SSH_PORT.to_string());
         }
         PeerIngress {
             all,
@@ -5190,6 +5576,7 @@ impl Acl {
             deny_udp: deny_udp.into_iter().collect(),
             deny_icmp,
             ssh_users,
+            ssh_deny_users,
         }
     }
 
@@ -5235,13 +5622,15 @@ impl Acl {
         }
     }
 
-    fn ssh_users_for(&self, s: &Subject, d: &Subject) -> Vec<String> {
+    /// Allowed and denied operating-system users for `s` on `d`. A `*`
+    /// allow keeps explicit denies so agents can write `DenyUsers`.
+    fn ssh_grant(&self, s: &Subject, d: &Subject) -> (Vec<String>, Vec<String>) {
         let mut allow = BTreeSet::new();
         let mut deny = BTreeSet::new();
         let mut allow_star = false;
         let mut deny_star = false;
         for rule in &self.ssh {
-            if !self.ssh_subjects_match(rule, s, d) {
+            if !self.ssh_subjects_match(rule, s, d) || !ssh_source_eligible(rule, s) {
                 continue;
             }
             let star = rule.users.iter().any(|user| user == "*");
@@ -5267,12 +5656,33 @@ impl Acl {
             }
         }
         if deny_star {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         if allow_star {
-            return vec!["*".into()];
+            return (vec!["*".into()], deny.into_iter().collect());
         }
-        allow.difference(&deny).cloned().collect()
+        (allow.difference(&deny).cloned().collect(), Vec::new())
+    }
+
+    /// SSH rules are authoritative for TCP 22 on destinations they select:
+    /// any allow/check rule naming `d`, or a deny rule naming both sides.
+    fn ssh_governed(&self, s: &Subject, d: &Subject) -> bool {
+        self.ssh.iter().any(|rule| {
+            selector(
+                &rule.dst_roles,
+                &rule.dst_tags,
+                &rule.dst_groups,
+                d,
+                &self.groups,
+            ) && (rule.action != AclSshAction::Deny
+                || selector(
+                    &rule.src_roles,
+                    &rule.src_tags,
+                    &rule.src_groups,
+                    s,
+                    &self.groups,
+                ))
+        })
     }
 
     fn ssh_subjects_match(&self, rule: &AclSshRule, s: &Subject, d: &Subject) -> bool {
@@ -5310,10 +5720,56 @@ impl Acl {
         ) {
             return false;
         }
-        rule.users
-            .iter()
-            .any(|allowed| allowed == "*" || allowed == user)
+        ssh_source_eligible(rule, s)
+            && rule
+                .users
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == user)
     }
+}
+
+const SSH_PORT: u16 = 22;
+/// `check` rules without an explicit period require renewal within 12 hours.
+pub(crate) const DEFAULT_SSH_CHECK_PERIOD_SECS: u64 = 12 * 60 * 60;
+
+fn posture_satisfied(required: &[String], s: &Subject) -> bool {
+    required.iter().all(|name| s.passed_posture.contains(name))
+}
+
+fn ssh_source_eligible(rule: &AclSshRule, s: &Subject) -> bool {
+    if !posture_satisfied(&rule.posture, s) {
+        return false;
+    }
+    if rule.action != AclSshAction::Check {
+        return true;
+    }
+    let period = rule
+        .check_period_secs
+        .unwrap_or(DEFAULT_SSH_CHECK_PERIOD_SECS) as i64;
+    s.authenticated_at
+        .is_some_and(|issued| now().saturating_sub(issued) <= period)
+}
+
+fn validate_posture_refs(names: &[String], allowed: bool) -> Result<(), ApiError> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    if !allowed {
+        return Err(ApiError::BadRequest(
+            "ACL posture checks only apply to allow and check rules".into(),
+        ));
+    }
+    if names.len() > 8 {
+        return Err(ApiError::BadRequest(
+            "ACL rules may reference at most 8 posture checks".into(),
+        ));
+    }
+    if let Some(name) = names.iter().find(|name| !valid_acl_group_name(name)) {
+        return Err(ApiError::BadRequest(format!(
+            "ACL posture check name {name:?} must be 1-32 lowercase letters, digits, or hyphens"
+        )));
+    }
+    Ok(())
 }
 
 fn valid_ssh_os_user(user: &str) -> bool {
@@ -5542,6 +5998,10 @@ mod tests {
     use tower::ServiceExt;
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
+    mod events_audit;
+    mod forwarding;
+    mod operations;
+    mod policy_posture;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {
@@ -7515,7 +7975,13 @@ mod tests {
         }))
         .unwrap();
         let ranger = Subject::new(Role::Member, vec![]).with_user("alice-user");
-        let ingress = restricted.peer_ingress(&ranger, &store);
+        // A destination that has not proven per-user sshd limits keeps the
+        // user-limited SSH grant closed at port level.
+        let closed = restricted.peer_ingress(&ranger, &store);
+        assert_eq!(closed.tcp, vec!["8080"]);
+        assert_eq!(closed.deny_tcp, vec!["22", "8081"]);
+        assert_eq!(closed.ssh_users, vec!["blaktail"]);
+        let ingress = restricted.peer_ingress_for(&ranger, &store, true);
         assert!(!ingress.all);
         assert_eq!(ingress.tcp, vec!["22", "8080"]);
         assert!(ingress.udp.is_empty());
@@ -8747,7 +9213,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"too-many","url": format!("http://{addr}/too-many")}),
+                serde_json::json!({"name":"too-many","url": format!("http://{addr}/too-many"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,
@@ -8758,7 +9224,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"hang","url": format!("http://{addr}/hang")}),
+                serde_json::json!({"name":"hang","url": format!("http://{addr}/hang"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,
@@ -8769,7 +9235,7 @@ mod tests {
                 &router,
                 Method::POST,
                 &format!("/v1/orgs/{}/webhooks", org.id),
-                serde_json::json!({"name":"redirect","url": format!("http://{addr}/redirect")}),
+                serde_json::json!({"name":"redirect","url": format!("http://{addr}/redirect"),"event_types":["device.enrolled"]}),
                 Some(&owner),
             )
             .await,
@@ -8999,9 +9465,27 @@ mod tests {
         assert_eq!(from_office.peers[0].name, "store-1");
         let ingress = from_office.peers[0].ingress.as_ref().expect("ingress");
         assert!(!ingress.all);
-        assert_eq!(ingress.tcp, vec!["22", "8080"]);
+        assert_eq!(ingress.tcp, vec!["8080"]);
+        assert_eq!(ingress.deny_tcp, vec!["22"]);
         assert_eq!(ingress.ssh_users, vec!["blaktail"]);
         assert!(!ingress.icmp);
+        let enforced: PeersResponse = body(
+            call(
+                &router,
+                Method::GET,
+                &format!(
+                    "/v1/nodes/{}/peers?capabilities=acl-filter,ssh-users&agent_version=0.1.0",
+                    office.id
+                ),
+                serde_json::Value::Null,
+                Some(&office.node_token),
+            )
+            .await,
+        )
+        .await;
+        let ingress = enforced.peers[0].ingress.as_ref().expect("ingress");
+        assert_eq!(ingress.tcp, vec!["22", "8080"]);
+        assert!(ingress.deny_tcp.is_empty());
     }
 
     #[tokio::test]
@@ -9344,8 +9828,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 18);
-        sqlx::raw_sql("PRAGMA user_version=19")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+        sqlx::raw_sql("PRAGMA user_version=29")
             .execute(&pool)
             .await
             .unwrap();
@@ -11495,5 +11979,542 @@ mod tests {
     #[tokio::test]
     async fn control_update_baseline_ten_thousand() {
         measure_control_update_baseline("10k", 10_000, 60_000, 15_000).await;
+    }
+
+    async fn api_request(
+        r: &Router,
+        method: Method,
+        path: &str,
+        token: &str,
+        org_id: Uuid,
+        body: serde_json::Value,
+    ) -> Response {
+        r.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-blaktail-organisation", org_id.to_string())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn oauth_grant(r: &Router, client_id: Uuid, secret: &str) -> Response {
+        r.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "grant_type=client_credentials&client_id={client_id}&client_secret={secret}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn console_permission_matrix_is_enforced_per_role() {
+        use crate::permissions::tests::ALL_ROLES;
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "matrix-org").await;
+        let missing = Uuid::new_v4();
+        let o = org.id;
+        // One representative coordinator route per permission. A permitted
+        // role may still get 400/404 (the body or target is deliberately
+        // inert); only 403 proves the permission check.
+        let cases: Vec<(Permission, Method, String, serde_json::Value)> = vec![
+            (
+                Permission::ViewNetwork,
+                Method::GET,
+                format!("/v1/orgs/{o}/nodes"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManagePeers,
+                Method::PUT,
+                format!("/v1/orgs/{o}/nodes/{missing}/friendly-name"),
+                serde_json::json!({"friendly_name": "x"}),
+            ),
+            (
+                Permission::ManagePeers,
+                Method::DELETE,
+                format!("/v1/orgs/{o}/nodes/{missing}"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManagePeers,
+                Method::PUT,
+                format!("/v1/orgs/{o}/security"),
+                serde_json::json!({"node_key_ttl_seconds": 0}),
+            ),
+            (
+                Permission::ManageJoinKeys,
+                Method::POST,
+                format!("/v1/orgs/{o}/join-keys"),
+                serde_json::json!({"expires_in_seconds": 60}),
+            ),
+            (
+                Permission::ManageNetworks,
+                Method::PUT,
+                format!("/v1/orgs/{o}/nodes/{missing}/routes"),
+                serde_json::json!({"approved_routes": []}),
+            ),
+            (
+                Permission::ManagePolicy,
+                Method::PUT,
+                format!("/v1/orgs/{o}/acl"),
+                serde_json::json!({"version": 0}),
+            ),
+            (
+                Permission::ManageDns,
+                Method::PUT,
+                format!("/v1/orgs/{o}/dns"),
+                serde_json::json!({"bogus": true}),
+            ),
+            (
+                Permission::ViewAudit,
+                Method::GET,
+                format!("/v1/orgs/{o}/audit"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageIntegrations,
+                Method::GET,
+                format!("/v1/orgs/{o}/webhooks"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::GET,
+                format!("/v1/orgs/{o}/api-clients"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::POST,
+                format!("/v1/orgs/{o}/api-clients/{missing}/rotate"),
+                serde_json::json!({}),
+            ),
+            (
+                Permission::ManageApiClients,
+                Method::POST,
+                format!("/v1/orgs/{o}/api-clients/{missing}/suspend"),
+                serde_json::Value::Null,
+            ),
+            (
+                Permission::ManageSecurity,
+                Method::POST,
+                format!("/v1/orgs/{o}/webhooks/events"),
+                serde_json::json!({"event_type": "not.allowed", "payload": {}}),
+            ),
+        ];
+        for role in ALL_ROLES {
+            let session = signed_session(o, &format!("{}-1", role.as_str()), role, now() + 60);
+            for (permission, method, path, payload) in &cases {
+                let status = call(&r, method.clone(), path, payload.clone(), Some(&session))
+                    .await
+                    .status();
+                assert_eq!(
+                    status == StatusCode::FORBIDDEN,
+                    !role.can(*permission),
+                    "{} {method} {path} ({permission:?}) returned {status}",
+                    role.as_str()
+                );
+                assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn role_assertions_fail_closed_and_stay_in_their_organisation() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "role-scope-a").await;
+        let other = create_test_org(&r, "role-scope-b").await;
+        for role in ["superuser", "OWNER", "network-admin", "service", ""] {
+            let exp = now() + 60;
+            let template = assertion_template(AssertionClaims {
+                user_id: "x".into(),
+                org_id: org.id,
+                role: role.into(),
+                name: "x".into(),
+                email: "x@example.com".into(),
+                iss: CONSOLE_ASSERTION_ISSUER.into(),
+                aud: CONSOLE_ASSERTION_AUDIENCE.into(),
+                iat: exp - MAX_CONSOLE_ASSERTION_LIFETIME_SECS,
+                exp,
+                jti: String::new(),
+                action: None,
+            });
+            assert_eq!(
+                call(
+                    &r,
+                    Method::GET,
+                    &format!("/v1/orgs/{}/nodes", org.id),
+                    serde_json::Value::Null,
+                    Some(&template),
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED,
+                "role {role:?} must be rejected"
+            );
+        }
+        // One person: network admin in A, auditor in B. Each assertion only
+        // carries the role for its own organisation and cannot be replayed
+        // against the other.
+        let in_a = signed_session(org.id, "linked-person", Role::NetworkAdmin, now() + 60);
+        let in_b = signed_session(other.id, "linked-person", Role::Auditor, now() + 60);
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", org.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_a),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", other.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_b),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/join-keys", other.id),
+                serde_json::json!({"expires_in_seconds": 60}),
+                Some(&in_a),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // Audit records the narrower role string, not a human admin.
+        let audit: Vec<AuditEvent> = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/audit", org.id),
+                serde_json::Value::Null,
+                Some(&in_a),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit
+            .iter()
+            .any(|e| e.action == "join_key.minted" && e.actor_role == "network_admin"));
+    }
+
+    #[tokio::test]
+    async fn api_client_scope_matrix_and_no_console_login() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "scope-matrix").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let missing = Uuid::new_v4();
+        let cases: Vec<(&str, Method, String, serde_json::Value)> = vec![
+            (
+                "status:read",
+                Method::GET,
+                "/api/v1/status".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "devices:read",
+                Method::GET,
+                "/api/v1/devices".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "devices:write",
+                Method::PUT,
+                format!("/api/v1/devices/{missing}/friendly-name"),
+                serde_json::json!({"friendly_name": "x"}),
+            ),
+            (
+                "keys:write",
+                Method::POST,
+                "/api/v1/keys".into(),
+                serde_json::json!({"expires_in_seconds": 60}),
+            ),
+            (
+                "routes:write",
+                Method::PUT,
+                format!("/api/v1/devices/{missing}/routes"),
+                serde_json::json!({"approved_routes": []}),
+            ),
+            (
+                "policy:write",
+                Method::PUT,
+                "/api/v1/policy".into(),
+                serde_json::json!({"version": 0}),
+            ),
+            (
+                "dns:write",
+                Method::PUT,
+                "/api/v1/dns".into(),
+                serde_json::json!({"bogus": true}),
+            ),
+            (
+                "audit:read",
+                Method::GET,
+                "/api/v1/audit".into(),
+                serde_json::Value::Null,
+            ),
+            (
+                "webhooks:read",
+                Method::GET,
+                "/api/v1/webhooks".into(),
+                serde_json::Value::Null,
+            ),
+        ];
+        for (scope, _, _, _) in &cases {
+            let created: crate::admin::ApiClientCreated = body(
+                call(
+                    &r,
+                    Method::POST,
+                    &format!("/v1/orgs/{}/api-clients", org.id),
+                    serde_json::json!({"name": format!("only-{scope}"), "scopes": [scope]}),
+                    Some(&owner),
+                )
+                .await,
+            )
+            .await;
+            for (needed, method, path, payload) in &cases {
+                let status = api_request(
+                    &r,
+                    method.clone(),
+                    path,
+                    &created.token,
+                    org.id,
+                    payload.clone(),
+                )
+                .await
+                .status();
+                let implied = *scope == "devices:write" && *needed == "devices:read";
+                assert_eq!(
+                    status == StatusCode::FORBIDDEN,
+                    scope != needed && !implied,
+                    "client with {scope} calling {method} {path} returned {status}"
+                );
+            }
+            // A service-user secret is never a console session.
+            assert_eq!(
+                call(
+                    &r,
+                    Method::GET,
+                    &format!("/v1/orgs/{}/nodes", org.id),
+                    serde_json::Value::Null,
+                    Some(&created.token),
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn service_users_rotate_suspend_and_attribute_audit() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&r, "service-users").await;
+        let other = create_test_org(&r, "service-users-other").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let admin = signed_session(org.id, "admin-1", Role::Admin, now() + 60);
+        let other_owner = signed_session(other.id, "owner-2", Role::Owner, now() + 60);
+        let created: crate::admin::ApiClientCreated = body(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients", org.id),
+                serde_json::json!({"name": "ci", "scopes": ["status:read", "keys:write"]}),
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let granted = oauth_grant(&r, created.id, &created.token).await;
+        assert_eq!(granted.status(), StatusCode::OK);
+        let access: serde_json::Value = body(granted).await;
+        let access = access["access_token"].as_str().unwrap().to_owned();
+        let status_ok = |token: String| {
+            let r = r.clone();
+            async move {
+                api_request(
+                    &r,
+                    Method::GET,
+                    "/api/v1/status",
+                    &token,
+                    org.id,
+                    serde_json::Value::Null,
+                )
+                .await
+                .status()
+            }
+        };
+        assert_eq!(status_ok(access.clone()).await, StatusCode::OK);
+
+        // Admins cannot manage service users; other organisations cannot see them.
+        let suspend_path = format!("/v1/orgs/{}/api-clients/{}/suspend", org.id, created.id);
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &suspend_path,
+                serde_json::Value::Null,
+                Some(&admin)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/suspend", other.id, created.id),
+                serde_json::Value::Null,
+                Some(&other_owner),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Suspension: no new tokens, and already-issued access tokens stop on
+        // their next request (declared bound: immediate, checked per call).
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &suspend_path,
+                serde_json::Value::Null,
+                Some(&owner)
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            oauth_grant(&r, created.id, &created.token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(status_ok(access.clone()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_ok(created.token.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/resume", org.id, created.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(status_ok(created.token.clone()).await, StatusCode::OK);
+
+        // Rotation: old secret and its access tokens die; the new one works.
+        let rotated: crate::admin::ApiClientCreated = body(
+            call(
+                &r,
+                Method::POST,
+                &format!("/v1/orgs/{}/api-clients/{}/rotate", org.id, created.id),
+                serde_json::json!({"expires_in_seconds": 3600}),
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        assert_ne!(rotated.token, created.token);
+        assert_eq!(
+            status_ok(created.token.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(status_ok(access).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(status_ok(rotated.token.clone()).await, StatusCode::OK);
+        assert_eq!(
+            oauth_grant(&r, created.id, &created.token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Writes by the service user are attributed to it, not to an admin.
+        assert_eq!(
+            api_request(
+                &r,
+                Method::POST,
+                "/api/v1/keys",
+                &rotated.token,
+                org.id,
+                serde_json::json!({"expires_in_seconds": 60}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        let audit: Vec<AuditEvent> = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/audit", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let minted = audit
+            .iter()
+            .find(|e| e.action == "join_key.minted")
+            .expect("service user mint audited");
+        assert_eq!(minted.actor_user_id, format!("api:{}", created.id));
+        assert_eq!(minted.actor_role, "api_client");
+        for action in [
+            "api_client.suspended",
+            "api_client.resumed",
+            "api_client.rotated",
+        ] {
+            assert!(audit.iter().any(|e| e.action == action), "{action}");
+        }
+        let clients: serde_json::Value = body(
+            call(
+                &r,
+                Method::GET,
+                &format!("/v1/orgs/{}/api-clients", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(clients[0]["suspended"], false);
+        assert!(clients[0]["rotated_at"].is_i64());
     }
 }

@@ -1,14 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { auth } from "./auth";
+import { getSignInPolicy, jitDomainCheck } from "./auth-policy";
+import { linkFreshnessRefusal } from "./auth-policy-core";
 import { writeConsoleAudit } from "./console-audit";
 import { db, rawSqlClient } from "./db/client";
-import {
-  identityProvider,
-  membership,
-  oidcLoginState,
-  user,
-} from "./db/schema";
+import { identityProvider, oidcLoginState } from "./db/schema";
 import {
   OidcTokenError,
   emailDomainAllowed,
@@ -23,6 +20,13 @@ import {
   verifySignedJwt,
   type JsonWebKey,
 } from "./oidc-jwt";
+
+import {
+  isOrgRole,
+  ownerChangeRefusal,
+  permissionReason,
+  type OrgRole,
+} from "./roles";
 
 export class OidcError extends Error {}
 
@@ -242,6 +246,7 @@ export async function completeOidcLogin(input: {
   state: string;
   code: string;
   linkingUserId?: string;
+  linkingSessionCreatedAt?: Date;
 }): Promise<CompletedOidcLogin> {
   const [login] = await db()
     .select()
@@ -323,6 +328,12 @@ export async function completeOidcLogin(input: {
       "That identity is not in an allowed organisation group.",
     );
   }
+  const linkRefusal = input.linkingUserId
+    ? linkFreshnessRefusal(
+        await getSignInPolicy(login.organisationId),
+        input.linkingSessionCreatedAt ?? new Date(0),
+      )
+    : null;
   const sql = rawSqlClient();
   const outcome = await sql.begin("isolation level serializable", async (transaction) => {
     const [bound] = await transaction`
@@ -339,6 +350,7 @@ export async function completeOidcLogin(input: {
       }
       userId = bound.user_id;
     } else if (input.linkingUserId) {
+      if (linkRefusal) throw new OidcError(linkRefusal);
       userId = input.linkingUserId;
       await transaction`
         INSERT INTO external_identity (
@@ -364,6 +376,15 @@ export async function completeOidcLogin(input: {
         throw new OidcError(
           "Just-in-time membership is disabled. Ask an owner to invite you.",
         );
+      }
+      const domainRefusal = await jitDomainCheck(
+        transaction,
+        login.organisationId,
+        claims.email,
+        claims.email_verified,
+      );
+      if (domainRefusal) {
+        throw new OidcError(domainRefusal);
       }
       userId = crypto.randomUUID();
       const name = (claims.name || claims.email || "OIDC user").slice(0, 128);
@@ -481,74 +502,135 @@ export async function establishConsoleSession(userId: string): Promise<{
   };
 }
 
-export async function listMemberships(organisationId: string) {
-  return db()
-    .select({
-      id: membership.id,
-      userId: membership.userId,
-      role: membership.role,
-      status: membership.status,
-      email: user.email,
-      name: user.name,
-    })
-    .from(membership)
-    .innerJoin(user, eq(membership.userId, user.id))
-    .where(eq(membership.organisationId, organisationId));
+export async function listMemberships(organisationId: string): Promise<
+  {
+    id: string;
+    userId: string;
+    role: OrgRole;
+    status: "invited" | "active" | "suspended" | "removed";
+    email: string;
+    name: string;
+    hasPassword: boolean;
+  }[]
+> {
+  const sql = rawSqlClient();
+  const rows = await sql`
+    SELECT m.id, m.user_id, m.role, m.status, u.email, u.name,
+      EXISTS (
+        SELECT 1 FROM account a
+        WHERE a.user_id = m.user_id AND a.provider_id = 'credential'
+          AND a.password IS NOT NULL
+      ) AS has_password
+    FROM membership m
+    JOIN "user" u ON u.id = m.user_id
+    WHERE m.organisation_id = ${organisationId}
+    ORDER BY u.name, m.id
+  `;
+  return rows.map(
+    (row: {
+      id: string;
+      user_id: string;
+      role: OrgRole;
+      status: "invited" | "active" | "suspended" | "removed";
+      email: string;
+      name: string;
+      has_password: boolean;
+    }) => ({
+      id: row.id,
+      userId: row.user_id,
+      role: row.role,
+      status: row.status,
+      email: row.email,
+      name: row.name,
+      hasPassword: row.has_password === true,
+    }),
+  );
 }
 
 export async function changeMembership(input: {
   organisationId: string;
   membershipId: string;
-  role?: "admin" | "member";
+  role?: OrgRole;
   status?: "active" | "suspended" | "removed";
   actorUserId: string;
   actorEmail: string;
-  actorRole: "owner" | "admin" | "member";
-}): Promise<{ role: "owner" | "admin" | "member"; status: string }> {
-  if (input.actorRole !== "owner") {
-    throw new OidcError("Only owners can change membership.");
+  actorRole: OrgRole;
+}): Promise<{ role: OrgRole; status: string; previousRole: OrgRole }> {
+  const reason = permissionReason(input.actorRole, "manage_security");
+  if (reason) {
+    throw new OidcError(reason);
   }
-  const [target] = await db()
-    .select()
-    .from(membership)
-    .where(eq(membership.id, input.membershipId));
-  if (!target || target.organisationId !== input.organisationId) {
-    throw new OidcError("Membership was not found.");
+  if (input.role !== undefined && !isOrgRole(input.role)) {
+    throw new OidcError("Choose one of the listed roles.");
   }
-  if (target.role === "owner" && input.status && input.status !== "active") {
-    const owners = await db()
-      .select({ id: membership.id, role: membership.role, status: membership.status })
-      .from(membership)
-      .where(eq(membership.organisationId, input.organisationId));
-    const activeOwners = owners.filter(
-      (row) => row.role === "owner" && row.status === "active",
-    ).length;
-    if (activeOwners <= 1) {
-      throw new OidcError("The last owner cannot be removed or suspended.");
+  const audit = (result: string, details: Record<string, unknown>) =>
+    writeConsoleAudit({
+      organisationId: input.organisationId,
+      actorUserId: input.actorUserId,
+      actorEmail: input.actorEmail,
+      actorRole: input.actorRole,
+      source: "console",
+      action: "membership.updated",
+      result,
+      targetType: "membership",
+      targetId: input.membershipId,
+      details,
+    });
+  const sql = rawSqlClient();
+  // Serializable so two owners demoting each other cannot both pass the
+  // last-owner check.
+  const outcome = await sql.begin("isolation level serializable", async (transaction) => {
+    const seats = (await transaction`
+      SELECT m.id, m.role, m.status,
+        EXISTS (
+          SELECT 1 FROM account a
+          WHERE a.user_id = m.user_id AND a.provider_id = 'credential'
+            AND a.password IS NOT NULL
+        ) AS has_password
+      FROM membership m
+      WHERE m.organisation_id = ${input.organisationId}
+    `) as { id: string; role: OrgRole; status: string; has_password: boolean }[];
+    const target = seats.find((seat) => seat.id === input.membershipId);
+    if (!target) {
+      return { error: "Membership was not found." } as const;
     }
-  }
-  await db()
-    .update(membership)
-    .set({
+    const next = {
       role: input.role ?? target.role,
       status: input.status ?? target.status,
-    })
-    .where(eq(membership.id, input.membershipId));
-  const next = {
-    role: input.role ?? target.role,
-    status: input.status ?? target.status,
-  };
-  await writeConsoleAudit({
-    organisationId: input.organisationId,
-    actorUserId: input.actorUserId,
-    actorEmail: input.actorEmail,
-    actorRole: input.actorRole,
-    source: "console",
-    action: "membership.updated",
-    result: "ok",
-    targetType: "membership",
-    targetId: input.membershipId,
-    details: next,
+    };
+    const previous = { role: target.role, status: target.status };
+    const refusal = ownerChangeRefusal(
+      seats.map((seat) => ({
+        membershipId: seat.id,
+        role: seat.role,
+        status: seat.status,
+        hasPassword: seat.has_password === true,
+      })),
+      { membershipId: input.membershipId, role: input.role, status: input.status },
+    );
+    if (refusal) {
+      return { error: refusal, previous, next } as const;
+    }
+    await transaction`
+      UPDATE membership SET role = ${next.role}, status = ${next.status}
+      WHERE id = ${input.membershipId} AND organisation_id = ${input.organisationId}
+    `;
+    return { previous, next } as const;
   });
-  return next;
+  if ("error" in outcome) {
+    if ("next" in outcome) {
+      await audit("denied", {
+        previous: outcome.previous,
+        requested: outcome.next,
+        reason: outcome.error,
+      });
+    }
+    throw new OidcError(outcome.error);
+  }
+  await audit("ok", {
+    ...outcome.next,
+    previous_role: outcome.previous.role,
+    previous_status: outcome.previous.status,
+  });
+  return { ...outcome.next, previousRole: outcome.previous.role };
 }

@@ -78,8 +78,40 @@ Disconnect pauses the tunnel and keeps enrolment. Leave network revokes the
 node credential. Members still cannot mint join keys; an owner or admin must
 enrol the phone, as on the Mac.
 
-Direct UDP to a peer's advertised endpoint is the first path. Australian relay
-fallback and hole punch are not in this cut.
+Direct UDP to a peer's advertised endpoint is the only path. Australian relay
+fallback and hole punch are not implemented on iPhone; see below.
+
+## Relay and hole-punch gap
+
+The iPhone has **no relay fallback**. If a peer's advertised endpoint is not
+reachable by direct UDP (for example two devices behind carrier-grade NAT),
+traffic to that peer fails; there is no parity claim with the Linux and macOS
+agents. What exists and what is missing, precisely:
+
+- `blaktail-ios-wg` exposes only the WireGuard engine over a C ABI (key
+  generation, peer set, encapsulate, decapsulate, timers). It has no relay
+  client. The relay client (`RelayMesh` in `blaktaild/src/relay_client.rs`) and
+  the selection logic (`blaktaild/src/relay_select.rs`) live in the agent crate,
+  which is not built for iOS. Android uses the same engine through JNI and
+  likewise has no relay path; Windows has one only because it runs the full
+  `blaktaild`.
+- `apps/ios/Tunnel/TunnelSession.swift` opens one `NWUDPSession` per peer to the
+  peer's coordinator-advertised `endpoint` and drops traffic for peers without
+  one. It ignores the `relays`, `relay_endpoints`, `relay_token`,
+  `relay_expires_at` and `relay_endpoint` fields in the peers response.
+- To close the gap, the extension needs: a relay socket that sends
+  `REGISTER`/`PING` with the node's capability every 30 seconds and parses
+  `OBSERVED`; `SEND`/`FORWARDED` framing around boringtun datagrams for relayed
+  peers; reporting its reflexive endpoint to `PUT /v1/nodes/{id}/relay-endpoint`;
+  the per-peer direct → relay → hole-punch state machine (`path_action` in
+  `blaktaild/src/main.rs`); the same Australian-only, ordered relay selection;
+  and a visible "observed transport" (direct, relay, peer-direct) in the app.
+  The cleanest route is moving the relay client and selection into a shared
+  crate exposed over the existing C ABI, so iOS and Android do not re-implement
+  the protocol in Swift and Kotlin.
+- Packet-tunnel memory limits, background wake for the 30-second keepalive,
+  relay-capability rotation and Network Extension restarts must then be proven
+  on a physical iPhone across independent NATs before any parity claim.
 
 ## Sign in
 

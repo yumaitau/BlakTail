@@ -16,6 +16,7 @@ sudo blaktaild up --coord https://127.0.0.1:8443 --coord-ca certs/ca.crt
 sudo blaktaild up --coord https://coord.example.org \
   --endpoint 203.0.113.10:51820
 sudo blaktaild status
+sudo blaktaild status --json   # one JSON object for local tools; no credentials
 sudo blaktaild pause  # reversible; keeps enrolment
 sudo blaktaild down
 ```
@@ -23,8 +24,9 @@ sudo blaktaild down
 On a fresh node, `up` prints a ten-minute console URL and waits. Open that URL on
 any browser, sign in, confirm the displayed name and WireGuard-key fingerprint,
 then approve the node. This works unchanged over SSH and never requires copying a
-join key. Automation may still pass `--join-key`, set `BLAKTAIL_JOIN_KEY`, or pipe
-the key on stdin.
+join key. Automation may set `BLAKTAIL_JOIN_KEY` or pipe the key on stdin. There is
+no `--join-key` argument: secrets never go in argv, where process listings and
+shell history would expose them.
 
 The coordinator URL must use HTTPS except for localhost testing. The private key and credential-bearing state are stored under `/var/lib/blaktail` with mode `0600`; they are never logged. `up` polls every 30 seconds. A polling failure leaves the last applied WireGuard peer configuration untouched, so live tunnels continue while the coordinator is unavailable.
 
@@ -58,7 +60,9 @@ sudo blaktaild up --coord https://coord.example.org \
 
 Or advertise a full IPv4 exit path with `--advertise-exit-node`. The request is
 inert until an owner or admin opens **Devices** in the console and explicitly
-checks each route. Removing an advertisement also removes any approval for it.
+checks each route, or creates a named resource on **Networks** that uses this
+router as a routing peer ([network-resources.md](network-resources.md)).
+Removing an advertisement also removes any approval for it.
 Public, loopback, link-local, multicast, tailnet-overlapping, and ambiguous subnet
 advertisements are rejected. Overlapping approved subnets on different active
 routers are rejected.
@@ -74,10 +78,32 @@ Rerunning `up` resumes the existing enrollment; no join key is needed. Use
 withdraw all advertisements. When changing routes, pass the complete desired
 list; the new list replaces the previous one.
 
-On a router, BlakTail enables `net.ipv4.ip_forward`, installs destination-limited
-`FORWARD` rules, and masquerades tailnet sources leaving non-BlakTail interfaces.
-`down` removes those exact rules and restores forwarding when BlakTail originally
-enabled it. On an exit client, policy routing preserves local/subnet routes and
+On a router, BlakTail enables `net.ipv4.ip_forward`, filters what it forwards,
+and masquerades tailnet sources leaving non-BlakTail interfaces. `down` and
+`pause` remove those exact rules and restore forwarding when BlakTail originally
+enabled it.
+
+### Forward filter
+
+The agent reports the `forward-filter` capability. When the coordinator answers
+with a `forward_filter` allow-list, forwarded overlay traffic goes through the
+`BLAKTAIL-FWD` chain (jumped to from `FORWARD -i blaktail0`, comment
+`blaktail-forward`) in both `iptables` and `ip6tables`:
+
+1. established and related flows;
+2. every deny entry (`REJECT`), for example a policy host carve-out;
+3. every allow entry: `-s <client overlay address> -d <prefix>`, limited to the
+   entry's TCP/UDP ports or ICMP, IPv4 and IPv6 rules split by family;
+4. reject everything else (default deny, including anything not advertised).
+
+Each update builds `BLAKTAIL-FWD-NEW`, jumps to it at `FORWARD` position 1,
+removes the old jump and chain, then renames the new chain, so there is never a
+moment with no filter; if any command fails the previous chain stays in force
+and the error is logged. Reapplying the same list is a no-op in effect. The
+last list is kept in `state.json` and reinstalled before routing restarts. When
+the coordinator predates forward filtering (no `forward_filter` field), the
+agent keeps the legacy per-route `ACCEPT` rules. Inspect with
+`sudo iptables -S BLAKTAIL-FWD`. On an exit client, policy routing preserves local/subnet routes and
 WireGuard's marked transport packets while sending the remaining IPv4 default
 through the selected peer. Existing conflicting kernel routes fail closed instead
 of being overwritten. macOS peers can consume approved private subnet routes, but
@@ -148,6 +174,34 @@ an environment file. Optional file configuration is selected by setting
 `BLAKTAIL_CONFIG=/etc/blaktail/config.toml` in `/etc/blaktail/agent.env`; see
 [configuration.md](configuration.md). See the
 [upgrade/version-skew policy](upgrades.md) before replacing a running agent.
+
+## SSH user policy
+
+The agent always installs the inbound overlay filter compiled by the
+coordinator and reports `acl-filter`. TCP 22 is rejected from sources with
+no SSH grant on destinations that SSH rules select. Per-user limits
+(`users: ["deploy"]`, or `*` with a denied user) need sshd to cooperate, so
+they are opt-in and fail closed:
+
+1. Add one line at the **end** of `/etc/ssh/sshd_config`:
+   `Include /var/lib/blaktail/sshd_policy.conf`
+2. Set `BLAKTAIL_SSHD_DROPIN=/var/lib/blaktail/sshd_policy.conf` in
+   `/etc/blaktail/agent.env` and restart `blaktaild`.
+
+On every peer-map apply the agent writes `Match Address` blocks there
+(ending with `Match all`), then requires `sshd -t` to pass, `sshd -T -C` to
+show the expected `allowusers`/`denyusers` for each limited source and none
+of them for an unrelated address, and a running sshd to reload
+(`systemctl reload ssh|sshd`, or `HUP` via `/run/sshd.pid`). Only then does
+it report `ssh-users`, and only then does the coordinator open TCP 22 for
+user-limited sources. Any failure restores the previous file, logs a
+warning and keeps TCP 22 closed to those sources. Logins that are not plain
+names become `DenyUsers *` for that source.
+
+The agent never edits `sshd_config`. To revert, remove the `Include` line,
+unset the variable, and reload sshd. The hardened systemd unit only allows
+writes under `/var/lib/blaktail`, which is why the drop-in lives there.
+The SSH port is fixed at 22.
 
 ## Linux tray (scaffold, issue #12)
 

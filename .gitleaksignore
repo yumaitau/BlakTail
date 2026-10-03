@@ -1,0 +1,2 @@
+# Fake PEM block in a private-services test (body "abc"); fixed in a later commit.
+f364bf27cc9d51c532e7c16c808e367de2b283c1:blaktail-coord/src/private_services.rs:private-key:1620

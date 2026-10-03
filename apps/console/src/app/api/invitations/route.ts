@@ -1,4 +1,5 @@
 import { auth } from "@/lib/auth";
+import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { requireConsoleContextFromSession } from "@/lib/desktop-auth";
 import {
   createInvitation,
@@ -28,7 +29,7 @@ function errorResponse(error: unknown): Response {
   if (error instanceof InvitationError) {
     return Response.json({ error: error.message }, { status: error.status });
   }
-  if (error instanceof OrganisationAccessError) {
+  if (error instanceof OrganisationAccessError || error instanceof AssuranceError) {
     return Response.json({ error: error.message }, { status: 403 });
   }
   console.error("Invitation request failed", error);
@@ -57,6 +58,7 @@ export async function POST(request: Request): Promise<Response> {
     assertSameOrigin(request);
     const ctx = await context(request);
     if (!ctx) return Response.json({ error: "Authentication required." }, { status: 401 });
+    await requireSecurityAssurance(ctx);
     const body = (await request.json()) as Record<string, unknown>;
     const result = await createInvitation(
       ctx,
@@ -81,6 +83,7 @@ export async function DELETE(request: Request): Promise<Response> {
     assertSameOrigin(request);
     const ctx = await context(request);
     if (!ctx) return Response.json({ error: "Authentication required." }, { status: 401 });
+    await requireSecurityAssurance(ctx);
     const body = (await request.json()) as Record<string, unknown>;
     await revokeInvitation(
       ctx,

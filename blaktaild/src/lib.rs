@@ -16,9 +16,13 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 pub mod acl_filter;
+pub mod connector;
 pub mod dns;
+pub mod forward_filter;
 pub mod relay_client;
+pub mod relay_select;
 pub mod share;
+pub mod sshd;
 pub use dns::{
     configure_system_dns, dns_domain, organisation_dns_managed, organisation_resolver_suffixes,
     published_resolver_suffixes, remove_system_dns, MagicDns,
@@ -87,6 +91,8 @@ pub struct PeerIngress {
     pub deny_icmp: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_deny_users: Vec<String>,
 }
 
 impl Peer {
@@ -97,7 +103,8 @@ impl Peer {
                 if ingress.all
                     && ingress.deny_tcp.is_empty()
                     && ingress.deny_udp.is_empty()
-                    && !ingress.deny_icmp =>
+                    && !ingress.deny_icmp
+                    && ingress.ssh_deny_users.is_empty() =>
             {
                 if ingress.ssh_users.is_empty() {
                     "all".into()
@@ -124,6 +131,9 @@ impl Peer {
                 }
                 if !ingress.ssh_users.is_empty() {
                     parts.push(format!("ssh:{}", ingress.ssh_users.join(",")));
+                }
+                if !ingress.ssh_deny_users.is_empty() {
+                    parts.push(format!("ssh-deny:{}", ingress.ssh_deny_users.join(",")));
                 }
                 if parts.is_empty() {
                     "deny".into()
@@ -240,6 +250,15 @@ pub struct NodeState {
     pub relay_endpoint: Option<String>,
     #[serde(default)]
     pub relay_endpoint_reported_at: u64,
+    /// `relays` with declared regions; only Australian ones are used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_endpoints: Vec<relay_select::RelayEndpoint>,
+    /// Relay socket address the running agent last selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_relay: Option<String>,
+    /// Relay failovers since the agent last started.
+    #[serde(default)]
+    pub relay_failovers: u64,
     #[serde(default)]
     pub dns_mode: Option<String>,
     #[serde(default)]
@@ -250,6 +269,19 @@ pub struct NodeState {
     pub control_revision: i64,
     #[serde(default)]
     pub published_shares: Vec<crate::PublishedShare>,
+    /// Last peer-map apply proved sshd enforces per-user SSH limits.
+    #[serde(default)]
+    pub ssh_users_enforced: bool,
+    /// What this node may forward when it routes; `None` when the
+    /// coordinator predates forward filtering (legacy accept-all forward).
+    #[serde(default)]
+    pub forward_filter: Option<forward_filter::ForwardFilter>,
+    /// Operator opted this Linux node in as an app connector.
+    #[serde(default)]
+    pub app_connector: bool,
+    /// Host routes currently forwarded for app-connector resources.
+    #[serde(default)]
+    pub connector_routes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -266,6 +298,26 @@ pub struct OrgDnsSnapshot {
     pub split: Vec<OrgDnsSplit>,
     #[serde(default)]
     pub global_resolvers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<OrgDnsZone>,
+}
+
+/// Coordinator-published custom zone the local stub answers authoritatively.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OrgDnsZone {
+    pub name: String,
+    #[serde(default)]
+    pub records: Vec<OrgDnsZoneRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OrgDnsZoneRecord {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub value: String,
+    #[serde(default)]
+    pub ttl: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -357,6 +409,8 @@ struct RegisterResponse {
     #[serde(default)]
     relays: Vec<String>,
     #[serde(default)]
+    relay_endpoints: Vec<relay_select::RelayEndpoint>,
+    #[serde(default)]
     relay_token: String,
     #[serde(default)]
     relay_expires_at: u64,
@@ -382,6 +436,8 @@ struct PeersResponse {
     #[serde(default)]
     relays: Vec<String>,
     #[serde(default)]
+    relay_endpoints: Vec<relay_select::RelayEndpoint>,
+    #[serde(default)]
     relay_token: String,
     #[serde(default)]
     relay_expires_at: u64,
@@ -391,6 +447,8 @@ struct PeersResponse {
     revision: Option<i64>,
     #[serde(default)]
     shares: Vec<crate::PublishedShare>,
+    #[serde(default)]
+    forward_filter: Option<forward_filter::ForwardFilter>,
 }
 
 #[derive(Serialize)]
@@ -418,6 +476,8 @@ struct ApiErrorResponse {
 pub struct Coordinator {
     base: String,
     client: reqwest::Client,
+    /// Latest measured path summary, sent with the next peer-map heartbeat.
+    transport: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
 }
 impl Coordinator {
     pub fn new(base: &str) -> Result<Self, Error> {
@@ -444,7 +504,17 @@ impl Coordinator {
         Ok(Self {
             base,
             client: builder.build()?,
+            transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    /// Records `direct`, `relay` or `mixed` from fresh WireGuard handshakes;
+    /// `None` means nothing was measured and nothing is reported.
+    pub fn set_transport(&self, transport: Option<&'static str>) {
+        *self
+            .transport
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = transport;
     }
     pub async fn begin_device_authorization(
         &self,
@@ -517,10 +587,10 @@ impl Coordinator {
                 allowed_ips: vec![],
                 advertised_routes: registration.advertised_routes,
                 os: std::env::consts::OS,
-                os_version: std::env::consts::ARCH,
+                os_version: &os_version(),
                 agent_version: env!("CARGO_PKG_VERSION"),
                 hostname: registration.name,
-                capabilities: vec!["wireguard".into(), "magicdns".into()],
+                capabilities: agent_capabilities(false),
                 ephemeral: registration.ephemeral,
             })
             .send()
@@ -552,6 +622,9 @@ impl Coordinator {
             router_previous_ipv4_forward: None,
             peers: vec![],
             relays: r.relays,
+            relay_endpoints: r.relay_endpoints,
+            active_relay: None,
+            relay_failovers: 0,
             relay_token: r.relay_token,
             relay_expires_at: r.relay_expires_at,
             relay_endpoint: None,
@@ -561,6 +634,10 @@ impl Coordinator {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            ssh_users_enforced: false,
+            forward_filter: None,
+            app_connector: false,
+            connector_routes: Vec::new(),
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -569,6 +646,14 @@ impl Coordinator {
             .get(format!("{}/v1/nodes/{}/peers", self.base, state.node_id))
             .bearer_auth(&state.node_token);
         request = request.query(&[("ipv6", "true")]);
+        request = request.query(&inventory_query(state));
+        let transport = *self
+            .transport
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(transport) = transport {
+            request = request.query(&[("transport", transport)]);
+        }
         if let Some(revision) = state.org_dns.as_ref().map(|dns| dns.revision) {
             request = request.query(&[("dns_revision", revision.to_string())]);
         }
@@ -596,6 +681,7 @@ impl Coordinator {
             ("ipv6", "true".into()),
             ("version", "2".into()),
         ]);
+        request = request.query(&inventory_query(state));
         if let Some(revision) = state.org_dns.as_ref().map(|dns| dns.revision) {
             request = request.query(&[("dns_revision", revision.to_string())]);
         }
@@ -633,10 +719,12 @@ impl Coordinator {
         state.credential_expires_at = body.credential_expires_at;
         state.exit_node_active = body.exit_node_active;
         state.relays = body.relays;
+        state.relay_endpoints = body.relay_endpoints;
         state.relay_token = body.relay_token;
         state.relay_expires_at = body.relay_expires_at;
         apply_org_dns_snapshot(state, body.dns);
         state.published_shares = body.shares;
+        forward_filter::adopt(&mut state.forward_filter, body.forward_filter);
         Ok(peers)
     }
 
@@ -798,6 +886,57 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     fs::rename(tmp, path)?;
     Ok(())
 }
+/// Capabilities this build provides. `ssh-users` is only claimed after the
+/// last apply verified the sshd drop-in.
+pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
+    let mut capabilities = vec!["wireguard".to_string(), "magicdns".to_string()];
+    if cfg!(target_os = "linux") {
+        capabilities.push("acl-filter".into());
+        capabilities.push("forward-filter".into());
+        if ssh_users_enforced {
+            capabilities.push("ssh-users".into());
+        }
+    }
+    capabilities
+}
+
+fn inventory_query(state: &NodeState) -> [(&'static str, String); 3] {
+    let mut capabilities = agent_capabilities(state.ssh_users_enforced);
+    if cfg!(target_os = "linux") && state.app_connector {
+        capabilities.push(connector::CAPABILITY.into());
+    }
+    [
+        ("capabilities", capabilities.join(",")),
+        ("agent_version", env!("CARGO_PKG_VERSION").to_string()),
+        ("os_version", os_version()),
+    ]
+}
+
+/// Self-reported OS release: `VERSION_ID` on Linux, the product version on
+/// macOS. Empty when unknown so posture treats it as missing.
+pub fn os_version() -> String {
+    if cfg!(target_os = "linux") {
+        return fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("VERSION_ID="))
+                    .map(|value| value.trim().trim_matches('"').to_string())
+            })
+            .unwrap_or_default();
+    }
+    if cfg!(target_os = "macos") {
+        return Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default();
+    }
+    String::new()
+}
+
 pub fn read_state(dir: &Path) -> Result<NodeState, Error> {
     Ok(serde_json::from_slice(&fs::read(dir.join("state.json"))?)?)
 }
@@ -839,6 +978,15 @@ pub trait Network {
         }
     }
     fn apply_ingress(&mut self, _interface: &str, _peers: &[Peer]) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Installs the routing peer's forward allow-list (`None`: legacy
+    /// accept of advertised routes). Only Linux routes, so others ignore it.
+    fn apply_forward_filter(
+        &mut self,
+        _interface: &str,
+        _filter: Option<&forward_filter::ForwardFilter>,
+    ) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -895,6 +1043,9 @@ pub struct LinuxNetwork {
     peer_routes: HashMap<String, Vec<String>>,
     installed_routes: HashSet<String>,
     exit_routing: bool,
+    /// Routes this node currently forwards for (from `configure_router`).
+    router_routes: Vec<String>,
+    forward_filter: Option<forward_filter::ForwardFilter>,
 }
 impl LinuxNetwork {
     fn run(program: &str, args: &[&str]) -> Result<(), Error> {
@@ -1150,6 +1301,34 @@ impl LinuxNetwork {
     }
 
     fn remove_router_rules(interface: &str, routes: &[String]) {
+        Self::remove_route_accepts(interface, routes);
+        for bin in ["iptables", "ip6tables"] {
+            Self::run_ignore(
+                bin,
+                &[
+                    "-D",
+                    "FORWARD",
+                    "-o",
+                    interface,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "RELATED,ESTABLISHED",
+                    "-m",
+                    "comment",
+                    "--comment",
+                    "blaktail-router",
+                    "-j",
+                    "ACCEPT",
+                ],
+            );
+        }
+        Self::remove_router_nat(interface);
+    }
+
+    /// Legacy per-route forward accepts (used only when the coordinator
+    /// sends no forward allow-list).
+    fn remove_route_accepts(interface: &str, routes: &[String]) {
         for route in routes {
             let bin = if is_ipv6_route(route) {
                 "ip6tables"
@@ -1174,18 +1353,25 @@ impl LinuxNetwork {
                 ],
             );
         }
-        for bin in ["iptables", "ip6tables"] {
-            Self::run_ignore(
+    }
+
+    fn install_route_accepts(interface: &str, routes: &[String]) -> Result<(), Error> {
+        for route in routes {
+            let bin = if is_ipv6_route(route) {
+                "ip6tables"
+            } else {
+                "iptables"
+            };
+            Self::run(
                 bin,
                 &[
-                    "-D",
+                    "-I",
                     "FORWARD",
-                    "-o",
+                    "1",
+                    "-i",
                     interface,
-                    "-m",
-                    "conntrack",
-                    "--ctstate",
-                    "RELATED,ESTABLISHED",
+                    "-d",
+                    route,
                     "-m",
                     "comment",
                     "--comment",
@@ -1193,8 +1379,28 @@ impl LinuxNetwork {
                     "-j",
                     "ACCEPT",
                 ],
-            );
+            )?;
         }
+        Ok(())
+    }
+
+    fn install_forward_filter(&self, interface: &str) -> Result<(), Error> {
+        let Some(filter) = &self.forward_filter else {
+            return Ok(());
+        };
+        let plan = forward_filter::plan(filter);
+        let mut runner = sshd::SystemRunner;
+        forward_filter::install(&mut runner, "iptables", interface, &plan.ipv4)?;
+        forward_filter::install(&mut runner, "ip6tables", interface, &plan.ipv6)
+    }
+
+    fn clear_forward_filter(interface: &str) {
+        let mut runner = sshd::SystemRunner;
+        forward_filter::clear(&mut runner, "iptables", interface);
+        forward_filter::clear(&mut runner, "ip6tables", interface);
+    }
+
+    fn remove_router_nat(interface: &str) {
         Self::run_ignore(
             "iptables",
             &[
@@ -1359,6 +1565,8 @@ impl Network for LinuxNetwork {
     fn down(&mut self, interface: &str) -> Result<(), Error> {
         self.disable_exit_routing(interface);
         Self::clear_acl_filter(interface);
+        Self::clear_forward_filter(interface);
+        self.router_routes.clear();
         Self::run("ip", &["link", "delete", "dev", interface])
     }
     fn set_peer_endpoint(
@@ -1455,6 +1663,8 @@ impl Network for LinuxNetwork {
                     }
                 }
             }
+            Self::clear_forward_filter(interface);
+            self.router_routes.clear();
             return Ok(None);
         }
 
@@ -1462,30 +1672,13 @@ impl Network for LinuxNetwork {
         let has_v6 = desired_routes.iter().any(|route| is_ipv6_route(route));
 
         let installed = (|| {
-            for route in desired_routes {
-                let bin = if is_ipv6_route(route) {
-                    "ip6tables"
-                } else {
-                    "iptables"
-                };
-                Self::run(
-                    bin,
-                    &[
-                        "-I",
-                        "FORWARD",
-                        "1",
-                        "-i",
-                        interface,
-                        "-d",
-                        route,
-                        "-m",
-                        "comment",
-                        "--comment",
-                        "blaktail-router",
-                        "-j",
-                        "ACCEPT",
-                    ],
-                )?;
+            // With a coordinator allow-list, forwarding goes only through
+            // BLAKTAIL-FWD (default deny); otherwise keep legacy accepts.
+            if self.forward_filter.is_some() {
+                self.install_forward_filter(interface)?;
+            } else {
+                Self::clear_forward_filter(interface);
+                Self::install_route_accepts(interface, desired_routes)?;
             }
             for bin in ["iptables", "ip6tables"] {
                 let wanted = (bin == "iptables" && has_v4) || (bin == "ip6tables" && has_v6);
@@ -1597,7 +1790,27 @@ impl Network for LinuxNetwork {
                 }
             }
         }
+        self.router_routes = desired_routes.to_vec();
         Ok(original)
+    }
+    fn apply_forward_filter(
+        &mut self,
+        interface: &str,
+        filter: Option<&forward_filter::ForwardFilter>,
+    ) -> Result<(), Error> {
+        // Fail closed: once a filter is in force, `None` keeps it rather than
+        // reverting to the legacy accept-all rules.
+        forward_filter::adopt(&mut self.forward_filter, filter.cloned());
+        if self.router_routes.is_empty() || self.forward_filter.is_none() {
+            // Stored for the next `configure_router`; nothing forwards yet,
+            // or no filter was ever received (legacy accepts stay).
+            return Ok(());
+        }
+        // The jump goes in at FORWARD 1 before legacy accepts leave, so no
+        // packet is forwarded unfiltered during the switch.
+        self.install_forward_filter(interface)?;
+        Self::remove_route_accepts(interface, &self.router_routes);
+        Ok(())
     }
 }
 
@@ -1977,23 +2190,38 @@ pub fn apply_peer_map(
     let installed = installable_wireguard_peers(&state.peers, &desired);
     let changes = peer_diff(&state.peers, &installed);
     network.apply(&state.interface, &changes)?;
-    apply_peer_filter(network, dir, &state.interface, &installed)?;
+    state.ssh_users_enforced = apply_peer_filter(network, dir, &state.interface, &installed)?;
+    network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
     state.peers = installed;
     write_state(dir, state)?;
     Ok(changes.len())
 }
 
+/// Installs the inbound filter and, when an sshd drop-in is configured,
+/// per-user SSH limits. Returns whether those limits are proven active;
+/// otherwise user-limited SSH sources are rejected at TCP 22.
 fn apply_peer_filter(
     network: &mut dyn Network,
     dir: &Path,
     interface: &str,
     peers: &[Peer],
-) -> Result<(), Error> {
-    network.apply_ingress(interface, peers)?;
+) -> Result<bool, Error> {
     write_secret(
         &dir.join("sshd_blaktail.conf"),
         acl_filter::sshd_policy_config(peers).as_bytes(),
-    )
+    )?;
+    let enforced = match sshd::configured_dropin() {
+        Some(path) => match sshd::sync(&path, peers, &mut sshd::SystemRunner, sshd::PID_FILE) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "sshd user policy not active; SSH stays closed to user-limited sources");
+                false
+            }
+        },
+        None => false,
+    };
+    network.apply_ingress(interface, &acl_filter::fail_closed_ssh(peers, enforced))?;
+    Ok(enforced)
 }
 
 /// Reinstalls the persisted peer set after a platform backend recreates its
@@ -2012,6 +2240,7 @@ pub fn restore_peers(
         .collect();
     network.apply(&state.interface, &changes)?;
     apply_peer_filter(network, dir, &state.interface, &state.peers)?;
+    network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
     Ok(changes.len())
 }
 
@@ -2155,6 +2384,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingNetwork {
         applied: Vec<PeerChange>,
+        forward: Vec<Option<forward_filter::ForwardFilter>>,
     }
 
     impl Network for RecordingNetwork {
@@ -2192,6 +2422,14 @@ mod tests {
             _interface: &str,
         ) -> Result<Option<std::net::SocketAddr>, Error> {
             Ok(None)
+        }
+        fn apply_forward_filter(
+            &mut self,
+            _interface: &str,
+            filter: Option<&forward_filter::ForwardFilter>,
+        ) -> Result<(), Error> {
+            self.forward.push(filter.cloned());
+            Ok(())
         }
     }
 
@@ -2333,6 +2571,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn linux_forward_filter_survives_a_response_without_one() {
+        let filter = forward_filter::ForwardFilter {
+            deny: vec![],
+            allow: vec![forward_filter::ForwardRule {
+                sources: vec!["100.64.0.5/32".into()],
+                destination: "10.20.1.0/24".into(),
+                tcp: vec!["443".into()],
+                ..forward_filter::ForwardRule::default()
+            }],
+        };
+        // No router routes yet, so nothing touches iptables.
+        let mut network = LinuxNetwork::default();
+        network
+            .apply_forward_filter("blaktail0", Some(&filter))
+            .unwrap();
+        network.apply_forward_filter("blaktail0", None).unwrap();
+        assert_eq!(network.forward_filter, Some(filter));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_routes_distinguish_ipv4_and_ipv6_hosts() {
@@ -2368,11 +2626,18 @@ mod tests {
             relay_expires_at: 0,
             relay_endpoint: None,
             relay_endpoint_reported_at: 0,
+            relay_endpoints: vec![],
+            active_relay: None,
+            relay_failovers: 0,
             dns_mode: None,
             org_dns: None,
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            ssh_users_enforced: false,
+            forward_filter: Some(forward_filter::ForwardFilter::default()),
+            app_connector: false,
+            connector_routes: Vec::new(),
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2382,6 +2647,11 @@ mod tests {
         assert_eq!(restore_peers(&mut network, &state, &dir).unwrap(), 1);
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(network.applied, vec![PeerChange::Upsert(expected)]);
+        // A restart re-applies the persisted allow-list, never legacy accept.
+        assert_eq!(
+            network.forward,
+            vec![Some(forward_filter::ForwardFilter::default())]
+        );
     }
     #[test]
     fn key_file_is_created_with_0600() {
@@ -2426,6 +2696,9 @@ mod tests {
             relay_expires_at: 0,
             relay_endpoint: None,
             relay_endpoint_reported_at: 0,
+            relay_endpoints: vec![],
+            active_relay: None,
+            relay_failovers: 0,
             dns_mode: None,
             org_dns: Some(OrgDnsSnapshot {
                 revision: 4,
@@ -2436,6 +2709,10 @@ mod tests {
             dns_degraded: None,
             control_revision: 3,
             published_shares: vec![],
+            ssh_users_enforced: false,
+            forward_filter: None,
+            app_connector: false,
+            connector_routes: Vec::new(),
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));
@@ -2521,11 +2798,13 @@ mod tests {
             credential_expires_at: 0,
             exit_node_active: false,
             relays: vec![],
+            relay_endpoints: vec![],
             relay_token: String::new(),
             relay_expires_at: 0,
             dns: None,
             revision: Some(9),
             shares: vec![],
+            forward_filter: None,
         };
         let merged = Coordinator::apply_control_peers(&current, &body);
         assert_eq!(

@@ -10,14 +10,91 @@ authorisation.
 - `/sign-in` — email and password; shows the shared project mission
 - `/privacy` — public software data-handling and retention statement
 - `/devices` — device inventory across linked networks; each row shows its
-  network and expands for rename, routes, tags, and revocation
-- `/join-keys` — mint join keys (owner/admin)
-- `/acls` — people groups and access rules (owner/admin write)
-- `/audit` — latest actor-attributed security and administration changes
+  network and expands for rename, routes, tags, and revocation. The device
+  name opens its detail page.
+- `/devices/{nodeId}?organisation=…` — one device: node id, owner, WireGuard
+  key fingerprint, friendly/technical/MagicDNS names, addresses, tags, approved
+  routes, last heartbeat (online or stale by coordinator time), agent/OS
+  version against the coordinator's minimum, credential expiry, the
+  agent-reported transport (direct, relay, mixed, or "not measured") with its
+  timestamp, recent audit entries for the device, and suspend/resume, revoke
+  and delete with an impact preview (owner/admin)
+- `/join-keys` — enrolment workspace (owner/admin): mint named one-use or
+  reusable keys with optional maximum uses, expiry and tags; the secret is
+  shown once; inventory with creator, uses left, last use, expiry and revoke;
+  install steps per platform that never contain the secret
+- `/acls` — people groups and access rules (owner/admin write), plus
+  **Explain access** for any member: matched rule, deny precedence, posture,
+  pairing and whether the destination device actually enforces the result
+- `/posture` — versioned posture checks (owner/admin write) and each
+  device's current assessment; self-reported data is labelled as such
+- `/topology` — who can reach what in the selected organisation: devices
+  (online, stale, suspended, expired, agent-reported transport with its
+  timestamp or "not measured"), network resources and routing peers, approved
+  routes, and every effective path with a text explanation and a link to the
+  page that owns it. Searchable and filterable; an optional static graph
+  groups devices by tag. See [Topology and change drafts](#topology-and-change-drafts).
+- `/changes` — server-side change drafts: stage access policy, network
+  resource and DNS changes together, preview the diff and reachability change,
+  and publish them atomically (owner, admin and network admin; members and
+  auditors see summaries)
+- `/dns` — organisation DNS workspace: effective settings, nameserver groups,
+  custom zones, split DNS, split-match preview and revision history (owner/admin write)
+- `/services` — private service names, target device, access tags, status and
+  the organisation service CA (owner/admin write)
+- `/audit` — actor-attributed administration changes from the coordinator and
+  console, filterable by actor, action, target and UTC date, paged with one
+  cursor across both stores, redacted details, integrity-chain status, and
+  CSV/JSON export for roles with `export_audit` ([audit-and-traffic.md](audit-and-traffic.md))
+- `/traffic` — opt-in aggregate traffic diagnostics (owner turns on; off by
+  default) with disabled, no-data and stale states; current agents do not
+  report traffic yet
 - `/status` — status-only coordinator readiness; region stays in protected diagnostics
+- `/operations` — **Operator health** (owners and auditors only, enforced by the
+  coordinator): console, coordinator and schema versions, relay reachability
+  probed from the coordinator, this organisation's webhook outbox depth and
+  dead letters, credential and certificate expiry counts, SSO provider counts,
+  and the operator-recorded last backup. No keys, tokens or webhook addresses
 - `/settings` — separate **Network accounts** and **Ways to sign in**, secure
   login linking/unlinking, owner conflict decisions, invitations, and account details
 - `/invite?token=…` — one-use invitation acceptance; public account creation remains disabled
+
+## Topology and change drafts
+
+`GET /v1/orgs/{org}/topology` (any member) is a read model, not a second
+policy engine: device-to-device paths come from the same evaluator and
+peer-map compiler that agents receive (`policy_explain::device_flow`), and
+resource paths from the network-resource distribution. Suspended and expired
+devices have no paths. Path type combines the two endpoints' own transport
+summaries; it is not a per-pair measurement, reports older than ten minutes
+show as not measured, and nothing is sent to external analytics. Pairwise
+evaluation stops at 400 active devices and says so.
+
+A change draft (`/v1/orgs/{org}/changes`) is bound to one organisation,
+versioned, and expires after seven days. It stores proposed documents for any
+of access policy, DNS and network resources (the full desired resource list),
+plus the live etag of each surface when it was created. Creating, editing,
+previewing, rebasing, discarding and publishing need the permission of every
+surface the draft touches (`manage_policy`, `manage_dns`,
+`manage_networks`); other roles get summaries without payloads. Keys that look
+like credentials are refused.
+
+Preview and publish run the same code: every surface is applied with the
+ordinary validators and writers on one database transaction, which preview
+rolls back and publish commits. Publish therefore applies all surfaces or
+none, bumps the control revision once, and records `change_draft.published`
+with the draft id and before/after revisions (plus `acl.updated`,
+`dns.updated` and per-resource entries). If any surface changed since the
+draft's base, publish returns 409 and the draft must be rebased; editing with
+a stale draft version returns 412. Risk flags (deny rules removed, defaults
+widened, default-route exposure, nested route overlap, deleted resources,
+paths opened or closed, DNS warnings) must each be confirmed. Last-owner
+lockout does not apply: these surfaces cannot remove console access.
+
+Limits: agents still pick up the published state on their next poll, so
+devices converge over seconds rather than at one instant; the console shows
+the previous document as the one-step rollback for policy and DNS, but there
+is no multi-surface undo yet; reachability is address-family neutral.
 
 ## First owner and invitations
 
@@ -161,12 +238,17 @@ performs a fresh membership/role lookup before a coordinator assertion is signed
 4. Rust verifies every claim and consumes each nonce once. Missing, replayed,
    expired, cross-org, wrong-audience, wrong-issuer, or forged assertions receive
    `401`; valid actors without the required role receive `403`.
+   Unknown role strings are rejected with `401`. Roles and the permission each
+   action needs are in [roles.md](roles.md).
+5. Organisations can require a recent sign-in for security changes and
+   two-step verification for password owners and admins. Password sign-ins of
+   identities with TOTP enabled show a code step after the password.
 
 For headless Linux enrollment, `blaktaild up` prints `/enroll?code=...`. The
 page preserves that destination through sign-in, displays the requested node name
 and WireGuard-key fingerprint, and requires an explicit approval. Any signed-in
-organisation member can enroll their own untagged device; only owners and admins
-can attach privileged device tags. The browser code is not the join secret.
+organisation member can enroll their own untagged device; only roles that can
+manage devices (owner, admin, network admin) can attach privileged device tags. The browser code is not the join secret.
 
 The Devices page also shows each node's requested subnet and exit routes. Owners
 and admins approve routes individually; members can see them but cannot change
@@ -175,11 +257,47 @@ Owners and admins can also set or clear a 64-character friendly name. This label
 for people: the agent-provided name, MagicDNS hostname, WireGuard identity, routes,
 and persisted agent state do not change.
 
-Settings can publish organisation DNS: split suffixes, upstream resolvers, search
-domains, and extra A/AAAA records. Members are read-only. MagicDNS names stay
-coordinator-authoritative and cannot be impersonated from this form. The page
-shows which extra records match a split suffix and how many enrolled devices have
-applied the current revision.
+The Networks page names private subnets as resources, picks routing peers with a
+failover metric, chooses which roles, tags or policy groups receive each route,
+and shows routing-peer health and effective distribution per device. Members can
+read it; owners and admins change it. See [network-resources.md](network-resources.md).
+A DNS resource's page also shows its app connector's current answers, lease
+expiry, each connector's last report and any block reason
+([app-connectors.md](app-connectors.md)).
+
+`/networks/addresses` shows the IPv4 and IPv6 device pools with used, reserved,
+grace-period and available counts, every address with its owner, reservations
+and conflicts. Owners, admins and network admins reserve and release addresses;
+everyone else can read it. See [ipam.md](ipam.md).
+
+
+`/dns` publishes organisation DNS (Settings now links there). The page shows the
+published revision, how many enrolled devices have applied it, whether DNS is
+managed, the protected MagicDNS suffix and coordinator warnings (for example
+loopback or link-local record targets). Owners and admins edit nameserver groups
+(ordered resolvers, match domains, enabled, all devices or office/ranger/store
+tags), custom zones with A/AAAA/CNAME/TXT records and TTLs, and the original
+split suffixes, search domains and extra A/AAAA records. An Advanced JSON editor
+covers the whole document. **Check** asks the coordinator to validate and
+canonicalise the draft without publishing; **Publish DNS** sends it with the
+current etag, and a stale etag shows "Someone else published a newer revision;
+reload". The split-match preview answers which source handles a name for a chosen
+device or tag set (MagicDNS, zone, forwarded group or split route, or not
+handled). Revision history lists revisions recorded since this workspace shipped,
+compares any of them with the current document as a line diff, and restores one
+as a new revision; one-step rollback still covers the latest earlier revision.
+Members can read everything and use preview but cannot publish. Agents older than
+this release answer only zone A/AAAA records.
+
+`/services` lists private services under the organisation's
+`svc.<org-prefix>.blaktail` namespace, separate from device MagicDNS names. Owners
+and admins preview a name (full name, collisions, warnings) before creating it,
+choose the target device, local port and protocol, and the device tags allowed to
+use it, and can disable or delete it (certificates are revoked). Status is honest:
+no serving-agent listener ships yet, so services show "Awaiting serving agent" (or
+"Certificate issued, not verified") and are never presented as reachable or
+published in DNS. The organisation service CA certificate and fingerprint can be
+viewed and downloaded; trusting it on clients is manual.
 
 Device details list overlay file shares published by `blaktaild share enable`.
 The coordinator stores the path and label only; file bytes never leave the node
@@ -192,6 +310,13 @@ minting, browser enrollment approval, friendly-name changes, route approval, ACL
 updates, node-key lifetime updates, and console revocation are recorded with actor,
 source, and result. Raw bootstrap credentials, invitation tokens, passwords,
 sessions, join keys, node tokens, and browser device codes are never included.
+Details are also redacted by key name and value shape when displayed or
+exported. Exports are audited as `audit.exported`.
+
+Settings → Webhooks lets owners and admins choose which catalogued events
+each destination receives, inspect deliveries (including dead-lettered ones
+and their last error) and replay them. Webhooks are the only alert channel;
+there is no email or Slack delivery ([notifications.md](notifications.md)).
 
 ## Local development
 
