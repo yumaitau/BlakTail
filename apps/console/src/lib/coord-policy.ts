@@ -1,6 +1,7 @@
 import "server-only";
 
 import { coordFetch, type DeviceTag } from "./coord";
+import type { IntegrationFact, IntegrationRequirement } from "./coord-posture-integrations";
 import type { ConsoleContext } from "./session";
 
 export type ExplainProtocol = "tcp" | "udp" | "icmp";
@@ -75,6 +76,7 @@ export type PostureDefinition = {
   max_report_age_secs?: number;
   require_approved_peer?: boolean;
   on_missing_data?: "fail" | "pass";
+  integration?: IntegrationRequirement;
 };
 
 export type PostureCheck = {
@@ -87,7 +89,10 @@ export type PostureCheck = {
   referenced_by: string[];
 };
 
-export type PostureReason = { text: string; source: "agent_reported" | "coordinator_observed" };
+export type PostureReason = {
+  text: string;
+  source: "agent_reported" | "coordinator_observed" | "provider_reported";
+};
 
 export type DeviceAssessment = {
   node_id: string;
@@ -100,6 +105,7 @@ export type DeviceAssessment = {
   inventory_reported_at: number;
   credential_issued_at: number;
   enforcement: { packet_filter: string; ssh_users: boolean; detail: string };
+  integrations?: IntegrationFact[];
   assessments: {
     check: string;
     version: number;

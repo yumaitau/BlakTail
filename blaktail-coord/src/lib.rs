@@ -19,6 +19,7 @@ mod peer_lifecycle;
 mod permissions;
 mod policy_explain;
 mod posture;
+mod posture_integrations;
 mod private_services;
 mod resources;
 mod service_users;
@@ -355,7 +356,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 33,
         name: "posture integrations",
         postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0033_edr_integrations.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0033_edr_integrations.sql"
+        )),
     },
     Migration {
         version: 34,
@@ -367,7 +370,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 35,
         name: "private service serving",
         postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0035_service_serving.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0035_service_serving.sql"
+        )),
     },
     Migration {
         version: 36,
@@ -1448,6 +1453,7 @@ pub fn app_with_relays_console_and_metrics(
     };
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::spawn(webhooks::delivery_loop(state.clone()));
+    tokio::spawn(posture_integrations::sync_loop(state.clone()));
     Router::new()
         .route("/health", get(readiness))
         .route("/livez", get(liveness))
@@ -1533,6 +1539,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(app_connectors::routes())
         .merge(service_users::routes())
         .merge(posture::routes())
+        .merge(posture_integrations::routes())
         .merge(policy_explain::routes())
         .merge(admin::api_routes())
         .merge(dns_workspace::routes())
@@ -3278,6 +3285,11 @@ struct PeerSelection {
     agent_version: Option<String>,
     #[serde(default)]
     os_version: Option<String>,
+    #[serde(default)]
+    serial_number: Option<String>,
+    /// Comma-separated MAC addresses, for posture integration matching.
+    #[serde(default)]
+    mac_addresses: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -3301,6 +3313,11 @@ struct UpdateSelection {
     agent_version: Option<String>,
     #[serde(default)]
     os_version: Option<String>,
+    #[serde(default)]
+    serial_number: Option<String>,
+    /// Comma-separated MAC addresses, for posture integration matching.
+    #[serde(default)]
+    mac_addresses: Option<String>,
 }
 
 async fn list_peers(
@@ -3348,6 +3365,14 @@ async fn list_peers(
         selection.capabilities.as_deref(),
         selection.agent_version.clone(),
         selection.os_version.clone(),
+    )
+    .await?;
+    posture_integrations::record_hardware(
+        &s.store,
+        &org,
+        node_id,
+        selection.serial_number.as_deref(),
+        selection.mac_addresses.as_deref(),
     )
     .await?;
     let ssh_users_enforced = source_capabilities
@@ -3605,6 +3630,14 @@ async fn list_updates(
         selection.os_version.clone(),
     )
     .await?;
+    posture_integrations::record_hardware(
+        &s.store,
+        &org,
+        node_id,
+        selection.serial_number.as_deref(),
+        selection.mac_addresses.as_deref(),
+    )
+    .await?;
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
@@ -3631,6 +3664,8 @@ async fn list_updates(
                     capabilities: selection.capabilities,
                     agent_version: selection.agent_version,
                     os_version: selection.os_version,
+                    serial_number: selection.serial_number,
+                    mac_addresses: selection.mac_addresses,
                 }),
                 headers,
             )
@@ -6086,6 +6121,7 @@ mod tests {
     mod forwarding;
     mod operations;
     mod policy_posture;
+    mod posture_integrations;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {

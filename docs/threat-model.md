@@ -82,6 +82,39 @@ The shared schema refuses coordinator, relay, and console startup unless
 `australiaeast`, `australiasoutheast`, `australia-southeast1`, or
 `australia-southeast2`). Public health responses contain status only and never
 echo the configured region. Deployment policy still pins AWS stacks to Sydney.
+Optional MDM/EDR posture integrations are a deliberate, owner-approved
+exception: the coordinator calls the vendor's cloud, which may be offshore,
+and the console says so before the first call.
+
+### MDM/EDR integration abuse
+
+Posture integrations (Intune, CrowdStrike Falcon, SentinelOne, FleetDM,
+Huntress) add a credential and an outbound call per organisation:
+
+- **Credential theft or exfiltration.** Secrets are sealed with a key derived
+  from the coordinator secret, write-only through the API, absent from audit
+  details, errors and logs (provider errors are reduced to fixed
+  categories). Changing an integration's endpoint requires re-entering the
+  secret, so an owner session cannot redirect a stored credential. Only
+  owners can create, rotate, test or remove integrations. Ask vendors for
+  read-only scopes only.
+- **SSRF through provider URLs.** Fixed vendor hosts for Intune,
+  CrowdStrike (region list) and Huntress; SentinelOne must be
+  `*.sentinelone.net`; FleetDM must be a public HTTPS address. Every call
+  goes through the webhook address policy (no private, loopback, link-local
+  or metadata addresses), is pinned to the checked IP, follows no
+  redirects, and pagination links must stay on the same origin.
+- **Forged device identity.** Serials and MACs are reported by the node
+  token holder. Copying another device's serial makes both devices'
+  matches ambiguous, which fails; it cannot transfer a passing signal. A
+  stolen node token for a device that is itself compliant remains a risk,
+  as with any device-bound credential.
+- **Cross-organisation signals.** Matching loads only the checking
+  organisation's integrations and devices; check creation rejects another
+  organisation's integration id.
+- **Provider outage.** Failures never change stored records. Stale data
+  fails closed unless the check opts into fail-open for outages, which only
+  keeps devices whose last known record was passing.
 
 ## Required controls
 

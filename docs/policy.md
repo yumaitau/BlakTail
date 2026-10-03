@@ -187,8 +187,66 @@ A definition sets one or more of:
   locations it affects. A check referenced by the published policy cannot
   be deleted.
 
-MDM/EDR integrations are design-only; see
-[ADR 0005](adr/0005-posture-integrations.md).
+### MDM/EDR integrations
+
+A check may also require a healthy record from one of the organisation's
+device-health integrations (Microsoft Intune, CrowdStrike Falcon,
+SentinelOne, FleetDM or Huntress; [ADR 0005](adr/0005-posture-integrations.md)):
+
+```json
+{"integration": {
+  "integration_id": "<uuid>",
+  "max_age_secs": 3600,
+  "max_last_seen_secs": 86400,
+  "on_outage": "fail"
+}}
+```
+
+- **Connecting** (`/v1/orgs/:org/posture-integrations`) is owner-only
+  (`manage_security`): the owner enters the provider settings and a
+  write-only secret, and must acknowledge the provider's data notice first.
+  Secrets are sealed with the coordinator key and are never returned,
+  audited or logged; the API shows only a short fingerprint. Changing a
+  provider's settings requires re-entering the secret, so a stored
+  credential is never redirected to a new endpoint. Referencing an
+  integration from a check needs `manage_policy`, and only integrations in
+  the same organisation can be referenced.
+- **Reconcile** is by polling: every 15 minutes by default (5 minutes to 24
+  hours), jittered, at most four providers at once per coordinator, with a
+  lease so replicas never poll the same integration twice. Failures back off
+  exponentially (1 minute doubling, capped at the larger of the interval and
+  one hour, and never sooner than a provider's `Retry-After`). A 429 whose
+  `Retry-After` is 30 seconds or less is retried in place up to three times.
+  `POST .../posture-integrations/:id/sync` runs a reconcile now ("Test
+  connection").
+- **Outage state** is per integration: the first failed reconcile records
+  `outage_since`, a fixed error category and a consecutive-failure count;
+  stored device records are never changed by a failure. The next success
+  clears the outage and bumps the control revision once.
+- **Matching** happens only inside the organisation. A device's
+  agent-reported serial number wins, then its physical MAC addresses;
+  hostname is used only if the owner opts in for that integration.
+  Placeholder serials and randomised or multicast MACs never match. A device
+  matches only when exactly one provider record matches its strongest key
+  and no other device in the organisation claims the same record; anything
+  else is ambiguous and fails. Serials and MACs are self-reported by the
+  node token holder, so a copied serial makes both devices fail rather than
+  passing the signal on.
+- **Evaluation**: a matched record must be passing for that provider (see
+  the provider list in the console), confirmed by a successful reconcile
+  within `max_age_secs` (default 3600, 60 s to 30 days), and — if set —
+  seen by the provider within `max_last_seen_secs`. Unmatched, ambiguous,
+  disabled or deleted integrations fail. When data is stale *and* the
+  provider is in outage, `on_outage: "fail"` (default) fails the check;
+  `"pass"` keeps devices whose last known record was passing, until the
+  provider recovers. Stale data without an outage always fails.
+- The device assessment lists every integration's view of the device
+  (match state, key, provider status, sync time, outage) with source
+  `provider_reported`.
+- An integration referenced by a check cannot be deleted.
+
+No live vendor tenant was available while building this; each adapter is
+tested against a local mock of the vendor's documented responses.
 
 ## Explain access
 

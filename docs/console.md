@@ -27,7 +27,12 @@ authorisation.
   **Explain access** for any member: matched rule, deny precedence, posture,
   pairing and whether the destination device actually enforces the result
 - `/posture` — versioned posture checks (owner/admin write) and each
-  device's current assessment; self-reported data is labelled as such
+  device's current assessment; self-reported data is labelled as such.
+  **Integrations** (owner-only to connect): add an MDM/EDR provider with
+  its fields and a write-only secret after acknowledging its data and
+  residency notice, test the connection, see last sync, matched, ambiguous
+  and unmatched counts, and outage state. Only implemented providers are
+  listed. Device assessments show each provider's signal and source
 - `/topology` — who can reach what in the selected organisation: devices
   (online, stale, suspended, expired, agent-reported transport with its
   timestamp or "not measured"), network resources and routing peers, approved
