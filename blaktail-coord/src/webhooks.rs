@@ -41,7 +41,7 @@ fn webhook_seal_key(master: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn seal_signing_secret(master: &[u8], plaintext: &str) -> Result<String, ApiError> {
+pub(crate) fn seal_signing_secret(master: &[u8], plaintext: &str) -> Result<String, ApiError> {
     let cipher = ChaCha20Poly1305::new_from_slice(&webhook_seal_key(master))
         .map_err(|_| ApiError::BadRequest("webhook sealing key is invalid".into()))?;
     let mut nonce_bytes = [0u8; 12];
@@ -55,7 +55,7 @@ fn seal_signing_secret(master: &[u8], plaintext: &str) -> Result<String, ApiErro
     Ok(format!("{SEALED_SECRET_PREFIX}{}", STANDARD.encode(packed)))
 }
 
-fn open_signing_secret(master: &[u8], stored: &str) -> Result<String, ApiError> {
+pub(crate) fn open_signing_secret(master: &[u8], stored: &str) -> Result<String, ApiError> {
     if stored.starts_with("btw_") {
         return Ok(stored.to_owned());
     }
@@ -76,7 +76,7 @@ fn open_signing_secret(master: &[u8], stored: &str) -> Result<String, ApiError> 
     String::from_utf8(plaintext).map_err(|_| ApiError::CorruptData)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct WebhookDestination {
     pub id: Uuid,
     pub name: String,
@@ -89,6 +89,18 @@ pub(crate) struct WebhookDestination {
     pub event_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// `webhook`, `email`, `slack` or `teams` (see `notify_channels`). For
+    /// Slack and Teams `url` is a redacted display; the real URL is sealed.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub quiet_hours: Option<crate::notify_channels::QuietHours>,
+    #[serde(default)]
+    pub digest_minutes: i64,
+    #[serde(default)]
+    pub residency_acknowledged_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +197,9 @@ pub(crate) async fn delivery_loop(state: AppState) {
         if let Err(error) = deliver_due(&state).await {
             warn!(%error, "webhook delivery poll failed");
         }
+        if let Err(error) = crate::notify_channels::deliver_due(&state).await {
+            warn!(%error, "notification channel delivery poll failed");
+        }
         if last_sweep.is_none_or(|at| at.elapsed() >= SWEEP_INTERVAL) {
             last_sweep = Some(Instant::now());
             if let Err(error) =
@@ -205,7 +220,7 @@ async fn deliver_due(state: &AppState) -> Result<(), ApiError> {
         "SELECT o.id,o.org_id,o.destination_id,o.event_id,o.event_type,o.payload_json,o.attempts,d.url,d.signing_secret
          FROM webhook_outbox o
          JOIN webhook_destinations d ON d.id=o.destination_id
-         WHERE o.delivered_at IS NULL AND o.dead_lettered_at IS NULL AND o.next_attempt_at<=$1 AND d.enabled=1
+         WHERE o.delivered_at IS NULL AND o.dead_lettered_at IS NULL AND o.next_attempt_at<=$1 AND d.enabled=1 AND d.kind='webhook'
          ORDER BY o.next_attempt_at,o.id
          LIMIT 16",
     )
@@ -377,7 +392,7 @@ pub(crate) fn validate_destination_url(raw: &str, allow_private: bool) -> Result
     Ok(url)
 }
 
-async fn revalidate_resolved_ips(url: &Url) -> Result<Option<SocketAddr>, ApiError> {
+pub(crate) async fn revalidate_resolved_ips(url: &Url) -> Result<Option<SocketAddr>, ApiError> {
     let host = url
         .host_str()
         .ok_or_else(|| ApiError::BadRequest("webhook URL must include a host".into()))?;
@@ -499,7 +514,8 @@ async fn load_destinations(
     org_id: Uuid,
 ) -> Result<Vec<WebhookDestination>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id,name,url,secret_prefix,enabled,created_at,event_types_json FROM webhook_destinations WHERE org_id=$1 ORDER BY created_at,id",
+        "SELECT id,name,url,secret_prefix,enabled,created_at,event_types_json,kind,recipients_json,quiet_timezone,quiet_start_minute,quiet_end_minute,digest_minutes,residency_ack_at
+         FROM webhook_destinations WHERE org_id=$1 ORDER BY created_at,id",
     )
     .bind(org_id.to_string())
     .fetch_all(&state.store.pool)
@@ -516,6 +532,15 @@ async fn load_destinations(
             created_at: row.try_get(5)?,
             event_types: serde_json::from_str(&row.try_get::<String, _>(6)?).unwrap_or_default(),
             secret: None,
+            kind: row.try_get(7)?,
+            recipients: serde_json::from_str(&row.try_get::<String, _>(8)?).unwrap_or_default(),
+            quiet_hours: crate::notify_channels::quiet_view(
+                row.try_get(9)?,
+                row.try_get(10)?,
+                row.try_get(11)?,
+            ),
+            digest_minutes: row.try_get(12)?,
+            residency_acknowledged_at: row.try_get(13)?,
         });
     }
     Ok(destinations)
@@ -665,6 +690,8 @@ async fn insert_destination(
             created_at,
             event_types,
             secret: Some(signing_secret),
+            kind: "webhook".into(),
+            ..Default::default()
         }),
     ))
 }
@@ -697,7 +724,7 @@ async fn disable_destination(
 ) -> Result<StatusCode, ApiError> {
     let mut tx = state.store.pool.begin().await?;
     let changed = sqlx::query(
-        "UPDATE webhook_destinations SET enabled=0 WHERE id=$1 AND org_id=$2 AND enabled=1",
+        "UPDATE webhook_destinations SET enabled=0,target_sealed=NULL WHERE id=$1 AND org_id=$2 AND enabled=1",
     )
     .bind(destination_id.to_string())
     .bind(org_id.to_string())

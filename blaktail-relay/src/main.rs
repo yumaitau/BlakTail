@@ -25,6 +25,23 @@ struct Cli {
     rate_per_sec: Option<u32>,
     #[arg(long)]
     rate_burst: Option<u32>,
+    /// TCP listener for the WebSocket-over-TLS fallback (ADR 0004), for
+    /// example 0.0.0.0:443. Off unless set.
+    #[arg(long, env = "BLAKTAIL_RELAY_WSS_BIND")]
+    wss_bind: Option<SocketAddr>,
+    /// PEM certificate chain for the WSS listener.
+    #[arg(long, env = "BLAKTAIL_RELAY_WSS_CERT_FILE")]
+    wss_cert_file: Option<PathBuf>,
+    /// PEM private key for the WSS listener.
+    #[arg(long, env = "BLAKTAIL_RELAY_WSS_KEY_FILE")]
+    wss_key_file: Option<PathBuf>,
+    /// Serve plain WebSocket on `wss_bind` because a load balancer in front
+    /// terminates TLS (for example an AWS ALB HTTPS listener).
+    #[arg(long, env = "BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY")]
+    wss_behind_tls_proxy: bool,
+    /// Upgrade path for the WSS listener.
+    #[arg(long, env = "BLAKTAIL_RELAY_WSS_PATH", default_value = blaktail_relay::wss::DEFAULT_PATH)]
+    wss_path: String,
 }
 
 #[tokio::main]
@@ -125,6 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_burst: config.rate_burst,
         region: config.region.clone(),
     };
+    let wss = wss_listener(&cli).await?;
     let socket = UdpSocket::bind(bind).await?;
     info!(
         region = config.region,
@@ -139,14 +157,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics.clone(),
         diagnostics_token,
     ));
-    let mut serve_task = tokio::spawn(blaktail_relay::serve_with_metrics(
+    let (stream_tx, stream_rx) = blaktail_relay::stream_channel();
+    let mut wss_task = match wss {
+        Some((listener, wss_config)) => {
+            info!(
+                bind = %listener.local_addr()?,
+                tls = wss_config.tls.is_some(),
+                path = %wss_config.path,
+                "accepting WebSocket relay fallback"
+            );
+            tokio::spawn(blaktail_relay::wss::serve_wss(
+                listener,
+                wss_config,
+                stream_tx,
+                metrics.clone(),
+            ))
+        }
+        None => {
+            drop(stream_tx);
+            tokio::spawn(std::future::pending())
+        }
+    };
+    let mut serve_task = tokio::spawn(blaktail_relay::serve_with_streams(
         socket,
         relay_config,
         metrics,
+        stream_rx,
     ));
     let result: std::io::Result<()> = tokio::select! {
         result = &mut serve_task => result?,
         result = &mut metrics_task => result?,
+        result = &mut wss_task => result?,
         signal = shutdown_signal() => {
             signal?;
             info!("shutdown signal received; stopping relay listeners");
@@ -155,8 +196,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     serve_task.abort();
     metrics_task.abort();
+    wss_task.abort();
     result?;
     Ok(())
+}
+
+async fn wss_listener(
+    cli: &Cli,
+) -> std::io::Result<
+    Option<(
+        tokio::net::TcpListener,
+        blaktail_relay::wss::WssServerConfig,
+    )>,
+> {
+    let Some(bind) = cli.wss_bind else {
+        return Ok(None);
+    };
+    let tls = match (&cli.wss_cert_file, &cli.wss_key_file) {
+        (Some(cert), Some(key)) => Some(blaktail_relay::wss::server_tls(
+            &std::fs::read(cert)?,
+            &std::fs::read(key)?,
+        )?),
+        (None, None) if cli.wss_behind_tls_proxy => None,
+        _ => {
+            return Err(std::io::Error::other(
+                "the WSS listener needs both BLAKTAIL_RELAY_WSS_CERT_FILE and BLAKTAIL_RELAY_WSS_KEY_FILE, \
+                 or BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY=true behind a TLS-terminating load balancer",
+            ))
+        }
+    };
+    if !cli.wss_path.starts_with('/') {
+        return Err(std::io::Error::other(
+            "BLAKTAIL_RELAY_WSS_PATH must start with /",
+        ));
+    }
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    Ok(Some((
+        listener,
+        blaktail_relay::wss::WssServerConfig {
+            path: cli.wss_path.clone(),
+            tls,
+            ..Default::default()
+        },
+    )))
 }
 
 async fn shutdown_signal() -> std::io::Result<()> {

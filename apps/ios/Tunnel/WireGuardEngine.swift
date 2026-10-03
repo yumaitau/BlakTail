@@ -8,6 +8,25 @@ enum WireGuardOutput: Equatable {
     case failed
 }
 
+/// Observed relay state reported by the Rust core (`blaktail_relay_status`).
+struct RelayStatus: Codable, Equatable {
+    var transport: String
+    var relay: String?
+    var link: String?
+    var wssURL: String?
+    var healthy: Bool
+    var peersDirect: Int
+    var peersRelayed: Int
+    var failovers: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case transport, relay, link, healthy, failovers
+        case wssURL = "wss_url"
+        case peersDirect = "peers_direct"
+        case peersRelayed = "peers_relayed"
+    }
+}
+
 /// Userspace WireGuard via the in-repo boringtun C ABI. Packets stay ciphertext on the underlay.
 final class WireGuardEngine {
     private var tunnel: OpaquePointer
@@ -46,6 +65,49 @@ final class WireGuardEngine {
                 }
             }
         }
+    }
+
+    /// Inbound filter policy: the coordinator's raw `peers` array. The filter
+    /// runs inside `decapsulate`, between decrypt and the packet-flow write.
+    func setPolicy(_ policyJSON: Data) {
+        policyJSON.withUnsafeBytes { bytes in
+            _ = blaktail_tunnel_set_policy(
+                tunnel,
+                bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                policyJSON.count
+            )
+        }
+    }
+
+    func setTraffic(_ enabled: Bool) {
+        _ = blaktail_tunnel_set_traffic(tunnel, enabled ? 1 : 0)
+    }
+
+    /// Coordinator upload body for the counters since the last call, or nil.
+    func takeFlowUpload(organisationID: String, deviceID: String, samplingRate: Double) -> Data? {
+        var capacity = 64 * 1024
+        for _ in 0..<2 {
+            var output = [UInt8](repeating: 0, count: capacity)
+            var length = 0
+            let status = organisationID.withCString { org in
+                deviceID.withCString { device in
+                    "direct".withCString { transport in
+                        output.withUnsafeMutableBufferPointer { buffer in
+                            blaktail_tunnel_take_flow_upload(
+                                tunnel, org, device, transport, samplingRate,
+                                buffer.baseAddress!, capacity, &length
+                            )
+                        }
+                    }
+                }
+            }
+            if status == Int32(BLAKTAIL_WG_DONE) {
+                return Data(output.prefix(length))
+            }
+            guard length > capacity else { return nil }
+            capacity = length
+        }
+        return nil
     }
 
     func encapsulate(_ packet: Data) -> WireGuardOutput {
@@ -100,6 +162,147 @@ final class WireGuardEngine {
             }
         }
         return packets
+    }
+
+    // MARK: Relay fallback (Rust decides; Swift owns the sockets)
+
+    /// Installs the coordinator's relay capability and Australian relay list.
+    func configureRelay(selfNodeID: String, snapshot: PeerSnapshot) {
+        let relays: [RelayEndpointInfo] = snapshot.relayEndpoints.isEmpty
+            // Coordinators that predate declared regions validated their own
+            // (Australian) region for every relay; the desktop agent trusts it too.
+            ? snapshot.relays.map { RelayEndpointInfo(endpoint: $0, region: "ap-southeast-2") }
+            : snapshot.relayEndpoints
+        let lines = relays
+            .map { "\($0.endpoint)\t\($0.region)\t\($0.wss ?? "")" }
+            .joined(separator: "\n")
+        _ = blaktail_relay_configure(
+            tunnel,
+            selfNodeID,
+            snapshot.relayToken,
+            snapshot.relayExpiresAt,
+            lines,
+            1
+        )
+    }
+
+    func setRelayPeers(_ peers: [CoordinatorPeer]) {
+        blaktail_relay_begin_peers(tunnel)
+        for peer in peers {
+            guard let key = try? WireGuardKeypair.rawKey(peer.wireGuardPublicKey) else { continue }
+            key.withUnsafeBytes { bytes in
+                guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                _ = blaktail_relay_set_peer(tunnel, base, peer.id, peer.endpoint == nil ? 0 : 1)
+            }
+        }
+        blaktail_relay_end_peers(tunnel)
+    }
+
+    struct RelayRoute {
+        var direct: Bool
+        var relayFrame: Data?
+        var viaWebSocket: Bool
+    }
+
+    func route(_ datagram: Data, to peerPublic: Data) -> RelayRoute {
+        var output = [UInt8](repeating: 0, count: 2_100)
+        var length = 0
+        let flags = peerPublic.withUnsafeBytes { key in
+            datagram.withUnsafeBytes { source in
+                output.withUnsafeMutableBufferPointer { dst in
+                    blaktail_relay_outbound(
+                        tunnel,
+                        key.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        source.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        datagram.count,
+                        dst.baseAddress,
+                        dst.count,
+                        &length
+                    )
+                }
+            }
+        }
+        if flags < 0 {
+            return RelayRoute(direct: true, relayFrame: nil, viaWebSocket: false)
+        }
+        let relayed = flags & Int32(BLAKTAIL_RELAY_ROUTE_UDP | BLAKTAIL_RELAY_ROUTE_WSS) != 0
+        return RelayRoute(
+            direct: flags & Int32(BLAKTAIL_RELAY_ROUTE_DIRECT) != 0,
+            relayFrame: relayed && length > 0 ? Data(output.prefix(length)) : nil,
+            viaWebSocket: flags & Int32(BLAKTAIL_RELAY_ROUTE_WSS) != 0
+        )
+    }
+
+    /// Unwraps a relay frame into WireGuard ciphertext from a known peer.
+    func relayInbound(_ frame: Data, viaWebSocket: Bool, endpoint: String) -> Data? {
+        var output = [UInt8](repeating: 0, count: 2_048)
+        var length = 0
+        var peer = [UInt8](repeating: 0, count: 32)
+        let result = frame.withUnsafeBytes { source in
+            output.withUnsafeMutableBufferPointer { dst in
+                peer.withUnsafeMutableBufferPointer { peerBuffer in
+                    blaktail_relay_inbound(
+                        tunnel,
+                        source.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        frame.count,
+                        viaWebSocket ? 1 : 0,
+                        endpoint,
+                        dst.baseAddress,
+                        dst.count,
+                        &length,
+                        peerBuffer.baseAddress
+                    )
+                }
+            }
+        }
+        return result == 1 ? Data(output.prefix(length)) : nil
+    }
+
+    func directReceived(from peerPublic: Data) {
+        peerPublic.withUnsafeBytes { key in
+            guard let base = key.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            blaktail_relay_direct_received(tunnel, base)
+        }
+    }
+
+    enum RelayControl {
+        case udp(endpoint: String, frame: Data)
+        case webSocket(Data)
+    }
+
+    /// Advances relay timers and returns the control frames now due.
+    func relayTick() -> [RelayControl] {
+        blaktail_relay_tick(tunnel)
+        var controls: [RelayControl] = []
+        for _ in 0..<16 {
+            var frame = [UInt8](repeating: 0, count: 128)
+            var length = 0
+            var endpoint = [CChar](repeating: 0, count: 256)
+            let kind = frame.withUnsafeMutableBufferPointer { dst in
+                endpoint.withUnsafeMutableBufferPointer { name in
+                    blaktail_relay_poll(tunnel, dst.baseAddress, dst.count, &length, name.baseAddress, name.count)
+                }
+            }
+            let data = Data(frame.prefix(length))
+            switch kind {
+            case Int32(BLAKTAIL_RELAY_ROUTE_UDP):
+                controls.append(.udp(endpoint: String(cString: endpoint), frame: data))
+            case Int32(BLAKTAIL_RELAY_ROUTE_WSS):
+                controls.append(.webSocket(data))
+            default:
+                return controls
+            }
+        }
+        return controls
+    }
+
+    func relayStatus() -> RelayStatus? {
+        var buffer = [CChar](repeating: 0, count: 1_024)
+        let length = buffer.withUnsafeMutableBufferPointer { out in
+            blaktail_relay_status(tunnel, out.baseAddress, out.count)
+        }
+        guard length > 0 else { return nil }
+        return try? JSONDecoder().decode(RelayStatus.self, from: Data(String(cString: buffer).utf8))
     }
 
     private func invoke(

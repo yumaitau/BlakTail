@@ -115,6 +115,40 @@ public struct CoordinatorPeer: Codable, Equatable, Hashable, Identifiable, Senda
     }
 }
 
+/// The organisation's traffic diagnostics setting as the peer map carries it.
+/// Absent means off.
+public struct TrafficReporting: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var samplingRate: Double
+    public var organisationID: String
+
+    public init(enabled: Bool, samplingRate: Double, organisationID: String) {
+        self.enabled = enabled
+        self.samplingRate = samplingRate
+        self.organisationID = organisationID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case samplingRate = "sampling_rate"
+        case organisationID = "org_id"
+    }
+}
+
+/// A coordinator-advertised relay with its declared region and optional
+/// approved `wss://` fallback served by the same relay.
+public struct RelayEndpointInfo: Codable, Equatable, Hashable, Sendable {
+    public var endpoint: String
+    public var region: String
+    public var wss: String?
+
+    public init(endpoint: String, region: String, wss: String? = nil) {
+        self.endpoint = endpoint
+        self.region = region
+        self.wss = wss
+    }
+}
+
 public struct PeerSnapshot: Equatable, Sendable {
     public var peers: [CoordinatorPeer]
     public var assignedIPs: [String]
@@ -123,6 +157,11 @@ public struct PeerSnapshot: Equatable, Sendable {
     public var relays: [String]
     public var relayToken: String
     public var relayExpiresAt: UInt64
+    /// The raw `peers` array (with each peer's `ingress` grants) for the
+    /// native inbound filter.
+    public var policyJSON: Data
+    public var traffic: TrafficReporting?
+    public var relayEndpoints: [RelayEndpointInfo]
 
     public init(
         peers: [CoordinatorPeer],
@@ -131,7 +170,10 @@ public struct PeerSnapshot: Equatable, Sendable {
         credentialExpiresAt: Int,
         relays: [String] = [],
         relayToken: String = "",
-        relayExpiresAt: UInt64 = 0
+        relayExpiresAt: UInt64 = 0,
+        policyJSON: Data = Data("[]".utf8),
+        traffic: TrafficReporting? = nil,
+        relayEndpoints: [RelayEndpointInfo] = []
     ) {
         self.peers = peers
         self.assignedIPs = assignedIPs
@@ -140,6 +182,9 @@ public struct PeerSnapshot: Equatable, Sendable {
         self.relays = relays
         self.relayToken = relayToken
         self.relayExpiresAt = relayExpiresAt
+        self.policyJSON = policyJSON
+        self.traffic = traffic
+        self.relayEndpoints = relayEndpoints
     }
 }
 

@@ -12,7 +12,15 @@ import {
   type NetworkResourceInput,
   type ResourceProtocol,
 } from "@/lib/coord-networks";
-import { releaseReservation, reserveAddress } from "@/lib/coord-ipam";
+import {
+  finishRenumber,
+  previewRenumber,
+  releaseReservation,
+  reserveAddress,
+  startRenumber,
+  type RenumberInput,
+  type RenumberPreview,
+} from "@/lib/coord-ipam";
 import { can, type OrgRole } from "@/lib/roles";
 import { requireOrganisationContext } from "@/lib/session";
 
@@ -197,5 +205,71 @@ export async function deleteNetworkResourceAction(
     return { ok: true, data: undefined };
   } catch (error) {
     return failure(error, "Could not delete this resource.");
+  }
+}
+
+function renumberInput(formData: FormData): RenumberInput {
+  const hours = Number(formData.get("windowHours") ?? "");
+  const input: RenumberInput = {
+    reason: String(formData.get("reason") ?? ""),
+    ...(Number.isFinite(hours) && hours > 0
+      ? { window_seconds: Math.round(hours * 3600) }
+      : {}),
+  };
+  if (formData.get("mode") === "devices") {
+    input.devices = formData
+      .getAll("device")
+      .map(String)
+      .filter(Boolean)
+      .map((nodeId) => {
+        const address = String(formData.get(`address:${nodeId}`) ?? "").trim();
+        return address ? { node_id: nodeId, address } : { node_id: nodeId };
+      });
+  } else {
+    input.pool = String(formData.get("pool") ?? "").trim();
+  }
+  return input;
+}
+
+/** Plans a renumber or pool change on the coordinator without changing anything. */
+export async function previewRenumberAction(
+  formData: FormData,
+): Promise<NetworkActionResult<RenumberPreview>> {
+  try {
+    const ctx = await managedContext(formData);
+    return { ok: true, data: await previewRenumber(ctx, renumberInput(formData)) };
+  } catch (error) {
+    return failure(error, "Could not preview this renumber.");
+  }
+}
+
+export async function startRenumberAction(
+  formData: FormData,
+): Promise<NetworkActionResult> {
+  try {
+    const ctx = await managedContext(formData);
+    await startRenumber(ctx, renumberInput(formData));
+    revalidatePath("/networks/addresses");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return failure(error, "Could not start this renumber.");
+  }
+}
+
+export async function finishRenumberAction(
+  formData: FormData,
+): Promise<NetworkActionResult> {
+  try {
+    const ctx = await managedContext(formData);
+    await finishRenumber(
+      ctx,
+      String(formData.get("planId") ?? ""),
+      String(formData.get("etag") ?? ""),
+      formData.get("how") === "rollback" ? "rollback" : "complete",
+    );
+    revalidatePath("/networks/addresses");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return failure(error, "Could not finish this renumber.");
   }
 }

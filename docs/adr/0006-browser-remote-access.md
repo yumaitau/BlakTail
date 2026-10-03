@@ -1,7 +1,8 @@
 # ADR 0006 — Browser remote access (SSH first) over authorised BlakTail paths
 
-- Status: Proposed (design only; no code, no console UI)
-- Date: 2026-10-02
+- Status: Accepted (3 October 2026). The product owner approved building
+  browser SSH/RDP and remote jobs. Every constraint below is a requirement.
+- Date: 2026-10-02 (proposed), 2026-10-03 (accepted and implemented)
 - Tracks: NetBird parity draft 13 (`docs/netbird-parity/13-browser-remote-access.md`)
 
 ## Context
@@ -107,7 +108,34 @@ Separate from terminal contents:
 - RDP only with a proven supported target platform and independent security
   review. Separate ADR.
 
-## Why deferred
+## Implementation notes (3 October 2026)
+
+Built as decided, with these specifics (see [remote-access.md](../remote-access.md)):
+
+- `blaktail-gateway` runs beside `blaktaild` on an enrolled node and uses
+  that node's credential to redeem tickets; one gateway per organisation.
+- Live sessions are re-checked on every gateway report, every 10 seconds
+  (tighter than the 60-second bound above); a gateway that cannot reach the
+  coordinator ends its sessions.
+- Session certificates carry one principal, `source-address` set to the
+  gateway's overlay addresses and only `permit-pty`; devices trust the CA
+  only inside a `Match Address` block for the gateway, with
+  sshd's built-in principal mapping (principal equals login name; the agent
+  refuses to activate the CA if another principals source is configured).
+- Host keys are pinned on first report; a later change is pending until
+  acknowledged by someone with manage devices, and blocks sessions meanwhile.
+- Step-up: a sign-in within 5 minutes (or the organisation's shorter
+  window) plus the organisation's MFA rule.
+- RDP and remote jobs were approved alongside SSH rather than in separate
+  ADRs. RDP uses a guacd sidecar with the gateway doing the handshake; the
+  RDP certificate is not pinned. Remote jobs are owner-defined argv
+  templates, owner approval, a coordinator-derived signing key, an opt-in
+  agent executor as a named non-root user, timeout, output cap and cancel.
+
+## Preconditions (originally why this was deferred)
+
+These were the reasons to defer. With the build approved they remain
+requirements and open proof items:
 
 1. **SSH enforcement is not proven end to end** (draft 07). The policy schema
    has `ssh` rules and the editor itself warns that agent enforcement is
@@ -141,7 +169,34 @@ omit command contents unless explicitly opted in.
 
 ## Consequences
 
-- No UI or endpoint ships now. Operators keep using their own SSH clients over
-  the overlay.
-- The heartbeat already carries an agent-reported field (transport), so adding
-  host-key fingerprints later follows an existing pattern.
+- The console offers a browser terminal, a remote desktop page and remote
+  jobs; all are off until an owner configures a gateway and device operators
+  opt in.
+- The gateway is a new always-on onshore component. Its threat-model section
+  and an external review are still open.
+- Host keys are reported through a dedicated agent endpoint rather than the
+  heartbeat query string.
+
+## Status (2 October 2026)
+
+**Done:** Accepted and implemented. Built in:
+- `blaktail-coord/src/remote_access.rs` (migration slot 30);
+- the `blaktail-gateway` crate;
+- the `blaktaild` sshd CA block, host-key report and remote jobs executor;
+- the console terminal, desktop, remote access and remote jobs pages.
+
+See [remote-access.md](../remote-access.md) and draft 13.
+
+**Proven by tests:**
+- The coordinator, agent and gateway suites listed in draft 13.
+- The m3-max lab: browser-style SSH `id`, refusals, revoke and suspend within 10 s, host-key mismatch failing closed, signed jobs with timeout and cancel, and RDP frames via guacd.
+
+**Still needs live/field proof or a decision:**
+- A real-browser run.
+- Windows RDP.
+- RDP certificate pinning.
+- Public TLS or NAT deployment of the gateway.
+- Postgres.
+- SCIM-driven revocation.
+- CA and job-key rotation.
+- An external review of the gateway.

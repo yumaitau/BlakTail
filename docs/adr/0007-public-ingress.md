@@ -1,7 +1,8 @@
 # ADR 0007 — Optional public ingress for private services (draft 11)
 
-- Status: proposed — **not approved**; no implementation until the owner signs off
-- Date: 2026-10-02
+- Status: **Accepted** — 3 October 2026 (product owner approved building it;
+  the gates below are requirements, not open questions)
+- Date: 2026-10-02 (proposed), 2026-10-03 (accepted)
 
 ## Context
 
@@ -12,7 +13,7 @@ public ingress from private service publishing, and draft 10 ships the
 private-only milestone first. Public exposure changes the threat model: a
 device that was reachable only from enrolled peers becomes reachable by anyone.
 
-## Decision gates (all must be answered before any code)
+## Requirements (formerly decision gates)
 
 1. **Who runs it.** Only a self-hosted, organisation-operated ingress in an
    Australian environment the organisation selects. BlakTail will not operate
@@ -34,7 +35,7 @@ device that was reachable only from enrolled peers becomes reachable by anyone.
 7. **Residency.** Copy must not imply BlakTail guarantees residency for
    operator-selected DNS, CDN, certificate authority or monitoring providers.
 
-## Required controls if approved
+## Required controls
 
 - Separate publish model: public FQDN, target service (draft 10 object), TLS
   mode, optional identity authentication, allowed sources, limits, log
@@ -46,15 +47,37 @@ device that was reachable only from enrolled peers becomes reachable by anyone.
   address and port; redirects to other hosts are not followed.
 - Tenant isolation in config, logs and limits; wrong `Host`/origin rejected.
 
-## Acceptance before release
+## How the implementation meets them (3 October 2026)
 
-Threat model and this ADR signed off by the product owner and an independent
-reviewer; public endpoint off by default; member cannot create one; live
-smoke reaches only the intended service; disable removes access within the
-bound; certificate rotation does not interrupt or leak.
+See [`docs/public-ingress.md`](../public-ingress.md).
 
-## Recommendation
+1. `blaktail-ingress` runs on the organisation's host next to
+   `blaktaild up --public-ingress`; no shared ingress exists.
+2. HTTPS/HTTP/1.1 with WebSocket upgrades only.
+3. `public_ingress_settings.enabled` defaults off; enabling needs
+   `ManagePublicIngress` (owner only), an abuse contact and typing `PUBLIC`;
+   each route is created or re-enabled by an owner typing its hostname.
+4. Per route per-client rate, body size and connection limits; emergency
+   disable propagates through the long-poll in about 2 s in the lab, and the
+   ingress serves nothing after 30 s without coordinator contact, so the bound
+   is 30 s (tighter than the 60 s required).
+5. Operator certificate files or ACME HTTP-01 on the ingress host; the
+   coordinator stores only the reported expiry.
+6. JSON-lines access logs on the ingress host with per-route retention, no
+   target address or query string; response headers scrubbed of overlay
+   addresses and `.blaktail` names.
+7. Console and docs state the operator chooses DNS, CA and monitoring.
 
-**Defer.** Prove draft 10 (private services) in the field first. Revisit when a
-named organisation has a concrete public-service need that cannot be met by
-enrolling the people who need access.
+Controls: separate `public_routes` model (FQDN, service or device+port target,
+TLS mode, OIDC identity gate, allowed client CIDRs, limits, retention,
+emergency flag); delivery requires the access policy to let the ingress device
+reach the target port (otherwise *blocked by policy*); the proxy dials only the
+published overlay address and port and never follows redirects; SNI/Host must
+match (`421` otherwise); routes are delivered only to `public-ingress` nodes of
+the same organisation.
+
+## Acceptance still open
+
+Independent security review and threat-model sign-off; a live Internet smoke
+against a real public DNS name and public CA; operation over time (certificate
+renewal in production, abuse handling).

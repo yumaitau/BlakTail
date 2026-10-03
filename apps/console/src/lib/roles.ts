@@ -24,7 +24,12 @@ export type Permission =
   | "manage_integrations"
   | "manage_api_clients"
   | "manage_security"
-  | "view_operations";
+  | "view_operations"
+  | "manage_agent_gateway"
+  | "view_agent_usage"
+  | "use_remote_sessions"
+  | "manage_remote_jobs"
+  | "manage_public_ingress";
 
 const NETWORK_WRITE: readonly Permission[] = [
   "manage_peers",
@@ -47,6 +52,11 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "manage_api_clients",
     "manage_security",
     "view_operations",
+    "manage_agent_gateway",
+    "view_agent_usage",
+    "use_remote_sessions",
+    "manage_remote_jobs",
+    "manage_public_ingress",
   ],
   admin: [
     "view_network",
@@ -54,9 +64,12 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "view_audit",
     "export_audit",
     "manage_integrations",
+    "manage_agent_gateway",
+    "view_agent_usage",
+    "use_remote_sessions",
   ],
-  network_admin: ["view_network", ...NETWORK_WRITE, "view_audit"],
-  auditor: ["view_network", "view_audit", "export_audit", "view_operations"],
+  network_admin: ["view_network", ...NETWORK_WRITE, "view_audit", "use_remote_sessions"],
+  auditor: ["view_network", "view_audit", "export_audit", "view_operations", "view_agent_usage"],
   member: ["view_network", "view_audit"],
 };
 
@@ -88,6 +101,11 @@ const PERMISSION_TASK: Record<Permission, string> = {
   manage_api_clients: "manage automation credentials",
   manage_security: "change people, sign-in and security settings",
   view_operations: "read operator health",
+  manage_agent_gateway: "manage AI model providers and agent keys",
+  view_agent_usage: "read AI agent usage",
+  use_remote_sessions: "open browser remote sessions or request remote jobs",
+  manage_remote_jobs: "define or approve remote jobs",
+  manage_public_ingress: "publish services to the Internet",
 };
 
 const HOLDERS: Record<Permission, string> = Object.fromEntries(
@@ -127,11 +145,11 @@ export function roleImpact(role: OrgRole): string {
     case "owner":
       return "Full control, including people, sign-in policy, single sign-on, directory sync and automation credentials.";
     case "admin":
-      return "Runs the network and its integrations: devices, join keys, routes, policy, DNS, services, webhooks and audit export. Cannot change people, sign-in or automation credentials.";
+      return "Runs the network and its integrations: devices, join keys, routes, policy, DNS, services, webhooks, the agent network and audit export. Cannot change people, sign-in or automation credentials.";
     case "network_admin":
       return "Runs the network only: devices, join keys, routes, policy, DNS and services. Cannot manage people, security, integrations, automation credentials or export audit.";
     case "auditor":
-      return "Read-only: sees the network, the audit log and operator health, and can export audit records. Cannot change anything.";
+      return "Read-only: sees the network, the audit log, agent network usage and operator health, and can export audit records. Cannot change anything.";
     case "member":
       return "Uses the network: sees devices and the audit log and can enrol their own devices. Cannot change shared settings.";
     default:

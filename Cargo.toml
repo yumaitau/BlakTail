@@ -5,7 +5,11 @@ members = [
     "blaktaild",
     "blaktail-coord",
     "blaktail-relay",
+    "blaktail-relay-proto",
+    "blaktail-gateway",
+    "blaktail-ingress",
     "blaktail-ios-wg",
+    "blaktail-agentgw",
 ]
 
 [workspace.package]

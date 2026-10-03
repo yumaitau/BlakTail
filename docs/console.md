@@ -17,8 +17,9 @@ authorisation.
   routes, last heartbeat (online or stale by coordinator time), agent/OS
   version against the coordinator's minimum, credential expiry, the
   agent-reported transport (direct, relay, mixed, or "not measured") with its
-  timestamp, recent audit entries for the device, and suspend/resume, revoke
-  and delete with an impact preview (owner/admin)
+  timestamp, per-peer tunnel protection as this device's agent reports it,
+  recent audit entries for the device, and suspend/resume, revoke and delete
+  with an impact preview (owner/admin)
 - `/join-keys` — enrolment workspace (owner/admin): mint named one-use or
   reusable keys with optional maximum uses, expiry and tags; the secret is
   shown once; inventory with creator, uses left, last use, expiry and revoke;
@@ -27,7 +28,18 @@ authorisation.
   **Explain access** for any member: matched rule, deny precedence, posture,
   pairing and whether the destination device actually enforces the result
 - `/posture` — versioned posture checks (owner/admin write) and each
-  device's current assessment; self-reported data is labelled as such
+  device's current assessment; self-reported data is labelled as such.
+  **Integrations** (owner-only to connect): add an MDM/EDR provider with
+  its fields and a write-only secret after acknowledging its data and
+  residency notice, test the connection, see last sync, matched, ambiguous
+  and unmatched counts, and outage state. Only implemented providers are
+  listed. Device assessments show each provider's signal and source
+- `/tunnel-protection` — opt-in hybrid post-quantum WireGuard pre-shared keys
+  (owner writes; off by default): off/prefer/require with optional tag-pair
+  rules and blocking under require, which agents advertise `pq-psk`, and every
+  pair's negotiated state as each agent reports it ("Classical", "Hybrid PQ
+  (ML-KEM-768 + X25519), rotated Ns ago", "Required but not established").
+  There is no account-wide badge. See [post-quantum.md](post-quantum.md)
 - `/topology` — who can reach what in the selected organisation: devices
   (online, stale, suspended, expired, agent-reported transport with its
   timestamp or "not measured"), network resources and routing peers, approved
@@ -40,8 +52,27 @@ authorisation.
   auditors see summaries)
 - `/dns` — organisation DNS workspace: effective settings, nameserver groups,
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
+- `/devices/{nodeId}/terminal` and `/devices/{nodeId}/desktop` — browser SSH
+  (xterm.js) and RDP (Guacamole) through the onshore gateway, for owner, admin
+  and network admin, with an access reason and a recent sign-in
+  ([remote-access.md](remote-access.md))
+- `/remote-access` — gateway settings (owner), pinned SSH host keys with an
+  accept step for changed keys, and recent sessions with revoke
+- `/remote-jobs` — owner-defined argv job templates, run requests, owner
+  approval, cancel, and capped output
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
+- `/agents` — agent network (AI model gateway): offshore policy (owner),
+  gateway designation (a device reporting the capability acts as a gateway
+  only once an owner or admin designates it; audited),
+  model providers with their declared data location, agent keys (secret shown
+  once) and per-key policies, usage by key/model/day and recent requests
+  (owner/admin write, auditor read; see [agent-gateway.md](agent-gateway.md))
+- `/ingress` — **public** ingress: organisation on/off setting, owner
+  designation of ingress hosts (the capability alone receives nothing), public routes
+  (marked PUBLIC, styled apart from private services), per-ingress status,
+  certificate expiry and policy reachability; owner-only to enable or publish,
+  owner/admin/network admin may emergency-disable ([public-ingress.md](public-ingress.md))
 - `/audit` — actor-attributed administration changes from the coordinator and
   console, filterable by actor, action, target and UTC date, paged with one
   cursor across both stores, redacted details, integrity-chain status, and
@@ -293,11 +324,30 @@ this release answer only zone A/AAAA records.
 `svc.<org-prefix>.blaktail` namespace, separate from device MagicDNS names. Owners
 and admins preview a name (full name, collisions, warnings) before creating it,
 choose the target device, local port and protocol, and the device tags allowed to
-use it, and can disable or delete it (certificates are revoked). Status is honest:
-no serving-agent listener ships yet, so services show "Awaiting serving agent" (or
-"Certificate issued, not verified") and are never presented as reachable or
-published in DNS. The organisation service CA certificate and fingerprint can be
-viewed and downloaded; trusting it on clients is manual.
+use it, and can disable or delete it (certificates are revoked). Status comes from
+the target device's serving agent (`blaktaild up --serve-services`): "Awaiting
+certificate", "Certificate issued, not serving" (no fresh report naming the live
+certificate), "Target unhealthy" (listener up, local target failing its check) or
+"Serving". Only "Serving" publishes the name to allowed devices' MagicDNS, and it is
+the device's own report, not a probe from a client. The organisation service CA
+certificate and fingerprint can be viewed and downloaded; clients can install it
+with `blaktaild trust-service-ca` (explicit, never automatic). See
+`docs/private-services.md`.
+
+`/ingress` (nav group "Services", labelled PUBLIC) is the only place a service
+is put on the Internet. Public ingress is off per organisation until an owner
+records an abuse contact and types `PUBLIC`. Owners publish a route by typing
+its hostname again, choose an HTTP private service or a device and port as the
+target, the certificate source (operator files or ACME HTTP-01 on the ingress
+host), optional organisation sign-in (OIDC, optionally restricted to email
+domains), per-client request rate, body size, connection limit and access-log
+retention. Each route shows, per ingress host, whether it is live, blocked by
+policy, offline, not designated or withdrawn, and the certificate expiry the
+ingress reported. Under *Ingress hosts* an owner designates which capable
+devices may act as ingress; an undesignated device receives no routes.
+Owners, admins and network admins can emergency-disable a route; only an owner
+can re-enable it, again by typing the hostname. Members and auditors see the
+routes and status with no controls.
 
 Device details list overlay file shares published by `blaktaild share enable`.
 The coordinator stores the path and label only; file bytes never leave the node
@@ -315,8 +365,12 @@ exported. Exports are audited as `audit.exported`.
 
 Settings → Webhooks lets owners and admins choose which catalogued events
 each destination receives, inspect deliveries (including dead-lettered ones
-and their last error) and replay them. Webhooks are the only alert channel;
-there is no email or Slack delivery ([notifications.md](notifications.md)).
+and their last error) and replay them. Settings → Notification channels adds
+email, Slack and Microsoft Teams destinations with quiet hours, digests and
+**Send test**; Slack and Teams need an owner's residency acknowledgement
+([notifications.md](notifications.md)). Settings → Directory group roles maps
+SCIM groups and OIDC `groups` claims to roles with a drift preview
+([identity.md](identity.md#directory-groups-and-roles)).
 
 ## Local development
 

@@ -1,2 +1,6 @@
 # Fake PEM block in a private-services test (body "abc"); fixed in a later commit.
 f364bf27cc9d51c532e7c16c808e367de2b283c1:blaktail-coord/src/private_services.rs:private-key:1620
+# Fake test values (test hostname, RFC 6455 sample nonce, deliberately invalid key) in round-2 history.
+777ffb6f43fc74a4380f81f9e03afa94c689c64d:blaktaild/src/services/tests.rs:generic-api-key:314
+21d68fe53588a012bf81f2ab4378a7b72885c916:deploy/homelab/agent-gateway-driver.sh:curl-auth-header:77
+aedcd5580ebccdea94ed1a4b69c6683b6bbf677f:blaktail-ingress/src/tests.rs:generic-api-key:442

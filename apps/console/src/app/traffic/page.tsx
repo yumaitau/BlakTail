@@ -34,7 +34,7 @@ const STATE_COPY: Record<TrafficSummary["state"], { badge: string; title: string
   no_data: {
     badge: "badge pending",
     title: "On, but no device has reported",
-    body: "Collection is on, but no records arrived in this window. Current BlakTail agents do not send traffic counters yet, so an empty view does not mean there was no traffic.",
+    body: "Collection is on, but no records arrived in this window. Agents report about once a minute while collection is on; Android phones and older agents do not report, so an empty view does not mean there was no traffic.",
   },
   stale: {
     badge: "badge warn",
@@ -176,6 +176,7 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
                 </div>
                 <Breakdown title="Transport" rows={summary.by_transport} />
                 <Breakdown title="Service class" rows={summary.by_service} />
+                <Breakdown title="Who started the flow" rows={summary.by_direction ?? {}} />
                 <div className="table-wrap">
                   <table className="table">
                     <caption className="muted">Hourly buckets (UTC)</caption>

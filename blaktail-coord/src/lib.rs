@@ -1,10 +1,12 @@
 mod address_pool;
 mod admin;
+mod agent_gateway;
 mod app_connectors;
 mod audit_log;
 mod automation;
 mod change_drafts;
 pub mod connectors;
+mod designations;
 mod dns_workspace;
 pub mod flows;
 mod forwarding;
@@ -13,14 +15,21 @@ pub mod https_services;
 pub mod ipam;
 mod metrics;
 mod notifications;
+mod notify_channels;
 mod operations;
 mod org_dns;
 mod peer_lifecycle;
 mod permissions;
 mod policy_explain;
+mod post_quantum;
 mod posture;
+mod posture_integrations;
 mod private_services;
+mod public_ingress;
+mod remote_access;
+mod renumber;
 mod resources;
+mod service_serving;
 mod service_users;
 mod shares;
 pub mod tailnet_lock;
@@ -90,7 +99,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 28;
+pub const CURRENT_SCHEMA_VERSION: i64 = 40;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -327,6 +336,84 @@ const MIGRATIONS: &[Migration] = &[
         postgres_sql: include_str!("../migrations/postgres/0028_operations.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0028_operations.sql")),
     },
+    Migration {
+        version: 29,
+        name: "public ingress",
+        postgres_sql: include_str!("../migrations/postgres/0029_public_ingress.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0029_public_ingress.sql")),
+    },
+    Migration {
+        version: 30,
+        name: "browser remote access and jobs",
+        postgres_sql: include_str!("../migrations/postgres/0030_remote_access.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0030_remote_access.sql")),
+    },
+    Migration {
+        version: 31,
+        name: "AI agent gateway",
+        postgres_sql: include_str!("../migrations/postgres/0031_agent_gateway.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0031_agent_gateway.sql")),
+    },
+    Migration {
+        version: 32,
+        name: "post-quantum peer protection",
+        postgres_sql: include_str!("../migrations/postgres/0032_post_quantum.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0032_post_quantum.sql")),
+    },
+    Migration {
+        version: 33,
+        name: "posture integrations",
+        postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0033_edr_integrations.sql"
+        )),
+    },
+    Migration {
+        version: 34,
+        name: "mobile relay and transport",
+        postgres_sql: include_str!("../migrations/postgres/0034_mobile_relay.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0034_mobile_relay.sql")),
+    },
+    Migration {
+        version: 35,
+        name: "private service serving",
+        postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0035_service_serving.sql"
+        )),
+    },
+    Migration {
+        version: 36,
+        name: "traffic reporting and endpoint filters",
+        postgres_sql: include_str!("../migrations/postgres/0036_traffic_agents.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0036_traffic_agents.sql")),
+    },
+    Migration {
+        version: 37,
+        name: "notification channels, quiet hours and digests",
+        postgres_sql: include_str!("../migrations/postgres/0037_scim_alerts.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0037_scim_alerts.sql")),
+    },
+    Migration {
+        version: 38,
+        name: "HTTPS relay fallback",
+        postgres_sql: include_str!("../migrations/postgres/0038_https_relay.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0038_https_relay.sql")),
+    },
+    Migration {
+        version: 39,
+        name: "address renumbering and IPv6 routes",
+        postgres_sql: include_str!("../migrations/postgres/0039_renumbering.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0039_renumbering.sql")),
+    },
+    Migration {
+        version: 40,
+        name: "node designations",
+        postgres_sql: include_str!("../migrations/postgres/0040_node_designations.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0040_node_designations.sql"
+        )),
+    },
 ];
 
 impl Store {
@@ -536,7 +623,7 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             16 => migrate_sqlite_to_v16(&mut tx).await?,
             17 => migrate_sqlite_to_v17(&mut tx).await?,
             18 => migrate_sqlite_to_v18(&mut tx).await?,
-            19..=28 => {
+            19..=40 => {
                 let sql = migration
                     .sqlite_sql
                     .ok_or(StoreError::InvalidMigrationPlan {
@@ -578,6 +665,18 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             26 => "PRAGMA user_version=26",
             27 => "PRAGMA user_version=27",
             28 => "PRAGMA user_version=28",
+            29 => "PRAGMA user_version=29",
+            30 => "PRAGMA user_version=30",
+            31 => "PRAGMA user_version=31",
+            32 => "PRAGMA user_version=32",
+            33 => "PRAGMA user_version=33",
+            34 => "PRAGMA user_version=34",
+            35 => "PRAGMA user_version=35",
+            36 => "PRAGMA user_version=36",
+            37 => "PRAGMA user_version=37",
+            38 => "PRAGMA user_version=38",
+            39 => "PRAGMA user_version=39",
+            40 => "PRAGMA user_version=40",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -1364,6 +1463,7 @@ pub fn app_with_relays_console_and_metrics(
     };
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::spawn(webhooks::delivery_loop(state.clone()));
+    tokio::spawn(posture_integrations::sync_loop(state.clone()));
     Router::new()
         .route("/health", get(readiness))
         .route("/livez", get(liveness))
@@ -1446,19 +1546,27 @@ pub fn app_with_relays_console_and_metrics(
         .merge(peer_lifecycle::routes())
         .merge(resources::routes())
         .merge(address_pool::routes())
+        .merge(renumber::routes())
         .merge(app_connectors::routes())
         .merge(service_users::routes())
         .merge(posture::routes())
+        .merge(posture_integrations::routes())
         .merge(policy_explain::routes())
         .merge(admin::api_routes())
         .merge(dns_workspace::routes())
         .merge(private_services::routes())
+        .merge(public_ingress::routes())
+        .merge(service_serving::routes())
         .merge(topology::routes())
         .merge(change_drafts::routes())
         .merge(operations::routes())
         .merge(audit_log::routes())
         .merge(traffic::routes())
         .merge(notifications::routes())
+        .merge(notify_channels::routes())
+        .merge(post_quantum::routes())
+        .merge(agent_gateway::routes())
+        .merge(remote_access::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -2675,6 +2783,7 @@ async fn register_node(
     if grant.single_use && grant.used {
         return Err(ApiError::Unauthorized);
     }
+    ensure_routes_outside_overlay(&grant.org_id, &advertised_routes)?;
     peer_lifecycle::claim_join_key(&mut tx, &grant.key_id).await?;
     if grant
         .bound_name
@@ -2821,6 +2930,7 @@ async fn update_advertised_routes(
     if suspended_at.is_some() {
         return Err(ApiError::Suspended);
     }
+    ensure_routes_outside_overlay(&org_id, &routes)?;
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
@@ -2952,13 +3062,13 @@ async fn approve_node_routes(
         .iter()
         .filter(|(_, expires_at, _)| *expires_at > approval_time)
         .flat_map(|(_, _, json)| serde_json::from_str::<Vec<String>>(json).unwrap_or_default())
-        .filter(|route| route != "0.0.0.0/0")
+        .filter(|route| !resources::is_default_route(route))
         .collect::<Vec<_>>();
     if let Some(route) = approved.iter().find(|route| {
-        route.as_str() != "0.0.0.0/0"
+        !resources::is_default_route(route)
             && other_routes
                 .iter()
-                .any(|other| ipv4_routes_overlap(route, other))
+                .any(|other| routes_overlap(route, other))
     }) {
         return Err(ApiError::Conflict(format!(
             "route {route} overlaps another approved subnet router"
@@ -2966,7 +3076,7 @@ async fn approve_node_routes(
     }
     let approved_subnets: Vec<_> = approved
         .iter()
-        .filter(|route| route.as_str() != "0.0.0.0/0")
+        .filter(|route| !resources::is_default_route(route))
         .collect();
     for (other_id, expires_at, routes_json) in other_nodes {
         if expires_at > approval_time {
@@ -2975,10 +3085,10 @@ async fn approve_node_routes(
         let mut routes: Vec<String> = serde_json::from_str(&routes_json).unwrap_or_default();
         let original_len = routes.len();
         routes.retain(|route| {
-            route == "0.0.0.0/0"
+            resources::is_default_route(route)
                 || !approved_subnets
                     .iter()
-                    .any(|approved| ipv4_routes_overlap(route, approved))
+                    .any(|approved| routes_overlap(route, approved))
         });
         if routes.len() != original_len {
             sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2")
@@ -3004,6 +3114,9 @@ async fn approve_node_routes(
         &serde_json::json!({"approved_routes": approved}),
     )
     .await?;
+    // Clients and the router's forward filter learn approvals and
+    // withdrawals only through a control-revision change.
+    bump_control_revision(&mut tx, org_id.to_string()).await?;
     tx.commit().await?;
     info!(%node_id, %org_id, routes = approved.len(), "node routes approved");
     Ok(StatusCode::NO_CONTENT)
@@ -3108,6 +3221,9 @@ struct Peer {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ingress: Option<PeerIngress>,
+    /// Post-quantum PSK policy for this pair; absent while the org has it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq: Option<post_quantum::PeerPq>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3158,6 +3274,23 @@ struct PeersResponse {
     /// may forward from the overlay when it routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forward_filter: Option<forwarding::ForwardFilter>,
+    /// Organisation SSH CA, gateway addresses and job signing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_access: Option<remote_access::AgentView>,
+    /// Present only for a private service's target node: who may connect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    service_access: Vec<service_serving::ServiceAccess>,
+    /// Published private service names this node may resolve and reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    service_records: Vec<service_serving::ServiceRecord>,
+    /// Present while the organisation has traffic diagnostics on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    traffic: Option<traffic::AgentTraffic>,
+    /// Overlay addresses (this node's or a peer's) being withdrawn by a
+    /// staged renumber: still routed and accepted, but not answered by
+    /// MagicDNS and not used as this node's primary address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retiring_ips: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3194,6 +3327,11 @@ struct PeerSelection {
     agent_version: Option<String>,
     #[serde(default)]
     os_version: Option<String>,
+    #[serde(default)]
+    serial_number: Option<String>,
+    /// Comma-separated MAC addresses, for posture integration matching.
+    #[serde(default)]
+    mac_addresses: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -3217,6 +3355,11 @@ struct UpdateSelection {
     agent_version: Option<String>,
     #[serde(default)]
     os_version: Option<String>,
+    #[serde(default)]
+    serial_number: Option<String>,
+    /// Comma-separated MAC addresses, for posture integration matching.
+    #[serde(default)]
+    mac_addresses: Option<String>,
 }
 
 async fn list_peers(
@@ -3257,6 +3400,8 @@ async fn list_peers(
         .await?;
     expire_ephemeral_nodes(&s.store, &org).await?;
     wg_only::expire_overlaps(&s.store.pool, &org).await?;
+    renumber::complete_due(&s.store.pool, &org).await?;
+    let retiring = renumber::retiring(&s.store.pool, &org).await?;
     let source_capabilities = posture::record_report(
         &s.store,
         &org,
@@ -3264,6 +3409,14 @@ async fn list_peers(
         selection.capabilities.as_deref(),
         selection.agent_version.clone(),
         selection.os_version.clone(),
+    )
+    .await?;
+    posture_integrations::record_hardware(
+        &s.store,
+        &org,
+        node_id,
+        selection.serial_number.as_deref(),
+        selection.mac_addresses.as_deref(),
     )
     .await?;
     let ssh_users_enforced = source_capabilities
@@ -3337,6 +3490,7 @@ async fn list_peers(
                     relay_endpoint: row.try_get(9)?,
                     kind: String::new(),
                     ingress: None,
+                    pq: None,
                 },
                 subject,
                 approved,
@@ -3392,18 +3546,18 @@ async fn list_peers(
                     || requested == peer.dns_name
             });
             for route in approved {
-                if route == "0.0.0.0/0" {
+                if resources::is_default_route(&route) {
                     if exit_matches {
+                        exit_node_active |= selection.ipv6 || !route.contains(':');
                         peer.allowed_ips.push(route);
-                        exit_node_active = true;
                     }
                 } else {
                     peer.allowed_ips.push(route);
                 }
             }
             for route in resource_routes.routes_via(peer.id, node_id, &source, &acl, exit_matches) {
-                if route == "0.0.0.0/0" {
-                    exit_node_active = true;
+                if resources::is_default_route(&route) {
+                    exit_node_active |= selection.ipv6 || !route.contains(':');
                 }
                 if !peer.allowed_ips.contains(&route) {
                     peer.allowed_ips.push(route);
@@ -3439,6 +3593,7 @@ async fn list_peers(
             relay_endpoint: None,
             kind: wg_only::KIND.into(),
             ingress: Some(acl.peer_ingress_for(&destination, &source, ssh_users_enforced)),
+            pq: None,
         });
     }
     let mut assigned_ips: Vec<String> = serde_json::from_str(&source_addresses).unwrap_or_default();
@@ -3451,7 +3606,28 @@ async fn list_peers(
         settings.agent_view(&org, org_dns_revision, &device_tags)
     });
     posture::record_deadline(&s.store.pool, &org, posture.next_deadline(&acl)).await?;
+    let (service_access, service_records) = service_serving::apply_to_peer_map(
+        &s.store.pool,
+        &org,
+        node_id,
+        &serde_json::from_str::<Vec<DeviceTag>>(&source_tags).unwrap_or_default(),
+        &mut peers,
+    )
+    .await?;
+    post_quantum::annotate_peers(
+        &s.store.pool,
+        &org,
+        &serde_json::from_str::<Vec<DeviceTag>>(&source_tags).unwrap_or_default(),
+        &mut peers,
+    )
+    .await?;
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
+    let retiring_ips = retiring
+        .iter()
+        .filter(|(id, _)| **id == node_id || visible_ids.contains(id))
+        .flat_map(|(_, addresses)| addresses.iter().cloned())
+        .filter(|address| selection.ipv6 || !address.contains(':'))
+        .collect();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
         peers,
@@ -3469,6 +3645,11 @@ async fn list_peers(
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
         forward_filter,
+        remote_access: Some(remote_access::agent_view(&s, &org, node_id).await?),
+        service_access,
+        service_records,
+        traffic: traffic::agent_view(&s.store.pool, &org).await?,
+        retiring_ips,
     }))
 }
 
@@ -3510,6 +3691,14 @@ async fn list_updates(
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
+    // A long-poll is control-plane contact. Idle agents whose revision never
+    // changes get 204s here and no snapshot, so without this they would look
+    // offline after the online window and lose routing-peer selection.
+    sqlx::query("UPDATE nodes SET last_seen_at=$1 WHERE id=$2")
+        .bind(now())
+        .bind(node_id.to_string())
+        .execute(&s.store.pool)
+        .await?;
     // Record reported capabilities before waiting: a change bumps the
     // revision so this same request returns the recompiled snapshot.
     posture::record_report(
@@ -3521,10 +3710,37 @@ async fn list_updates(
         selection.os_version.clone(),
     )
     .await?;
+    posture_integrations::record_hardware(
+        &s.store,
+        &org,
+        node_id,
+        selection.serial_number.as_deref(),
+        selection.mac_addresses.as_deref(),
+    )
+    .await?;
+    // Likewise a changed exit-node choice (an agent resumed with a new
+    // `--exit-node`): otherwise an idle organisation answers 204 forever and
+    // the client never receives, nor the exit node allows, its default route.
+    {
+        let requested_exit = selection
+            .exit_node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let mut tx = s.store.pool.begin().await?;
+        if forwarding::record_exit_selection(&mut tx, node_id, requested_exit).await? {
+            bump_control_revision(&mut tx, &org).await?;
+        }
+        tx.commit().await?;
+    }
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
         posture::due(&s.store.pool, &org).await?;
+        // A renumber window ending bumps the revision, so waiters wake.
+        renumber::complete_due(&s.store.pool, &org).await?;
+        app_connectors::expire_leases(&s.store.pool, &org).await?;
+        resources::bump_on_router_liveness_change(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
@@ -3547,6 +3763,8 @@ async fn list_updates(
                     capabilities: selection.capabilities,
                     agent_version: selection.agent_version,
                     os_version: selection.os_version,
+                    serial_number: selection.serial_number,
+                    mac_addresses: selection.mac_addresses,
                 }),
                 headers,
             )
@@ -3709,23 +3927,21 @@ fn relay_capability(secret: &[u8], node_id: Uuid, expires_at_unix: u64) -> Strin
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn assigned_ipv4_host(addresses: &[String]) -> Option<u8> {
-    addresses.iter().find_map(|address| {
-        let (address, prefix) = address.split_once('/')?;
-        if prefix != "32" {
-            return None;
-        }
-        let octets = address.parse::<Ipv4Addr>().ok()?.octets();
-        (octets[..3] == [100, 64, 0] && octets[3] != 0).then_some(octets[3])
-    })
+fn assigned_ipv4_host(addresses: &[String]) -> Option<u32> {
+    addresses
+        .iter()
+        .find_map(|address| address_pool::cgnat_offset(address))
 }
 
-fn org_ula_address(org_id: &str, host: u8) -> String {
+/// The device's ULA twin: the organisation's `/64` plus the IPv4 address's
+/// offset inside `100.64.0.0/10`. For `100.64.0.x` the offset is `x`, so
+/// addresses handed out before pools could grow beyond a `/24` are unchanged.
+fn org_ula_address(org_id: &str, offset: u32) -> String {
     let digest = Sha256::digest(org_id.as_bytes());
     let mut octets = [0_u8; 16];
     octets[0] = 0xfd;
     octets[1..8].copy_from_slice(&digest[..7]);
-    octets[15] = host;
+    octets[12..16].copy_from_slice(&offset.to_be_bytes());
     format!("{}/128", Ipv6Addr::from(octets))
 }
 
@@ -3737,29 +3953,46 @@ fn validate_advertised_routes(routes: Vec<String>) -> Result<Vec<String>, ApiErr
     }
     let mut canonical = routes
         .into_iter()
-        .map(|route| canonical_ipv4_route(&route))
+        .map(|route| {
+            if route.contains(':') {
+                canonical_ipv6_route(&route)
+            } else {
+                canonical_ipv4_route(&route)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     canonical.sort();
     canonical.dedup();
     for (index, route) in canonical.iter().enumerate() {
-        if route != "0.0.0.0/0"
-            && !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-                .iter()
-                .any(|private| ipv4_route_is_within(route, private))
+        if resources::is_default_route(route) {
+            continue;
+        }
+        if route.contains(':') {
+            // ULA (fd00::/8) or a global unicast subnet the operator routes;
+            // the org's own device /64 is checked where the org is known.
+            let ula = resources::cidr_within(route, "fd00::/8");
+            let global = resources::cidr_within(route, "2000::/3");
+            if !(ula || global) || route_prefix(route) < 16 {
+                return Err(ApiError::BadRequest(format!(
+                    "route {route} must be a unique local (fd00::/8) or global unicast (2000::/3) subnet of /16 or longer, or ::/0"
+                )));
+            }
+        } else if !["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+            .iter()
+            .any(|private| ipv4_route_is_within(route, private))
         {
             return Err(ApiError::BadRequest(format!(
                 "route {route} must be an RFC1918 private subnet or 0.0.0.0/0"
             )));
         }
-        if route != "0.0.0.0/0" && ipv4_routes_overlap(route, "100.64.0.0/10") {
+        if !route.contains(':') && ipv4_routes_overlap(route, "100.64.0.0/10") {
             return Err(ApiError::BadRequest(format!(
                 "route {route} overlaps the BlakTail address pool"
             )));
         }
-        if route != "0.0.0.0/0"
-            && canonical[index + 1..]
-                .iter()
-                .any(|other| other != "0.0.0.0/0" && ipv4_routes_overlap(route, other))
+        if canonical[index + 1..]
+            .iter()
+            .any(|other| !resources::is_default_route(other) && routes_overlap(route, other))
         {
             return Err(ApiError::BadRequest(format!(
                 "advertised route {route} overlaps another advertised route"
@@ -3767,6 +4000,58 @@ fn validate_advertised_routes(routes: Vec<String>) -> Result<Vec<String>, ApiErr
         }
     }
     Ok(canonical)
+}
+
+/// IPv6 advertisements must stay outside the organisation's device `/64`,
+/// which only the coordinator knows.
+fn ensure_routes_outside_overlay(org_id: &str, routes: &[String]) -> Result<(), ApiError> {
+    let overlay = format!(
+        "{}/64",
+        org_ula_address(org_id, 0)
+            .split_once('/')
+            .map_or("", |(address, _)| address)
+    );
+    match routes
+        .iter()
+        .find(|route| !resources::is_default_route(route) && routes_overlap(route, &overlay))
+    {
+        Some(route) => Err(ApiError::BadRequest(format!(
+            "route {route} overlaps this organisation's device IPv6 pool {overlay}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Either family; routes of different families never overlap.
+pub(crate) fn routes_overlap(left: &str, right: &str) -> bool {
+    ipam::pools_overlap(left, right).unwrap_or(false)
+}
+
+fn route_prefix(route: &str) -> u8 {
+    ipam::parse_cidr(route).map_or(0, |(_, prefix)| prefix)
+}
+
+fn canonical_ipv6_route(route: &str) -> Result<String, ApiError> {
+    let route = route.trim();
+    let (address, prefix) = route
+        .split_once('/')
+        .ok_or_else(|| ApiError::BadRequest(format!("route {route} must use CIDR notation")))?;
+    let address: Ipv6Addr = address
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("route {route} must be IPv6 CIDR")))?;
+    let prefix: u8 = prefix
+        .parse()
+        .ok()
+        .filter(|prefix| *prefix <= 128)
+        .ok_or_else(|| ApiError::BadRequest(format!("route {route} has an invalid prefix")))?;
+    let (network, _) = ipam::parse_cidr(&format!("{address}/{prefix}"))
+        .map_err(|_| ApiError::BadRequest(format!("route {route} is not a valid CIDR")))?;
+    if network != std::net::IpAddr::V6(address) {
+        return Err(ApiError::BadRequest(format!(
+            "route {route} is not a network address"
+        )));
+    }
+    Ok(format!("{address}/{prefix}"))
 }
 
 pub(crate) fn canonical_ipv4_route(route: &str) -> Result<String, ApiError> {
@@ -4727,6 +5012,8 @@ pub(crate) async fn append_audit(
         // their audit rows read as a human admin.
         actor_role: if session.user_id.starts_with("api:") {
             "api_client".into()
+        } else if session.user_id.starts_with("system:") {
+            "system".into()
         } else {
             session.role.as_str().into()
         },
@@ -6000,8 +6287,12 @@ mod tests {
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
     mod events_audit;
     mod forwarding;
+    mod ipv6_renumber;
+    mod notify_channels;
     mod operations;
     mod policy_posture;
+    mod posture_integrations;
+    mod remote_access;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {
@@ -8121,6 +8412,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_approval_and_withdrawal_reach_long_polling_clients() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&router, "route-update-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let subnet = register_test_node(
+            &router,
+            org.id,
+            &owner,
+            "router",
+            "router-key",
+            &["10.9.0.0/24"],
+        )
+        .await;
+        let client = register_test_node(&router, org.id, &owner, "client", "client-key", &[]).await;
+        async fn poll(router: &Router, client: &RegisterResponse, since: i64) -> Response {
+            call(
+                router,
+                Method::GET,
+                &format!("/v1/nodes/{}/updates?since={since}&wait=0", client.id),
+                serde_json::Value::Null,
+                Some(&client.node_token),
+            )
+            .await
+        }
+        let first: serde_json::Value = body(poll(&router, &client, 0).await).await;
+        let mut revision = first["revision"].as_i64().unwrap();
+        assert_eq!(
+            poll(&router, &client, revision).await.status(),
+            StatusCode::NO_CONTENT
+        );
+
+        // Console approval, then withdrawal through the automation API: each
+        // must change the revision a long-polling client waits on.
+        let console_path = format!("/v1/orgs/{}/nodes/{}/routes", org.id, subnet.id);
+        let api_path = format!("/api/v1/devices/{}/routes", subnet.id);
+        for (path, routes, expect_route) in [
+            (&console_path, vec!["10.9.0.0/24"], true),
+            (&api_path, vec![], false),
+        ] {
+            let request = Request::builder()
+                .method(Method::PUT)
+                .uri(path.as_str())
+                .header("content-type", "application/json")
+                .header(
+                    AUTHORIZATION,
+                    format!("Bearer {}", sign_test_assertion(&owner)),
+                )
+                .header("x-blaktail-organisation", org.id.to_string())
+                .body(Body::from(
+                    serde_json::json!({"approved_routes": routes}).to_string(),
+                ))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
+            let update = poll(&router, &client, revision).await;
+            assert_eq!(update.status(), StatusCode::OK, "{path} did not notify");
+            let update: serde_json::Value = body(update).await;
+            assert!(update["revision"].as_i64().unwrap() > revision);
+            revision = update["revision"].as_i64().unwrap();
+            let routed = update["peers"][0]["allowed_ips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ip| ip == "10.9.0.0/24");
+            assert_eq!(routed, expect_route, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn tag_owners_reject_admin_assignment_unless_listed() {
         let store = Store::memory().await.unwrap();
         let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
@@ -9828,8 +10189,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 28);
-        sqlx::raw_sql("PRAGMA user_version=29")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 40);
+        sqlx::raw_sql("PRAGMA user_version=41")
             .execute(&pool)
             .await
             .unwrap();

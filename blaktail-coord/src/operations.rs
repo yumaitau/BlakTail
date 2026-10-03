@@ -30,6 +30,9 @@ const MAX_BACKUP_PROOF_BYTES: u64 = 4 * 1024;
 pub(crate) struct RelayEntry {
     pub(crate) endpoint: String,
     pub(crate) region: String,
+    /// Approved `wss://` fallback served by the same relay (ADR 0004).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) wss: Option<String>,
 }
 
 /// Parses `coordinator.relays` in configured (priority) order. Untagged
@@ -57,9 +60,30 @@ pub(crate) fn relay_directory(entries: &[String], coordinator_region: &str) -> V
         directory.push(RelayEntry {
             endpoint: endpoint.to_owned(),
             region,
+            wss: approved_wss(entry),
         });
     }
     directory
+}
+
+/// The entry's WSS fallback if it passes the HTTPS fallback origin policy
+/// (`https_fallback::approved_endpoint`: TLS, `.au` host, no credentials).
+/// A rejected URL drops only the fallback, never the UDP relay.
+fn approved_wss(entry: &str) -> Option<String> {
+    let url = blaktail_config::relay_entry_wss(entry)?;
+    let as_https = url
+        .strip_prefix("wss://")
+        .map(|rest| format!("https://{rest}"));
+    match as_https
+        .as_deref()
+        .map(crate::https_fallback::approved_endpoint)
+    {
+        Some(Ok(())) => Some(url.to_owned()),
+        _ => {
+            tracing::error!(%url, "refusing to advertise a relay WSS fallback outside approved AU HTTPS origins");
+            None
+        }
+    }
 }
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -361,16 +385,47 @@ mod tests {
             vec![
                 RelayEntry {
                     endpoint: "relay-a.example:3478".into(),
-                    region: "australiaeast".into()
+                    region: "australiaeast".into(),
+                    wss: None,
                 },
                 RelayEntry {
                     endpoint: "relay-b.example:3478".into(),
-                    region: "ap-southeast-2".into()
+                    region: "ap-southeast-2".into(),
+                    wss: None,
                 },
             ]
         );
         // An offshore coordinator region never vouches for untagged relays.
         assert!(relay_directory(&entries[1..2], "us-east-1").is_empty());
+    }
+
+    #[test]
+    fn relay_directory_hands_out_only_approved_wss_fallbacks() {
+        let entries = vec![
+            "relay-a.example:3478#australiaeast;wss=wss://relay-a.example.org.au/v1/relay"
+                .to_owned(),
+            "relay-b.example:3478;wss=wss://relay-b.example.com/v1/relay".to_owned(),
+            "relay-c.example:3478;wss=wss://user:pw@relay-c.example.au/v1/relay".to_owned(),
+            "relay-d.example:3478#us-east-1;wss=wss://relay-d.example.au/v1/relay".to_owned(),
+        ];
+        let directory = relay_directory(&entries, "ap-southeast-2");
+        assert_eq!(
+            directory
+                .iter()
+                .map(|entry| (entry.endpoint.as_str(), entry.wss.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "relay-a.example:3478",
+                    Some("wss://relay-a.example.org.au/v1/relay")
+                ),
+                // Non-AU and credential-bearing URLs drop the fallback only.
+                ("relay-b.example:3478", None),
+                ("relay-c.example:3478", None),
+            ]
+        );
+        let json = serde_json::to_value(&directory).unwrap();
+        assert!(json[1].get("wss").is_none());
     }
 
     #[test]

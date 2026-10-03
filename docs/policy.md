@@ -132,16 +132,67 @@ Destination capabilities, reported by the agent on every poll:
 
 | Capability | Meaning | Reported by |
 | --- | --- | --- |
-| `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild` |
+| `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild`; macOS `blaktaild` once its pf anchor is verified; Windows `blaktaild`; the iOS packet tunnel; the Android app |
 | `ssh-users` | Verified sshd per-source `AllowUsers`/`DenyUsers` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` set and verified |
 | `forward-filter` | Routing peer forwards only its compiled `forward_filter` allow-list | Linux `blaktaild` |
+| `remote-ssh-ca` | Trusts the organisation SSH user CA, from the remote-access gateway only, verified with `sshd -T` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` and `BLAKTAIL_SSH_USER_CA` ([remote-access.md](remote-access.md)) |
+| `remote-jobs` | Runs owner-approved, signed job templates | `blaktaild --allow-remote-jobs` |
 
 An agent that predates these capabilities reports neither, so user-limited
 SSH stays closed at port level (fail closed); it never widens access. The
 Linux agent also closes TCP 22 itself for user-limited sources whenever its
-own sshd verification has not succeeded. macOS, iOS, Android and Windows
-clients do not install an inbound filter: SSH and port rules are **not
-enforced** on those destinations, and Explain access says so.
+own sshd verification has not succeeded.
+
+### Inbound filtering outside Linux
+
+The same `ingress` grants are enforced on every client, in the Linux chain's
+order (replies to the device's own flows, per-source rejects, accepts, reject
+the rest):
+
+- **iOS, Android, Windows**: the shared userspace filter in
+  `blaktail-ios-wg/src/filter.rs` runs inside the boringtun dataplane,
+  between decrypt and the tunnel write. It tracks connections (bounded at
+  16,384 flows, oldest evicted; TCP 2 h established, UDP 60/180 s, ICMP
+  30 s), lets ICMP errors through only when they quote one of the device's
+  own flows, follows a fragment's first fragment (orphan fragments are
+  dropped), walks at most 8 IPv6 extension headers and drops malformed
+  packets. Denied packets are dropped silently rather than answered with a
+  reset. Unlike Linux, a policy change also ends inbound flows the new policy
+  no longer allows. Invalid policy input installs deny-all. Before the
+  filter, a decrypted packet whose inner source address is outside the
+  sending peer's allowed IPs is dropped (WireGuard's cryptokey routing on
+  receive, which boringtun's `Tunn` leaves to the caller), so one peer cannot
+  pose as another peer's address to the filter.
+- **macOS**: boringtun's device writes decrypted packets straight to the
+  utun interface with no hook, so the agent compiles the grants into a `pf`
+  anchor (`com.apple/blaktail`, evaluated by the stock `/etc/pf.conf`) on
+  that interface and takes a `pfctl -E` reference. boringtun's device
+  already drops decrypted packets whose inner source is outside the sending
+  peer's allowed IPs, so pf sees only genuine peer source addresses. `acl-filter` is reported
+  only after the agent verifies pf is enabled, the main ruleset still
+  evaluates `com.apple/*` and the anchor holds every rule; otherwise the Mac
+  is reported unfiltered. `blaktaild down` flushes the anchor and releases
+  the reference.
+
+Shared test vectors (`blaktail-ios-wg/src/filter_vectors.json`) drive both
+the userspace filter tests and a walk of the generated Linux chain, so the
+two decide every vector the same way; the pf ruleset is syntax-checked with
+`pfctl -n`.
+
+Per-user SSH limits stay **Linux-only**: only the Linux agent can verify an
+sshd drop-in and report `ssh-users`. Every other client closes TCP 22 to
+sources whose SSH grant is user-limited (the coordinator does too), so a
+user-limited SSH rule never widens access there.
+
+Linux lab (`deploy/homelab/prove-traffic.sh`, 3 October 2026, `m3-max`): with
+office granted only TCP 8080 and ICMP to store, 8080 connects while 8081
+(office → store) and 9000 (store → office) are rejected. The chain also ends
+each source's rules with a per-source reject, which takes the same action as
+the final rejects, so denied attempts are counted per peer.
+
+Limits: Android takes its peer map (and so its policy) only at enrolment;
+the iOS tunnel refreshes every 30 seconds. Neither has been proven on a
+physical device in this change.
 
 `sshd_blaktail.conf` in the state directory is still written for
 inspection. To enforce per-user limits, see
@@ -187,8 +238,82 @@ A definition sets one or more of:
   locations it affects. A check referenced by the published policy cannot
   be deleted.
 
-MDM/EDR integrations are design-only; see
-[ADR 0005](adr/0005-posture-integrations.md).
+### MDM/EDR integrations
+
+A check may also require a healthy record from one of the organisation's
+device-health integrations (Microsoft Intune, CrowdStrike Falcon,
+SentinelOne, FleetDM or Huntress; [ADR 0005](adr/0005-posture-integrations.md)):
+
+```json
+{"integration": {
+  "integration_id": "<uuid>",
+  "max_age_secs": 3600,
+  "max_last_seen_secs": 86400,
+  "on_outage": "fail"
+}}
+```
+
+- **Connecting** (`/v1/orgs/:org/posture-integrations`) is owner-only
+  (`manage_security`): the owner enters the provider settings and a
+  write-only secret, and must acknowledge the provider's data notice first.
+  Secrets are sealed with the coordinator key and are never returned,
+  audited or logged; the API shows only a short fingerprint. Changing a
+  provider's settings requires re-entering the secret, so a stored
+  credential is never redirected to a new endpoint. Referencing an
+  integration from a check needs `manage_policy`, and only integrations in
+  the same organisation can be referenced.
+- **Reconcile** is by polling: every 15 minutes by default (5 minutes to 24
+  hours), jittered, at most four providers at once per coordinator, with a
+  lease so replicas never poll the same integration twice. Failures back off
+  exponentially (1 minute doubling, capped at the larger of the interval and
+  one hour, and never sooner than a provider's `Retry-After`). A 429 whose
+  `Retry-After` is 30 seconds or less is retried in place up to three times.
+  `POST .../posture-integrations/:id/sync` runs a reconcile now ("Test
+  connection").
+- **Outage state** is per integration: the first failed reconcile records
+  `outage_since`, a fixed error category and a consecutive-failure count;
+  stored device records are never changed by a failure. The next success
+  clears the outage and bumps the control revision once.
+- **Matching** happens only inside the organisation. A device's
+  agent-reported serial number wins, then its physical MAC addresses;
+  hostname is used only if the owner opts in for that integration.
+  Placeholder serials and randomised or multicast MACs never match. A device
+  matches only when exactly one provider record matches its strongest key.
+- **Pinned identifiers.** Serials and MACs are self-reported by the node
+  token holder, so each is pinned at the device's first report. A later,
+  different serial or MAC set (a motherboard or network card swap, or a
+  device claiming another's identity) is held as pending: the device's
+  integration checks fail with match state `identity_changed`, the change is
+  audited (`node.hardware_changed`, event `device.hardware_changed`, values
+  not recorded), and the device page offers **Approve hardware change** to
+  holders of `manage_security` (owners); approval is audited
+  (`node.hardware_approved`) and becomes the new pin. A first report of an
+  identifier another device already pinned is never pinned on the report
+  alone: it is pending in the same way and also audited as
+  `node.hardware_clash` (event `device.hardware_clash`). When two devices
+  still claim one provider record, the device that pinned first keeps the
+  match and the other is `contested` and fails; a copier cannot lock the
+  genuine device out. Without a single earliest pin (for example two devices
+  enrolled before pinning existed), every claimant is ambiguous and fails.
+  Plugging in a new USB or dock network adapter changes the MAC set and
+  needs approval too.
+- **Evaluation**: a matched record must be passing for that provider (see
+  the provider list in the console), confirmed by a successful reconcile
+  within `max_age_secs` (default 3600, 60 s to 30 days), and — if set —
+  seen by the provider within `max_last_seen_secs`. Unmatched, ambiguous,
+  disabled or deleted integrations fail. When data is stale *and* the
+  provider is in outage, `on_outage: "fail"` (default) fails the check;
+  `"pass"` keeps devices whose last known record was passing, until the
+  provider recovers. Stale data without an outage always fails.
+- The device assessment lists every integration's view of the device
+  (match state, key, provider status, sync time, outage) with source
+  `provider_reported`. The integration list shows its configuration and
+  credential fingerprint only to `manage_security` holders; other roles see
+  name, kind, status and match counts.
+- An integration referenced by a check cannot be deleted.
+
+No live vendor tenant was available while building this; each adapter is
+tested against a local mock of the vendor's documented responses.
 
 ## Explain access
 

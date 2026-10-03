@@ -223,6 +223,7 @@ fn state_ip(state: &NodeState) -> Result<IpAddr, Error> {
     let addresses = state
         .interface_addresses()
         .into_iter()
+        .filter(|address| !state.retiring_ips.contains(address))
         .filter_map(|address| address.split('/').next()?.parse::<IpAddr>().ok())
         .collect::<Vec<_>>();
     addresses
@@ -235,14 +236,18 @@ fn state_ip(state: &NodeState) -> Result<IpAddr, Error> {
 
 fn records_from_state(state: &NodeState, domain: &str) -> Records {
     let mut addresses = HashMap::new();
-    for address in state.interface_addresses() {
-        insert_record(&mut addresses, &state.dns_name, &address, domain);
+    // A renumber's old addresses stay routed during the window, but names
+    // already answer with the new ones.
+    let current = |address: &String| !state.retiring_ips.contains(address);
+    for address in state.interface_addresses().iter().filter(|a| current(a)) {
+        insert_record(&mut addresses, &state.dns_name, address, domain);
     }
     for peer in &state.peers {
-        for address in &peer.allowed_ips {
+        for address in peer.allowed_ips.iter().filter(|a| current(a)) {
             insert_record(&mut addresses, &peer.dns_name, address, domain);
         }
     }
+    insert_service_records(&mut addresses, &state.service_records, domain);
     let mut split = Vec::new();
     let mut zones = Vec::new();
     if let Some(snapshot) = &state.org_dns {
@@ -571,6 +576,30 @@ fn insert_record(
         insert(label.into());
     }
     insert(name);
+}
+
+/// Published private service names: full names under `svc.<domain>` only,
+/// never a short label (that would shadow a device name).
+fn insert_service_records(
+    records: &mut HashMap<String, Vec<IpAddr>>,
+    services: &[crate::services::ServiceRecord],
+    domain: &str,
+) {
+    let subtree = format!(".svc.{domain}");
+    for service in services {
+        let name = service.name.trim_end_matches('.').to_ascii_lowercase();
+        if !name.ends_with(&subtree) || !labels_are_safe(&name) {
+            continue;
+        }
+        for address in &service.addresses {
+            if let Ok(address) = address.parse::<IpAddr>() {
+                let values = records.entry(name.clone()).or_default();
+                if !values.contains(&address) {
+                    values.push(address);
+                }
+            }
+        }
+    }
 }
 
 fn insert_extra_record(records: &mut HashMap<String, Vec<IpAddr>>, record: &crate::OrgDnsRecord) {
@@ -1140,7 +1169,23 @@ fn configure_resolv_conf(
     domain: &str,
     extra_search: &[String],
 ) -> Result<(), Error> {
-    let path = Path::new("/etc/resolv.conf");
+    configure_resolv_conf_at(
+        Path::new("/etc/resolv.conf"),
+        state_dir,
+        dns_ip,
+        domain,
+        extra_search,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_resolv_conf_at(
+    path: &Path,
+    state_dir: &Path,
+    dns_ip: IpAddr,
+    domain: &str,
+    extra_search: &[String],
+) -> Result<(), Error> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(Error::Message(
             "resolvectl and resolvconf failed; refusing to replace symlinked /etc/resolv.conf"
@@ -1160,13 +1205,21 @@ fn configure_resolv_conf(
             "managed /etc/resolv.conf exists but its BlakTail backup is missing".into(),
         ));
     }
-    if !backup.exists() {
+    let created_backup = !backup.exists();
+    if created_backup {
         fs::copy(path, &backup)?;
     }
     let original = fs::read_to_string(&backup)?;
     let content = managed_resolv_conf(&original, dns_ip, domain, extra_search);
     let mode = fs::metadata(path)?.permissions().mode() & 0o777;
-    write_atomic(path, content.as_bytes(), mode)
+    let written = write_atomic(path, content.as_bytes(), mode);
+    // A backup without a managed file would make every later attempt (and
+    // `down`) report that the file "changed after BlakTail configured it".
+    // Seen with a bind-mounted /etc/resolv.conf, where rename fails (EBUSY).
+    if written.is_err() && created_backup {
+        let _ = fs::remove_file(&backup);
+    }
+    written
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1245,7 +1298,10 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
-    fs::rename(temporary, path)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -1269,6 +1325,8 @@ mod tests {
             exit_node: None,
             exit_node_active: false,
             router_previous_ipv4_forward: None,
+            router_previous_ipv6_forward: None,
+            retiring_ips: Vec::new(),
             peers: vec![Peer {
                 id: Uuid::from_u128(2),
                 name: "peer".into(),
@@ -1278,6 +1336,7 @@ mod tests {
                 dns_name: "peer.12345678.blaktail".into(),
                 tags: vec![],
                 relay_endpoint: None,
+                pq: None,
                 ingress: None,
             }],
             relays: vec![],
@@ -1288,15 +1347,26 @@ mod tests {
             relay_endpoints: vec![],
             active_relay: None,
             relay_failovers: 0,
+            relay_link: None,
             dns_mode: None,
             org_dns: None,
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            acl_filter_enforced: false,
+            traffic: None,
             forward_filter: None,
             app_connector: false,
+            agent_gateway: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
+            public_ingress: false,
+            serve_services: false,
+            serve_services_ports: Vec::new(),
+            service_listen_port: None,
+            service_access: Vec::new(),
+            service_records: Vec::new(),
         }
     }
 
@@ -1310,6 +1380,26 @@ mod tests {
         packet.extend_from_slice(&query_type.to_be_bytes());
         packet.extend_from_slice(&1u16.to_be_bytes());
         packet
+    }
+
+    #[test]
+    fn renumber_window_answers_only_the_new_addresses() {
+        let mut state = state();
+        let old = state.peers[0].allowed_ips.clone();
+        state.peers[0].allowed_ips = vec![
+            "100.64.0.9/32".into(),
+            "fd12:3456:789a:bcde::9/128".into(),
+            old[0].clone(),
+            old[1].clone(),
+        ];
+        state.retiring_ips = old;
+        let records = records_from_state(&state, "12345678.blaktail");
+        let response = answer(&query("peer", 1), &records).unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        assert_eq!(&response[response.len() - 4..], &[100, 64, 0, 9]);
+        let response = answer(&query("peer", 28), &records).unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        assert_eq!(response[response.len() - 1], 9);
     }
 
     #[test]
@@ -1480,6 +1570,38 @@ mod tests {
         assert_eq!(public[3] & 0x0f, 5);
         let private_missing = answer(&query("missing.12345678.blaktail", 1), &records).unwrap();
         assert_eq!(private_missing[3] & 0x0f, 3);
+    }
+
+    #[test]
+    fn answers_published_service_names_only_under_the_svc_subtree() {
+        let mut state = state();
+        let missing = answer(
+            &query("wiki.svc.12345678.blaktail", 1),
+            &records_from_state(&state, "12345678.blaktail"),
+        )
+        .unwrap();
+        assert_eq!(missing[3] & 0x0f, 3, "unpublished service is NXDOMAIN");
+        state.service_records = vec![
+            crate::services::ServiceRecord {
+                name: "wiki.svc.12345678.blaktail".into(),
+                addresses: vec!["100.64.0.9".into(), "fd12:3456:789a:bcde::9".into()],
+            },
+            // Outside the svc subtree: ignored, cannot shadow a device.
+            crate::services::ServiceRecord {
+                name: "peer.12345678.blaktail".into(),
+                addresses: vec!["100.64.0.99".into()],
+            },
+        ];
+        let records = records_from_state(&state, "12345678.blaktail");
+        let a = answer(&query("wiki.svc.12345678.blaktail", 1), &records).unwrap();
+        assert_eq!(a[3] & 0x0f, 0);
+        assert_eq!(&a[a.len() - 4..], &[100, 64, 0, 9]);
+        let aaaa = answer(&query("wiki.svc.12345678.blaktail", 28), &records).unwrap();
+        assert_eq!(aaaa[3] & 0x0f, 0);
+        let peer = answer(&query("peer.12345678.blaktail", 1), &records).unwrap();
+        assert_eq!(&peer[peer.len() - 4..], &[100, 64, 0, 2]);
+        let short = answer(&query("wiki", 1), &records).unwrap();
+        assert_eq!(short[3] & 0x0f, 3, "no short alias for a service");
     }
 
     #[test]
@@ -1980,5 +2102,39 @@ mod tests {
         let records = records_from_state(&state, "12345678.blaktail");
         let mx = answer(&query("apps.example", 15), &records).unwrap();
         assert_eq!(mx[3] & 0x0f, 3);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn failed_resolv_conf_write_leaves_no_backup_or_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("blaktail-resolv-{}", std::process::id()));
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let resolv = dir.join("resolv.conf");
+        fs::write(&resolv, "nameserver 192.0.2.53\n").unwrap();
+        let ip: IpAddr = "100.100.100.100".parse().unwrap();
+        // Occupy the temporary name so the write fails after the backup copy.
+        let blocker = dir.join("resolv.conf.blaktail.tmp");
+        fs::create_dir_all(blocker.join("x")).unwrap();
+        assert!(configure_resolv_conf_at(&resolv, &state_dir, ip, "a.blaktail", &[]).is_err());
+        assert!(!resolv_backup(&state_dir).exists());
+        assert_eq!(
+            fs::read_to_string(&resolv).unwrap(),
+            "nameserver 192.0.2.53\n"
+        );
+        // Once the obstacle is gone the next attempt manages the file.
+        fs::remove_dir_all(&blocker).unwrap();
+        configure_resolv_conf_at(&resolv, &state_dir, ip, "a.blaktail", &[]).unwrap();
+        assert!(fs::read_to_string(&resolv)
+            .unwrap()
+            .starts_with(MANAGED_MARKER));
+        assert!(resolv_backup(&state_dir).exists());
+
+        // A rename that fails (target is a non-empty directory) removes the temporary.
+        let target = dir.join("busy");
+        fs::create_dir_all(target.join("x")).unwrap();
+        assert!(write_atomic(&target, b"x", 0o644).is_err());
+        assert!(!dir.join("busy.blaktail.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -145,3 +145,6 @@ jobs:
 
       - name: Roles, step-up and TOTP HTTP E2E
         run: bun --filter @blaktail/console test:roles-e2e
+
+      - name: SCIM Groups, role mapping and deprovision grace E2E
+        run: bun --filter @blaktail/console test:scim-e2e

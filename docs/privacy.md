@@ -18,9 +18,13 @@ local process for access, correction, export, and deletion requests.
 - The coordinator's SQLite or PostgreSQL store holds organisation and node identifiers, device names,
   WireGuard public keys, tailnet addresses, advertised endpoints/routes, ACLs,
   hashed join/node/automation credentials, credential expiry, last-seen time,
-  bounded agent OS/architecture/version/capability metadata, published organisation
-  DNS settings, and actor-attributed audit events. Hardware serials, location,
-  process inventory, and DNS query names are not collected.
+  bounded agent OS/architecture/version/capability metadata, the device's
+  hardware serial number and physical MAC addresses (used only to match
+  MDM/EDR records, below; the first report is pinned and a changed report is
+  held for admin approval, while audit entries record only that a value
+  changed or clashed, never the value), published organisation DNS settings, and
+  actor-attributed audit events. Location, process inventory, and DNS query
+  names are not collected.
 - A relay keeps node identifiers and public socket addresses in memory. Registrations
   expire after 120 seconds idle. It forwards opaque WireGuard ciphertext and cannot
   decrypt the inner traffic.
@@ -31,6 +35,31 @@ local process for access, correction, export, and deletion requests.
 BlakTail does not add advertising, third-party analytics, tracking pixels, remote
 fonts, or public-DNS forwarding. Better Auth session cookies are used to sign in and
 protect the console. The macOS desktop stores its session token in Keychain.
+
+## MDM/EDR posture integrations (optional, off by default)
+
+An organisation owner may connect one of these providers. Nothing is pulled
+until the owner acknowledges the notice in `/posture`. For every provider
+BlakTail keeps only the provider's device ID, hostname, serial number, MAC
+addresses, a pass/fail verdict with a short status label, the provider's
+last-seen time and BlakTail's sync time — the latest record per device, no
+history. The rest of each response is discarded after parsing. Records are
+deleted when the integration is removed or its settings change.
+
+| Provider | Endpoint called | Fields used |
+| --- | --- | --- |
+| Microsoft Intune | `GET graph.microsoft.com/v1.0/deviceManagement/managedDevices` (app permission `DeviceManagementManagedDevices.Read.All`) | id, deviceName, serialNumber, wiFiMacAddress, ethernetMacAddress, complianceState, lastSyncDateTime |
+| CrowdStrike Falcon | Hosts API scroll + `devices/entities/devices/v2` (scope Hosts: Read) | device_id, hostname, serial_number, mac_address, status, reduced_functionality_mode, last_seen |
+| SentinelOne | `GET /web/api/v2.1/agents` (Viewer service user) | id, computerName, serialNumber, physical MACs, infected, isActive, isUpToDate, lastActiveDate |
+| FleetDM | `GET /api/v1/fleet/hosts` (Observer API-only user) | id, hostname, hardware_serial, primary_mac, issues.failing_policies_count, seen_time |
+| Huntress | `GET api.huntress.io/v1/agents` | id, hostname, serial_number, mac_addresses, last_callback_at |
+
+**Residency.** These calls leave the deployment. Microsoft Graph,
+CrowdStrike's US/EU clouds, SentinelOne consoles and Huntress are vendor
+clouds that may be outside Australia; FleetDM data stays wherever your Fleet
+server runs. BlakTail does not verify where a vendor hosts your tenant and
+never labels an integration "onshore". The provider's own terms govern the
+data it holds. Provider credentials are sealed at rest and never logged.
 
 ## Purpose, location, and disclosure
 
@@ -63,11 +92,15 @@ and backups follow deployment policy (the disposable AWS harness uses one-day
 CloudWatch retention; the legacy reference root uses 30 days).
 
 Traffic diagnostics are off by default. If an owner turns them on, devices
-may upload aggregate counters (bytes, packets, service class, port,
-transport, allow/deny per hour) — never payloads, URLs, DNS questions or host
-names — kept for 1–30 days as the owner chooses and deletable at any time
-from `/traffic`. Current agents do not upload them. See
-[audit-and-traffic.md](audit-and-traffic.md).
+upload aggregate counters per minute bucket (bytes, packets, the peer
+device's id, which side started the flow, protocol, service class and port,
+transport, allow/deny) — never payloads, URLs, DNS questions, host names or
+IP addresses — kept for 1–30 days as the owner chooses and deletable at any
+time from `/traffic`. Linux, macOS, Windows and iOS agents report; Android
+does not. Turning collection off stops agents within seconds and discards
+their unsent counters. A Linux lab on 3 October 2026 checked that stored rows
+contained no IP address and that nothing was stored before opt-in or after
+opt-out. See [audit-and-traffic.md](audit-and-traffic.md).
 
 Operators must choose and publish retention periods, test deletion across live
 databases and backups, and preserve audit data only as long as their security and

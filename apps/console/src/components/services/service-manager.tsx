@@ -20,8 +20,10 @@ const TAGS: DeviceTag[] = ["office", "ranger", "store"];
 const STATUS: Record<ServiceStatus, { label: string; tone: string }> = {
   disabled: { label: "Disabled", tone: "offline" },
   target_unavailable: { label: "Target unavailable", tone: "warn" },
-  awaiting_serving_agent: { label: "Awaiting serving agent", tone: "pending" },
-  certificate_issued: { label: "Certificate issued, not verified", tone: "pending" },
+  awaiting_certificate: { label: "Awaiting certificate", tone: "pending" },
+  certificate_issued: { label: "Certificate issued, not serving", tone: "pending" },
+  target_unhealthy: { label: "Target unhealthy", tone: "warn" },
+  serving: { label: "Serving", tone: "online" },
 };
 
 function when(seconds: number): string {
@@ -73,9 +75,12 @@ export function ServiceManager({
           <p className="muted">
             Each service gets a name under{" "}
             <span className="mono">{namespace}</span>, separate from device
-            MagicDNS names. No serving agent listener ships yet, so services
-            are not published in DNS and cannot be reached; the status shows
-            what is still missing.
+            MagicDNS names. The target device serves it after{" "}
+            <span className="mono">blaktaild up --serve-services</span>; the
+            name is published to devices with an allowed tag only while that
+            device reports a current certificate and a healthy local target.
+            Status is the device&apos;s own report, refreshed about every 30
+            seconds.
           </p>
         </div>
         {error ? (
@@ -264,7 +269,7 @@ export function ServiceManager({
               Local protocol
               <select name="protocol" defaultValue="http" disabled={disabled}>
                 <option value="http">HTTP</option>
-                <option value="https">HTTPS</option>
+                <option value="https">HTTPS (not served yet)</option>
               </select>
             </label>
           </div>

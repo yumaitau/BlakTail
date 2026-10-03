@@ -39,6 +39,18 @@ pub(crate) enum Permission {
     /// Read the protected operator health view (versions, schema, relays,
     /// outbox, expiry counts, backup proof). Read-only, never key material.
     ViewOperations,
+    /// Agent network: model providers, agent keys and their policies.
+    ManageAgentGateway,
+    /// Read agent network configuration and model usage (never prompt content).
+    ViewAgentUsage,
+    /// Start browser SSH/RDP sessions and request allowlisted remote jobs.
+    UseRemoteSessions,
+    /// Define remote job templates and approve runs. Owner-only: a job runs
+    /// on devices without anyone at the keyboard.
+    ManageRemoteJobs,
+    /// Enable public ingress for the organisation and create, change or
+    /// re-enable public routes. Owner-only: it exposes a device to the Internet.
+    ManagePublicIngress,
 }
 
 impl Role {
@@ -48,7 +60,11 @@ impl Role {
             Role::Owner => true,
             Role::Admin => !matches!(
                 permission,
-                ManageSecurity | ManageApiClients | ViewOperations
+                ManageSecurity
+                    | ManageApiClients
+                    | ViewOperations
+                    | ManageRemoteJobs
+                    | ManagePublicIngress
             ),
             Role::NetworkAdmin => matches!(
                 permission,
@@ -60,10 +76,11 @@ impl Role {
                     | ManageDns
                     | ManageServices
                     | ViewAudit
+                    | UseRemoteSessions
             ),
             Role::Auditor => matches!(
                 permission,
-                ViewNetwork | ViewAudit | ExportAudit | ViewOperations
+                ViewNetwork | ViewAudit | ExportAudit | ViewOperations | ViewAgentUsage
             ),
             // Members could already read the audit log before this matrix existed.
             Role::Member => matches!(permission, ViewNetwork | ViewAudit),
@@ -91,7 +108,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 13] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 18] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -105,6 +122,11 @@ pub(crate) mod tests {
         (Permission::ManageApiClients, "manage_api_clients"),
         (Permission::ManageSecurity, "manage_security"),
         (Permission::ViewOperations, "view_operations"),
+        (Permission::ManageAgentGateway, "manage_agent_gateway"),
+        (Permission::ViewAgentUsage, "view_agent_usage"),
+        (Permission::UseRemoteSessions, "use_remote_sessions"),
+        (Permission::ManageRemoteJobs, "manage_remote_jobs"),
+        (Permission::ManagePublicIngress, "manage_public_ingress"),
     ];
 
     #[test]
@@ -163,6 +185,7 @@ pub(crate) mod tests {
             Permission::ManageApiClients,
             Permission::ManageSecurity,
             Permission::ExportAudit,
+            Permission::ManagePublicIngress,
         ] {
             assert!(!Role::NetworkAdmin.can(permission));
         }
@@ -173,6 +196,7 @@ pub(crate) mod tests {
                     | Permission::ViewAudit
                     | Permission::ExportAudit
                     | Permission::ViewOperations
+                    | Permission::ViewAgentUsage
             );
             assert_eq!(Role::Auditor.can(permission), read_only);
         }

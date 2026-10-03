@@ -1,14 +1,14 @@
 //! Private service lifecycle (draft 10): console CRUD, an organisation CA that
 //! is name-constrained to the organisation's service namespace, and
 //! short-lived certificate issuance from a CSR whose key stays on the serving
-//! node. Nothing here proves a service is reachable: no serving-agent listener
-//! exists yet, so every service reports `reachable: false`.
+//! node. Serving-agent health, access compilation and DNS publication live in
+//! `service_serving`; a service is `serving` only on a fresh healthy report.
 
 use crate::{
     append_audit, audit_log, bearer, bump_control_revision, console_session, https_services,
     notifications, now, org_dns,
     permissions::{require, Permission},
-    ApiError, AppState,
+    service_serving, ApiError, AppState,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -293,7 +293,7 @@ async fn check_name(
     Ok(())
 }
 
-const NOT_SERVED_WARNING: &str = "BlakTail agents do not yet run the service listener, so the service stays 'awaiting serving agent' and is not reachable through BlakTail.";
+const NOT_SERVED_WARNING: &str = "The target device must run `blaktaild up --serve-services` (Linux or macOS) to generate its key, request a certificate and serve this name; until it reports healthy, the name is not published.";
 
 async fn preview_service(
     State(s): State<AppState>,
@@ -476,6 +476,13 @@ async fn update_service(
     }
     let target_changed = target.to_string() != current_target;
     let revoked = if target_changed || !enabled {
+        sqlx::query(
+            "UPDATE org_services SET health_state='unknown',health_detail='',health_node=NULL,health_reported_at=NULL,served_serial=NULL WHERE id=$1 AND org_id=$2",
+        )
+        .bind(service_id.to_string())
+        .bind(org_id.to_string())
+        .execute(&mut *tx)
+        .await?;
         revoke_certificates(&mut tx, org_id, service_id).await?
     } else {
         0
@@ -623,7 +630,7 @@ async fn load_service(
     service_id: Uuid,
 ) -> Result<ServiceView, ApiError> {
     let row = sqlx::query(
-        "SELECT s.service_name,s.target_node,s.port,s.revision,s.enabled,s.protocol,s.access_tags_json,s.description,s.created_at,s.updated_at,COALESCE(NULLIF(TRIM(n.display_name),''),n.name),CASE WHEN n.id IS NOT NULL AND n.revoked_at IS NULL AND n.deleted_at IS NULL THEN 1 ELSE 0 END FROM org_services s LEFT JOIN nodes n ON n.id=s.target_node AND n.org_id=s.org_id WHERE s.id=$1 AND s.org_id=$2",
+        "SELECT s.service_name,s.target_node,s.port,s.revision,s.enabled,s.protocol,s.access_tags_json,s.description,s.created_at,s.updated_at,COALESCE(NULLIF(TRIM(n.display_name),''),n.name),CASE WHEN n.id IS NOT NULL AND n.revoked_at IS NULL AND n.deleted_at IS NULL THEN 1 ELSE 0 END,s.health_state,s.health_detail,s.health_node,s.health_reported_at,s.served_serial FROM org_services s LEFT JOIN nodes n ON n.id=s.target_node AND n.org_id=s.org_id WHERE s.id=$1 AND s.org_id=$2",
     )
     .bind(service_id.to_string())
     .bind(org_id.to_string())
@@ -651,18 +658,41 @@ async fn load_service(
         })
     })
     .transpose()?;
+    let health = service_serving::Health {
+        state: row.try_get(12)?,
+        detail: row.try_get(13)?,
+        node: row.try_get(14)?,
+        reported_at: row.try_get(15)?,
+        served_serial: row.try_get(16)?,
+    };
+    let target: String = row.try_get(1)?;
+    let fresh = health.fresh_for(&target, now());
+    let serving_live_certificate = certificate.as_ref().is_some_and(|certificate| {
+        health.served_serial.as_deref() == Some(certificate.serial.as_str())
+    });
     let (status, status_detail) = if !enabled {
-        ("disabled", "Disabled; certificates were revoked and the target device will not be asked to serve it.")
+        ("disabled", "Disabled; certificates were revoked and the target device stops serving it on its next update.".to_owned())
     } else if !available {
         (
             "target_unavailable",
-            "The target device was revoked or removed; choose another device.",
+            "The target device was revoked or removed; choose another device.".to_owned(),
         )
-    } else if certificate.is_some() {
-        ("certificate_issued", "The target device holds a current certificate, but BlakTail has no proof the service answers: there is no serving-agent listener or health check yet.")
+    } else if certificate.is_none() {
+        ("awaiting_certificate", "Waiting for the target device to request a certificate. Run `blaktaild up --serve-services` on it; the name is not published until it serves.".to_owned())
+    } else if !fresh || !serving_live_certificate || health.state == "not_listening" {
+        ("certificate_issued", format!(
+            "A current certificate was issued, but the target device has not reported a listener serving it in the last {} seconds, so the name is not published.",
+            service_serving::HEALTH_FRESH_SECS
+        ))
+    } else if health.state != "healthy" {
+        ("target_unhealthy", format!(
+            "The listener is up but the local target failed its health check ({}); the name is withdrawn from DNS until it recovers.",
+            if health.detail.is_empty() { "no detail" } else { health.detail.as_str() }
+        ))
     } else {
-        ("awaiting_serving_agent", "Waiting for a serving agent on the target device to request a certificate. Current BlakTail agents do not do this yet, so the service is not reachable.")
+        ("serving", "The target device reports its listener serving the current certificate and a healthy local target; authorised devices resolve the name in MagicDNS. This is the device's own report, not a probe from a client.".to_owned())
     };
+    let reachable = status == "serving";
     Ok(ServiceView {
         id: service_id,
         fqdn: format!("{name}.{}", namespace(org_id)),
@@ -678,8 +708,8 @@ async fn load_service(
         enabled,
         revision: row.try_get(3)?,
         status: status.into(),
-        status_detail: status_detail.into(),
-        reachable: false,
+        status_detail,
+        reachable,
         certificate,
         created_at: row.try_get(8)?,
         updated_at: row.try_get(9)?,
@@ -688,7 +718,7 @@ async fn load_service(
 
 /// Authenticates a node bearer token; revoked, deleted and unknown nodes all
 /// fail the same way. Suspended devices are refused (`suspended`).
-async fn node_org(
+pub(crate) async fn node_org(
     s: &AppState,
     headers: &HeaderMap,
     node_id: Uuid,
@@ -1076,7 +1106,7 @@ fn seal_cipher(master: &[u8]) -> Result<ChaCha20Poly1305, ApiError> {
     ChaCha20Poly1305::new_from_slice(&key).map_err(|_| ApiError::CorruptData)
 }
 
-fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
+pub(crate) fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ciphertext = seal_cipher(master)?
@@ -1087,7 +1117,7 @@ fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
     Ok(format!("{SEALED_PREFIX}{}", STANDARD.encode(packed)))
 }
 
-fn open_key(master: &[u8], sealed: &str) -> Result<String, ApiError> {
+pub(crate) fn open_key(master: &[u8], sealed: &str) -> Result<String, ApiError> {
     let raw = STANDARD
         .decode(
             sealed
@@ -1385,7 +1415,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{created_a}");
-        assert_eq!(created_a["status"], "awaiting_serving_agent");
+        assert_eq!(created_a["status"], "awaiting_certificate");
         assert_eq!(created_a["reachable"], false);
         let (status, created_b) = call(
             &r,

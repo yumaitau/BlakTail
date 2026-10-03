@@ -6,6 +6,10 @@ COPY config ./config
 COPY blaktail-config ./blaktail-config
 COPY blaktail-coord ./blaktail-coord
 COPY blaktail-relay ./blaktail-relay
+COPY blaktail-relay-proto ./blaktail-relay-proto
+COPY blaktail-gateway ./blaktail-gateway
+COPY blaktail-ingress ./blaktail-ingress
+COPY blaktail-agentgw ./blaktail-agentgw
 COPY blaktaild ./blaktaild
 COPY blaktail-ios-wg ./blaktail-ios-wg
 RUN cargo build --release -p blaktaild -p blaktail-config

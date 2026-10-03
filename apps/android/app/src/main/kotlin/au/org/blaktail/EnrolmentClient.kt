@@ -18,6 +18,14 @@ data class Joined(
     val address: String,
 )
 
+/** Relay capability and Australian relays from the coordinator's peer map. */
+data class RelaySettings(
+    val token: String,
+    val expiresAt: Long,
+    /** One relay per line: "endpoint\tregion\twss" (wss may be empty). */
+    val relays: String,
+)
+
 class EnrolmentClient(private val coordinatorUrl: String) {
     fun start(name: String, publicKey: String): EnrolmentStart {
         val body = """{"name":${json(name)},"wg_public_key":${json(publicKey)}}"""
@@ -56,22 +64,45 @@ class EnrolmentClient(private val coordinatorUrl: String) {
         return Joined(parsed.getString("id"), parsed.getString("node_token"), cidr)
     }
 
-    fun peers(nodeId: String, nodeToken: String): ArrayList<String> {
-        val connection = open("GET", "/v1/nodes/$nodeId/peers")
+    /**
+     * One peer-map fetch: `peers` as `key|cidrs|endpoint|nodeId`, `policy` the
+     * raw peer array for the native inbound filter, and the relay settings.
+     */
+    data class PeerMap(val peers: ArrayList<String>, val policy: String, val relay: RelaySettings)
+
+    fun peers(nodeId: String, nodeToken: String): PeerMap {
+        // The native dataplane filters inbound traffic with the peers' `ingress` grants.
+        val connection = open("GET", "/v1/nodes/$nodeId/peers?capabilities=wireguard,acl-filter")
         connection.setRequestProperty("authorization", "Bearer $nodeToken")
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val text = stream.bufferedReader().readText()
         if (connection.responseCode !in 200..299) error("coordinator returned ${connection.responseCode}")
-        val list = JSONObject(text).getJSONArray("peers")
+        val body = JSONObject(text)
+        val list = body.getJSONArray("peers")
         val peers = ArrayList<String>()
         for (index in 0 until list.length()) {
             val peer = list.getJSONObject(index)
             val allowed = peer.getJSONArray("allowed_ips")
             if (allowed.length() == 0) continue
             val cidrs = (0 until allowed.length()).joinToString(",") { allowed.getString(it) }
-            peers.add("${peer.getString("wg_public_key")}|$cidrs|${peer.optString("endpoint")}")
+            val endpoint = if (peer.isNull("endpoint")) "" else peer.optString("endpoint")
+            peers.add("${peer.getString("wg_public_key")}|$cidrs|$endpoint|${peer.optString("id")}")
         }
-        return peers
+        val declared = body.optJSONArray("relay_endpoints")
+        val relays = if (declared != null && declared.length() > 0) {
+            (0 until declared.length()).joinToString("\n") {
+                val relay = declared.getJSONObject(it)
+                val wss = if (relay.isNull("wss")) "" else relay.optString("wss")
+                "${relay.getString("endpoint")}\t${relay.getString("region")}\t$wss"
+            }
+        } else {
+            // Older coordinators list relays without regions; they validated
+            // their own Australian region, as the desktop agent assumes too.
+            val legacy = body.optJSONArray("relays")
+            (0 until (legacy?.length() ?: 0)).joinToString("\n") { "${legacy!!.getString(it)}\tap-southeast-2\t" }
+        }
+        val relay = RelaySettings(body.optString("relay_token"), body.optLong("relay_expires_at"), relays)
+        return PeerMap(peers, list.toString(), relay)
     }
 
     fun newPublicKey(): String = Base64.getEncoder().encodeToString(ByteArray(32).also(SecureRandom()::nextBytes))

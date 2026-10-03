@@ -1,11 +1,13 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
-use blaktaild::relay_select::{eligible_relays, RelaySelector};
+use blaktaild::relay_select::{eligible_relays, wss_for, RelaySelector};
 use blaktaild::{
     apply_peer_map, configure_system_dns,
     connector::{self, ConnectorRuntime},
     disable_share, dns_domain, enable_share, ensure_private_key, load_shares,
     organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
+    pq::{self, PqRuntime},
     published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
+    services::{self, ServiceRuntime},
     sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
     Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
     HANDSHAKE_FRESH_SECS,
@@ -38,6 +40,13 @@ struct Cli {
     /// PEM trust bundle for a private coordinator CA.
     #[arg(long, global = true, env = "BLAKTAIL_COORD_CA")]
     coord_ca: Option<PathBuf>,
+    /// Run owner-approved remote job templates pulled from the coordinator.
+    /// Each job runs its fixed argv (no shell) as --remote-jobs-user.
+    #[arg(long, global = true, env = "BLAKTAIL_ALLOW_REMOTE_JOBS")]
+    allow_remote_jobs: bool,
+    /// Unprivileged account remote jobs run as; required with --allow-remote-jobs.
+    #[arg(long, global = true, env = "BLAKTAIL_REMOTE_JOBS_USER")]
+    remote_jobs_user: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -75,6 +84,28 @@ enum Command {
         /// routing peer for. `--app-connector=false` turns it off again.
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         app_connector: Option<bool>,
+        /// Report the `agent-gateway` capability so `blaktail-agentgw` on this
+        /// node may authorise agent requests. `--agent-gateway=false` turns it off.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        agent_gateway: Option<bool>,
+        /// Report the `public-ingress` capability so a co-located
+        /// blaktail-ingress may fetch this organisation's public routes.
+        /// `--public-ingress=false` turns it off again.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        public_ingress: Option<bool>,
+        /// Serve the private services that target this node: generate their
+        /// keys here, request certificates and listen on the overlay only.
+        /// `--serve-services=false` stops serving and deletes the keys.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        serve_services: Option<bool>,
+        /// Comma-separated loopback ports private services may expose, for
+        /// example `8080,3000`. A service on any other port is refused. Each
+        /// use replaces the stored list.
+        #[arg(long, value_delimiter = ',')]
+        serve_services_ports: Option<Vec<u16>>,
+        /// Overlay TCP port for the private service listener (default 443).
+        #[arg(long)]
+        service_listen_port: Option<u16>,
     },
     /// Resume the persisted enrollment and keep WireGuard peers synchronized.
     Run {
@@ -94,6 +125,17 @@ enum Command {
     Share {
         #[command(subcommand)]
         action: ShareCommand,
+    },
+    /// Install this organisation's private service CA into the system trust
+    /// store after showing its fingerprint and asking for confirmation.
+    /// Never run automatically.
+    TrustServiceCa {
+        /// Write the CA PEM to this path instead of installing it.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
     /// Stop the local tunnel while retaining enrollment for a later resume.
     Pause,
@@ -168,6 +210,7 @@ impl AgentOverrides {
             Command::Reauth
             | Command::Status { .. }
             | Command::Share { .. }
+            | Command::TrustServiceCa { .. }
             | Command::Pause
             | Command::Down => {}
         }
@@ -419,6 +462,13 @@ async fn sync_loop(
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
     let mut connector = ConnectorRuntime::default();
+    let own_secret = ensure_private_key(state_dir)
+        .ok()
+        .and_then(|(path, _)| pq::read_private_key(&path));
+    let mut pq = PqRuntime::new(own_secret, state_dir, network.psk_device(&state.interface));
+    let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
+    let mut serving = ServiceRuntime::default();
+    let mut traffic = blaktaild::traffic::Reporter::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -429,6 +479,7 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
+        serving.manage(coordinator, state, state_dir).await;
         if connector::manage(coordinator, network, state, &mut connector).await {
             if let Err(error) = write_state(state_dir, state) {
                 warn!(%error, "could not persist app connector routes");
@@ -436,15 +487,47 @@ async fn sync_loop(
         }
         let transport = manage_paths(network, &mut mesh, &mut relays, state, &mut paths).await;
         coordinator.set_transport(transport);
+        manage_pq(&mut pq, coordinator, state, &mut pq_reported).await;
+        let relayed: Vec<String> = paths
+            .iter()
+            .filter(|(_, path)| {
+                matches!(
+                    path,
+                    PeerPath::Relayed { .. } | PeerPath::DirectProbe { .. }
+                )
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
+        manage_traffic(
+            &mut traffic,
+            coordinator,
+            network,
+            state,
+            transport,
+            &relayed,
+            mesh.as_ref()
+                .is_some_and(|active| relay_link(active) == "wss"),
+        )
+        .await;
         let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
-        if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
+        let relay_link = mesh.as_ref().map(|active| relay_link(active).to_owned());
+        if state.active_relay != active_relay
+            || state.relay_failovers != relays.failovers()
+            || state.relay_link != relay_link
+        {
             state.active_relay = active_relay;
             state.relay_failovers = relays.failovers();
+            state.relay_link = relay_link;
             if let Err(error) = write_state(state_dir, state) {
                 warn!(%error, "could not persist relay selection");
             }
         }
         report_relay_endpoint(coordinator, mesh.as_ref(), state, state_dir).await;
+        if blaktaild::remote::report_host_key(coordinator, state).await {
+            if let Err(error) = write_state(state_dir, state) {
+                warn!(%error, "could not persist the reported SSH host key");
+            }
+        }
         if exit_after_join {
             if let Some(active) = mesh.take() {
                 active.stop();
@@ -490,8 +573,103 @@ async fn sync_loop(
     if let Some(active) = shares.take() {
         active.stop();
     }
+    serving.stop();
     shutdown_magic_dns(&mut dns, state, state_dir);
     Ok(())
+}
+
+/// Opt-in traffic reporting: starts and stops counting with the peer map's
+/// `traffic` setting and uploads one aggregate bucket about once a minute.
+async fn manage_traffic(
+    reporter: &mut blaktaild::traffic::Reporter,
+    coordinator: &Coordinator,
+    network: &mut dyn Network,
+    state: &mut blaktaild::NodeState,
+    transport: Option<&'static str>,
+    relayed: &[String],
+    relay_over_https: bool,
+) {
+    use blaktaild::flow_report;
+    let interface = state.interface.clone();
+    match reporter.step(state.traffic.as_ref(), blaktaild_now() as i64) {
+        blaktaild::traffic::Step::Idle => {}
+        blaktaild::traffic::Step::Start => {
+            info!("traffic diagnostics on: counting aggregate flows");
+            network.set_traffic(&interface, true);
+        }
+        blaktaild::traffic::Step::Stop => {
+            info!("traffic diagnostics off: counters discarded");
+            network.set_traffic(&interface, false);
+        }
+        blaktaild::traffic::Step::Report { start, end } => {
+            let Some(settings) =
+                blaktaild::traffic::Settings::active(state.traffic.as_ref()).cloned()
+            else {
+                return;
+            };
+            let counts = match network.traffic_counts(&interface, &state.peers) {
+                Ok(counts) => counts,
+                Err(error) => {
+                    warn!(%error, "could not read traffic counters");
+                    return;
+                }
+            };
+            let device = state.node_id.to_string();
+            let upload = flow_report::build(
+                &flow_report::Bucket {
+                    org_id: &settings.org_id,
+                    device_id: &device,
+                    start,
+                    end,
+                    transport: blaktaild::traffic::transport_label(transport, relay_over_https),
+                    relayed_peers: relayed,
+                    relay_transport: blaktaild::traffic::relay_transport_label(relay_over_https),
+                    sampling_rate: settings.sampling_rate,
+                },
+                &counts,
+            );
+            if upload.records.is_empty() {
+                return;
+            }
+            match coordinator.upload_flows(state, &upload).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!("coordinator reports traffic diagnostics are off; stopping");
+                    reporter.halt();
+                    state.traffic = None;
+                    network.set_traffic(&interface, false);
+                }
+                Err(error) => warn!(%error, "could not upload traffic records"),
+            }
+        }
+    }
+}
+
+/// Feeds the peer map to the post-quantum PSK runtime and reports the
+/// per-peer outcome when it changes (at least once a minute while non-empty).
+async fn manage_pq(
+    pq: &mut PqRuntime,
+    coordinator: &Coordinator,
+    state: &blaktaild::NodeState,
+    last: &mut Option<(Vec<pq::PeerReport>, Instant)>,
+) {
+    let listen = state
+        .assigned_ip
+        .split('/')
+        .next()
+        .and_then(|ip| ip.parse().ok());
+    let reports = pq.manage(&state.peers, listen);
+    let due = match last {
+        None => reports.iter().any(|report| report.mode != pq::Mode::Off),
+        Some((previous, at)) => previous != &reports || at.elapsed() >= Duration::from_secs(60),
+    };
+    if !due {
+        return;
+    }
+    match coordinator.report_pq_state(state, &reports).await {
+        Ok(()) => *last = Some((reports, Instant::now())),
+        Err(error) => warn!(%error, "could not report post-quantum peer state"),
+    }
 }
 
 async fn manage_shares(
@@ -819,13 +997,15 @@ async fn manage_paths(
                 return None;
             }
         };
-        match RelayMesh::spawn(
+        let fallback = relay_fallback(selector, relay_addr, state);
+        match RelayMesh::spawn_with_fallback(
             relay_addr,
             listen,
             state.node_id,
             &state.relay_token,
             state.relay_expires_at,
             state.exit_node.as_ref().map(|_| 51_820),
+            fallback,
         ) {
             Ok(created) => *mesh = Some(created),
             Err(error) => warn!(%error, "could not start relay client; direct paths only"),
@@ -961,6 +1141,36 @@ async fn manage_paths(
         }
     }
     transport_summary(direct, relayed)
+}
+
+/// `udp` or `wss` (the HTTPS fallback) for status output.
+fn relay_link(mesh: &RelayMesh) -> &'static str {
+    if mesh.transport_label() == "relay-wss" {
+        "wss"
+    } else {
+        "udp"
+    }
+}
+
+/// The coordinator-approved WSS fallback for the chosen relay, with proxy
+/// settings and an optional private CA from the environment (never argv).
+fn relay_fallback(
+    selector: &RelaySelector,
+    relay_addr: std::net::SocketAddr,
+    state: &blaktaild::NodeState,
+) -> Option<blaktaild::relay_client::WssFallback> {
+    let endpoint = selector.endpoint_name(relay_addr)?;
+    let url = wss_for(endpoint, &state.relay_endpoints)?;
+    match blaktail_relay::wss::ClientOptions::from_env() {
+        Ok(options) => Some(blaktaild::relay_client::WssFallback {
+            url: url.to_owned(),
+            options,
+        }),
+        Err(error) => {
+            warn!(%error, "relay WSS fallback disabled: invalid proxy or CA settings");
+            None
+        }
+    }
 }
 
 async fn switch_to_relay(
@@ -1105,11 +1315,51 @@ fn blaktaild_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Validates the remote jobs opt-in before the agent starts syncing.
+fn remote_jobs_user(
+    allow: bool,
+    user: Option<&str>,
+) -> Result<Option<blaktaild::remote::RunAs>, blaktaild::Error> {
+    if !allow {
+        return Ok(None);
+    }
+    if cfg!(target_os = "windows") {
+        return Err(blaktaild::Error::Message(
+            "remote jobs are supported on Linux and macOS only".into(),
+        ));
+    }
+    let user = user.filter(|user| !user.trim().is_empty()).ok_or_else(|| {
+        blaktaild::Error::Message("--allow-remote-jobs needs --remote-jobs-user".into())
+    })?;
+    blaktaild::remote::resolve_user(user.trim())
+        .map(Some)
+        .map_err(blaktaild::Error::Message)
+}
+
+fn start_remote_jobs(
+    run_as: Option<blaktaild::remote::RunAs>,
+    coordinator: &Coordinator,
+    state: &mut blaktaild::NodeState,
+    state_dir: &std::path::Path,
+) {
+    state.remote.jobs_enabled = run_as.is_some();
+    if let Some(run_as) = run_as {
+        info!(uid = run_as.uid, "remote jobs enabled");
+        tokio::spawn(blaktaild::remote::job_loop(
+            coordinator.clone(),
+            state_dir.to_path_buf(),
+            run_as,
+            Duration::from_secs(15),
+        ));
+    }
+}
+
 async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Error> {
     let state_dir = cli
         .state_dir
         .as_deref()
         .expect("agent state directory resolved before run");
+    let remote_jobs = remote_jobs_user(cli.allow_remote_jobs, cli.remote_jobs_user.as_deref())?;
     match cli.command {
         Command::Up {
             coord,
@@ -1123,6 +1373,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             exit_after_join,
             ephemeral,
             app_connector,
+            agent_gateway,
+            public_ingress,
+            serve_services,
+            serve_services_ports,
+            service_listen_port,
         } => {
             let coord = coord
                 .or_else(|| operator_config.coordinator_url.clone())
@@ -1194,7 +1449,8 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                         existing.exit_node = requested_exit_node.clone();
                         existing.exit_node_active = false;
                         for peer in &mut existing.peers {
-                            peer.allowed_ips.retain(|route| route != "0.0.0.0/0");
+                            peer.allowed_ips
+                                .retain(|route| route != "0.0.0.0/0" && route != "::/0");
                         }
                     }
                     existing
@@ -1230,6 +1486,33 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             if let Some(enabled) = app_connector {
                 state.app_connector = enabled;
             }
+            if let Some(enabled) = agent_gateway {
+                state.agent_gateway = enabled;
+            }
+            if let Some(enabled) = public_ingress {
+                state.public_ingress = enabled;
+            }
+            if let Some(enabled) = serve_services {
+                state.serve_services = enabled;
+            }
+            if let Some(mut ports) = serve_services_ports {
+                if ports.contains(&0) {
+                    return Err(blaktaild::Error::Message(
+                        "--serve-services-ports must list ports 1-65535".into(),
+                    ));
+                }
+                ports.sort_unstable();
+                ports.dedup();
+                state.serve_services_ports = ports;
+            }
+            if let Some(port) = service_listen_port {
+                if port == 0 {
+                    return Err(blaktaild::Error::Message(
+                        "--service-listen-port must be 1-65535".into(),
+                    ));
+                }
+                state.service_listen_port = Some(port);
+            }
             let mut network = make_network();
             let interface_addresses = state.interface_addresses();
             if let Err(error) = network.setup(&interface, &key_path, &interface_addresses) {
@@ -1238,16 +1521,16 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
                 return Err(error);
             }
-            let previous_ipv4_forward = state.router_previous_ipv4_forward;
+            let previous_forwarding = state.forwarding_originals();
             // Known allow-list first, so routing never starts unfiltered.
             network.apply_forward_filter(&interface, state.forward_filter.as_ref())?;
             match network.configure_router(
                 &interface,
                 &previous_routes,
                 &state.advertised_routes,
-                state.router_previous_ipv4_forward,
+                previous_forwarding,
             ) {
-                Ok(original) => state.router_previous_ipv4_forward = original,
+                Ok(originals) => state.set_forwarding_originals(originals),
                 Err(error) => {
                     if !resumed {
                         let _ = coordinator.revoke(&state).await;
@@ -1265,7 +1548,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                         &interface,
                         &state.advertised_routes,
                         &previous_routes,
-                        previous_ipv4_forward,
+                        previous_forwarding,
                     );
                     let _ = network.down(&interface);
                     return Err(error);
@@ -1286,6 +1569,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 state.ipv6_address().unwrap_or("unavailable"),
                 state.coord
             );
+            if !exit_after_join {
+                start_remote_jobs(remote_jobs, &coordinator, &mut state, state_dir);
+            }
             sync_loop(
                 &coordinator,
                 network.as_mut(),
@@ -1308,18 +1594,20 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             // Connector host routes are re-added after the first report.
             let mut previous_routes = state.advertised_routes.clone();
             previous_routes.append(&mut state.connector_routes);
-            state.router_previous_ipv4_forward = network.configure_router(
+            let originals = network.configure_router(
                 &state.interface,
                 &previous_routes,
                 &state.advertised_routes,
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
+            state.set_forwarding_originals(originals);
             write_state(state_dir, &state)?;
             let restored = restore_peers(network.as_mut(), &state, state_dir)?;
             if restored > 0 {
                 info!(restored, "restored persisted WireGuard peers");
             }
             info!(node_id = %state.node_id, interface = %state.interface, "resuming enrollment");
+            start_remote_jobs(remote_jobs, &coordinator, &mut state, state_dir);
             sync_loop(
                 &coordinator,
                 network.as_mut(),
@@ -1448,6 +1736,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
             }
         }
+        Command::TrustServiceCa { output, yes } => {
+            let state = read_state(state_dir)?;
+            let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
+            trust_service_ca(&coordinator, &state, output, yes).await?;
+        }
         Command::Pause => {
             let state = read_state(state_dir)?;
             if let Some(domain) = dns_domain(&state.dns_name) {
@@ -1466,7 +1759,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 &state.interface,
                 &forwarded,
                 &[],
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
             network.down(&state.interface)?;
             println!(
@@ -1493,15 +1786,122 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 &state.interface,
                 &forwarded,
                 &[],
-                state.router_previous_ipv4_forward,
+                state.forwarding_originals(),
             )?;
-            coordinator.revoke(&state).await?;
+            let revoked = coordinator.revoke(&state).await?;
             network.down(&state.interface)?;
             fs::remove_file(state_dir.join("state.json"))?;
-            println!("node revoked and {} removed", state.interface);
+            if revoked {
+                println!("node revoked and {} removed", state.interface);
+            } else {
+                println!(
+                    "coordinator no longer accepts this node's credential (already revoked or expired); {} removed locally, check the console that the device is revoked",
+                    state.interface
+                );
+            }
         }
     }
     Ok(())
+}
+
+/// Fetches the organisation's service CA, checks its fingerprint, and either
+/// writes it out or installs it after explicit confirmation.
+async fn trust_service_ca(
+    coordinator: &Coordinator,
+    state: &blaktaild::NodeState,
+    output: Option<PathBuf>,
+    yes: bool,
+) -> Result<(), blaktaild::Error> {
+    let ca = coordinator.service_ca(state).await?;
+    let fingerprint = services::pem_fingerprint(&ca.cert_pem)?;
+    if !fingerprint.eq_ignore_ascii_case(&ca.fingerprint_sha256) {
+        return Err(blaktaild::Error::Message(
+            "service CA fingerprint does not match what the coordinator reported; not trusting it"
+                .into(),
+        ));
+    }
+    println!(
+        "BlakTail private service CA\nnames: *.{} only (name-constrained)\nSHA-256: {fingerprint}\nexpires: {} (unix)",
+        ca.namespace, ca.not_after
+    );
+    if let Some(path) = output {
+        fs::write(&path, ca.cert_pem.as_bytes())?;
+        println!("written to {}", path.display());
+        return Ok(());
+    }
+    if !yes {
+        println!("Compare the fingerprint with the console's Services page, then type 'yes' to install it into the system trust store:");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if answer.trim() != "yes" {
+            return Err(blaktaild::Error::Message("not installed".into()));
+        }
+    }
+    install_ca(&ca.namespace, &ca.cert_pem)?;
+    println!("installed; browsers that use their own trust store (for example Firefox) need it imported separately");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
+    let file = format!("blaktail-{namespace}.crt");
+    let run = |program: &str, args: &[&str]| -> Result<(), blaktaild::Error> {
+        let status = process::Command::new(program).args(args).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(blaktaild::Error::Message(format!(
+                "{program} failed ({status})"
+            )))
+        }
+    };
+    let debian = std::path::Path::new("/usr/local/share/ca-certificates");
+    let redhat = std::path::Path::new("/etc/pki/ca-trust/source/anchors");
+    if debian.is_dir() {
+        fs::write(debian.join(&file), pem)?;
+        run("update-ca-certificates", &[])
+    } else if redhat.is_dir() {
+        fs::write(redhat.join(&file), pem)?;
+        run("update-ca-trust", &["extract"])
+    } else {
+        Err(blaktaild::Error::Message(
+            "no supported system trust store found; use --output and install the CA manually"
+                .into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
+    let path = std::env::temp_dir().join(format!("blaktail-{namespace}.pem"));
+    fs::write(&path, pem)?;
+    // macOS asks for an administrator's approval before changing trust.
+    let status = process::Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .arg(&path)
+        .status();
+    let _ = fs::remove_file(&path);
+    if status?.success() {
+        Ok(())
+    } else {
+        Err(blaktaild::Error::Message(
+            "security add-trusted-cert failed".into(),
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn install_ca(_namespace: &str, _pem: &str) -> Result<(), blaktaild::Error> {
+    Err(blaktaild::Error::Message(
+        "trust installation is supported on Linux and macOS; use --output".into(),
+    ))
 }
 
 /// Machine-readable status for local tools. Carries no node token, relay
@@ -1525,6 +1925,7 @@ fn status_json(state: &blaktaild::NodeState, now: i64) -> serde_json::Value {
         "relays": eligible_relays(&state.relays, &state.relay_endpoints),
         "active_relay": state.active_relay,
         "relay_failovers": state.relay_failovers,
+        "relay_link": state.relay_link,
         "peers": state.peers.iter().map(|peer| serde_json::json!({
             "name": peer.name,
             "endpoint": peer.endpoint,

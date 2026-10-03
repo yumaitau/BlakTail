@@ -12,12 +12,32 @@ import type { PostureCheck, PostureDefinition } from "@/lib/coord-policy";
 
 const OS_FAMILIES = ["linux", "macos", "ios", "android", "windows"];
 
+export type IntegrationOption = { id: string; name: string; provider: string };
+
 function hours(seconds: number | undefined): string {
   return seconds === undefined ? "" : String(Math.round((seconds / 3600) * 100) / 100);
 }
 
-function describeDefinition(definition: PostureDefinition): string[] {
+function describeDefinition(
+  definition: PostureDefinition,
+  integrations: IntegrationOption[],
+): string[] {
   const parts: string[] = [];
+  const requirement = definition.integration;
+  if (requirement) {
+    const found = integrations.find((option) => option.id === requirement.integration_id);
+    parts.push(
+      `${found ? `${found.provider} (${found.name})` : "Removed integration"} reports the device healthy, confirmed within ${Math.round((requirement.max_age_secs ?? 3600) / 60)} min`,
+    );
+    if (requirement.max_last_seen_secs !== undefined) {
+      parts.push(`Provider saw the device within ${hours(requirement.max_last_seen_secs)} h`);
+    }
+    parts.push(
+      requirement.on_outage === "pass"
+        ? "Provider outage: last known passing devices keep access (fail-open)"
+        : "Provider outage: stale data fails (fail-closed)",
+    );
+  }
   if (definition.require_approved_peer) parts.push("Device active with an unexpired credential");
   if (definition.min_agent_version) parts.push(`Agent ${definition.min_agent_version} or later`);
   if (definition.os_families?.length) parts.push(`OS is ${definition.os_families.join(" or ")}`);
@@ -41,10 +61,12 @@ function describeDefinition(definition: PostureDefinition): string[] {
 function CheckForm({
   check,
   disabled,
+  integrations,
   onDone,
 }: {
   check?: PostureCheck;
   disabled: boolean;
+  integrations: IntegrationOption[];
   onDone: () => void;
 }) {
   const router = useRouter();
@@ -147,6 +169,47 @@ function CheckForm({
           </select>
         </label>
       </div>
+      {integrations.length ? (
+        <fieldset className="acl-rule-grid" disabled={disabled}>
+          <legend>Device-health provider</legend>
+          <label className="acl-selector">
+            <span>Require a healthy record from</span>
+            <select name="integration_id" defaultValue={definition.integration?.integration_id ?? ""}>
+              <option value="">No provider requirement</option>
+              {integrations.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.provider} ({option.name})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="acl-selector">
+            <span>Provider data confirmed within (minutes)</span>
+            <input
+              name="integration_max_age_minutes"
+              type="number"
+              min={1}
+              defaultValue={Math.round((definition.integration?.max_age_secs ?? 3600) / 60)}
+            />
+          </label>
+          <label className="acl-selector">
+            <span>Provider last saw the device within (hours, optional)</span>
+            <input
+              name="integration_last_seen_hours"
+              inputMode="decimal"
+              placeholder="24"
+              defaultValue={hours(definition.integration?.max_last_seen_secs)}
+            />
+          </label>
+          <label className="acl-selector">
+            <span>During a provider outage</span>
+            <select name="integration_on_outage" defaultValue={definition.integration?.on_outage ?? "fail"}>
+              <option value="fail">Fail once data is stale (fail-closed)</option>
+              <option value="pass">Keep last known passing devices (fail-open)</option>
+            </select>
+          </label>
+        </fieldset>
+      ) : null}
       <label>
         <input
           type="checkbox"
@@ -174,10 +237,12 @@ export function PostureManager({
   checks,
   canManage,
   reason,
+  integrations = [],
 }: {
   checks: PostureCheck[];
   canManage: boolean;
   reason: string | null;
+  integrations?: IntegrationOption[];
 }) {
   const router = useRouter();
   const [editing, setEditing] = useState<string | null>(null);
@@ -231,7 +296,7 @@ export function PostureManager({
               </div>
               {check.definition.description ? <p>{check.definition.description}</p> : null}
               <ul className="audit-details">
-                {describeDefinition(check.definition).map((part) => (
+                {describeDefinition(check.definition, integrations).map((part) => (
                   <li key={part}>{part}</li>
                 ))}
               </ul>
@@ -241,7 +306,12 @@ export function PostureManager({
                   : "Not referenced by the published policy."}
               </p>
               {editing === check.id ? (
-                <CheckForm check={check} disabled={!canManage} onDone={() => setEditing(null)} />
+                <CheckForm
+                  check={check}
+                  disabled={!canManage}
+                  integrations={integrations}
+                  onDone={() => setEditing(null)}
+                />
               ) : null}
             </li>
           ))}
@@ -255,7 +325,7 @@ export function PostureManager({
       <div>
         <h2>New posture check</h2>
         {reason ? <p className="muted">{reason}</p> : null}
-        <CheckForm disabled={!canManage} onDone={() => undefined} />
+        <CheckForm disabled={!canManage} integrations={integrations} onDone={() => undefined} />
       </div>
     </div>
   );

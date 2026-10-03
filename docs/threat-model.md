@@ -66,6 +66,35 @@ Treat a leaked unused key as: revoke that key (or every unused key for the org),
 
 The relay does not decrypt WireGuard payloads and must not log them. It still sees UDP 5-tuples, 16-byte node ids, packet sizes, and timing. A person with shell on the relay host can watch who talks to whom. Registration requires a coordinator-minted, expiring HMAC capability; treat the relay as trusted org kit on an Australian network, not as an anonymity service.
 
+### Remote-access gateway or console session abuse
+
+Browser SSH/RDP and remote jobs ([remote-access.md](remote-access.md)) add an
+always-on onshore gateway. What each compromise buys:
+
+- **Stolen console cookie.** Cannot open a terminal without a sign-in in the
+  last 5 minutes and the organisation's MFA rule; every session needs a
+  reason and is audited. Members and auditors cannot open sessions at all.
+- **Stolen ticket.** Single use, 60 seconds, redeemable only with the
+  configured gateway's node credential.
+- **Compromised gateway host.** It holds a node credential and in-memory
+  session keys. It can reach only what policy lets the gateway node reach,
+  only as OS users SSH rules name, and only while a person has an
+  unexpired session it redeemed: each certificate names one user, is limited
+  to the gateway's overlay address and expires at the session's end (at most
+  30 minutes). It cannot mint certificates (the CA key stays in the
+  coordinator, sealed with the coordinator secret) and cannot see RDP
+  passwords except those typed during its compromise. Suspend or revoke the
+  gateway node to stop it.
+- **Database write without the coordinator secret.** Cannot sign a runnable
+  job (the job key is derived from the coordinator secret) and cannot read
+  the CA key. It can change a pinned host key, but that alone does not
+  redirect a session: the device's overlay address routes only to the peer
+  holding its WireGuard key.
+- **Compromised coordinator.** Can issue certificates and sign jobs for any
+  opted-in device of that organisation. Opt-in on the device (sshd drop-in,
+  `BLAKTAIL_SSH_USER_CA`, `--allow-remote-jobs`) is the boundary; leave it
+  off where that risk is unacceptable.
+
 ### Offshore SaaS mistake
 
 Typical ways to break the onshore rule without dropping a key in Slack:
@@ -82,6 +111,39 @@ The shared schema refuses coordinator, relay, and console startup unless
 `australiaeast`, `australiasoutheast`, `australia-southeast1`, or
 `australia-southeast2`). Public health responses contain status only and never
 echo the configured region. Deployment policy still pins AWS stacks to Sydney.
+Optional MDM/EDR posture integrations are a deliberate, owner-approved
+exception: the coordinator calls the vendor's cloud, which may be offshore,
+and the console says so before the first call.
+
+### MDM/EDR integration abuse
+
+Posture integrations (Intune, CrowdStrike Falcon, SentinelOne, FleetDM,
+Huntress) add a credential and an outbound call per organisation:
+
+- **Credential theft or exfiltration.** Secrets are sealed with a key derived
+  from the coordinator secret, write-only through the API, absent from audit
+  details, errors and logs (provider errors are reduced to fixed
+  categories). Changing an integration's endpoint requires re-entering the
+  secret, so an owner session cannot redirect a stored credential. Only
+  owners can create, rotate, test or remove integrations. Ask vendors for
+  read-only scopes only.
+- **SSRF through provider URLs.** Fixed vendor hosts for Intune,
+  CrowdStrike (region list) and Huntress; SentinelOne must be
+  `*.sentinelone.net`; FleetDM must be a public HTTPS address. Every call
+  goes through the webhook address policy (no private, loopback, link-local
+  or metadata addresses), is pinned to the checked IP, follows no
+  redirects, and pagination links must stay on the same origin.
+- **Forged device identity.** Serials and MACs are reported by the node
+  token holder. Copying another device's serial makes both devices'
+  matches ambiguous, which fails; it cannot transfer a passing signal. A
+  stolen node token for a device that is itself compliant remains a risk,
+  as with any device-bound credential.
+- **Cross-organisation signals.** Matching loads only the checking
+  organisation's integrations and devices; check creation rejects another
+  organisation's integration id.
+- **Provider outage.** Failures never change stored records. Stale data
+  fails closed unless the check opts into fail-open for outages, which only
+  keeps devices whose last known record was passing.
 
 ## Required controls
 

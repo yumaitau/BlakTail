@@ -1,4 +1,9 @@
+import { writeConsoleAudit } from "./console-audit";
+import { revokeSessionsForUser } from "./coord-remote";
 import { rawSqlClient } from "./db/client";
+import { scimActivation } from "./directory-mapping-core";
+import { getDirectorySettings, sweepDeprovisioned } from "./directory-mapping";
+import type { OrgRole } from "./roles";
 import { bearerToken, scimList, scimUser, tokenMatches } from "./scim-core";
 import type { ScimUserInput } from "./scim-core";
 
@@ -23,7 +28,10 @@ export async function organisationForToken(header: string | null): Promise<strin
   `;
   for (const row of rows) {
     if (tokenMatches(presented, String(row.token_hash))) {
-      return String(row.organisation_id);
+      const organisationId = String(row.organisation_id);
+      // Lazy sweep: grace periods that ended become tombstones.
+      await sweepDeprovisioned(organisationId);
+      return organisationId;
     }
   }
   throw new ScimError("SCIM token was rejected.", 401);
@@ -140,11 +148,7 @@ export async function provisionScimUser(organisationId: string, input: ScimUserI
         FROM organisation o WHERE o.id = ${organisationId}
       `;
     } else if (membership.role !== "owner") {
-      await transaction`
-        UPDATE membership
-        SET status = ${input.active ? "active" : "suspended"}
-        WHERE id = ${membership.id}
-      `;
+      await applyActivation(transaction as unknown as Sql, organisationId, String(membership.id), input.active);
     }
     await transaction`
       INSERT INTO account (id, issuer, account_id, provider_id, user_id)
@@ -156,7 +160,50 @@ export async function provisionScimUser(organisationId: string, input: ScimUserI
     `;
     return id;
   });
+  if (!input.active) {
+    await revokeSessionsForUser(organisationId, userId, { role: "member", status: "suspended" }, "scim");
+  }
   return getScimUser(organisationId, userId);
+}
+
+type Sql = ReturnType<typeof rawSqlClient>;
+
+/**
+ * Deactivation suspends at once and starts the organisation's deprovision
+ * grace period; the membership becomes a tombstone when it ends.
+ */
+async function applyActivation(
+  sql: Sql,
+  organisationId: string,
+  membershipId: string,
+  active: boolean,
+): Promise<string> {
+  const [row] = await sql`
+    SELECT role, status, deprovision_at, tombstoned_at FROM membership
+    WHERE id = ${membershipId} AND organisation_id = ${organisationId}
+  `;
+  if (!row) throw new ScimError("User was not found.", 404);
+  const settings = await getDirectorySettings(organisationId, sql);
+  const next = scimActivation(
+    {
+      role: row.role as OrgRole,
+      status: String(row.status),
+      deprovisionAt: row.deprovision_at ? new Date(String(row.deprovision_at)) : null,
+      tombstonedAt: row.tombstoned_at ? new Date(String(row.tombstoned_at)) : null,
+    },
+    active,
+    settings,
+    new Date(),
+  );
+  await sql`
+    UPDATE membership
+    SET status = ${next.status}, role = ${next.role},
+      role_source = COALESCE(${next.roleSource ?? null}, role_source),
+      deprovision_at = CAST(${next.deprovisionAt?.toISOString() ?? null} AS timestamptz),
+      tombstoned_at = CAST(${next.tombstonedAt?.toISOString() ?? null} AS timestamptz)
+    WHERE id = ${membershipId} AND organisation_id = ${organisationId}
+  `;
+  return next.status;
 }
 
 export async function setScimActive(
@@ -165,7 +212,7 @@ export async function setScimActive(
   active: boolean,
 ) {
   const [membership] = await rawSqlClient()`
-    SELECT role FROM membership
+    SELECT id, role FROM membership
     WHERE organisation_id = ${organisationId} AND user_id = ${userId}
     LIMIT 1
   `;
@@ -174,17 +221,24 @@ export async function setScimActive(
     throw new ScimError("The organisation owner cannot be deactivated by SCIM.", 409);
   }
   if (membership.role !== "owner") {
-    await rawSqlClient()`
-      UPDATE membership
-      SET status = ${active ? "active" : "suspended"}
-      WHERE organisation_id = ${organisationId} AND user_id = ${userId}
-    `;
-    await rawSqlClient()`
-      UPDATE person_login_identity
-      SET status = ${active ? "active" : "suspended"},
-          suspended_at = ${active ? null : new Date()}
-      WHERE user_id = ${userId}
-    `;
+    const status = await applyActivation(rawSqlClient(), organisationId, String(membership.id), active);
+    await writeConsoleAudit({
+      organisationId,
+      actorUserId: "system",
+      actorEmail: "",
+      actorRole: "system",
+      source: "scim",
+      action: active ? "scim.user_activated" : "scim.user_deprovisioned",
+      result: "ok",
+      targetType: "membership",
+      targetId: String(membership.id),
+      details: { status },
+    });
+    await revokeSessionsForUser(organisationId, userId, { role: String(membership.role), status }, "scim");
+    // Only this organisation's membership changes. The login identity is
+    // shared with every other organisation the person belongs to, so one
+    // directory's token must never suspend it; sign-in already ignores
+    // memberships that are not active.
   }
   return getScimUser(organisationId, userId);
 }

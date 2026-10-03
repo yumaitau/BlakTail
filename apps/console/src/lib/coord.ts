@@ -78,6 +78,12 @@ export type WebhookDestination = {
   /** Catalogued event types, or ["*"] for every event. */
   event_types?: string[];
   secret?: string | null;
+  /** "webhook" (default), or an email/Slack/Teams channel (coord-notifications). */
+  kind?: "webhook" | "email" | "slack" | "teams";
+  recipients?: string[];
+  quiet_hours?: { timezone: string; start: string; end: string } | null;
+  digest_minutes?: number;
+  residency_acknowledged_at?: number | null;
 };
 
 export type WebhookDelivery = {

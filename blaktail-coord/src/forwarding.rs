@@ -25,7 +25,6 @@ use uuid::Uuid;
 
 /// Reported by agents that install the forward allow-list.
 pub(crate) const CAP_FORWARD_FILTER: &str = "forward-filter";
-const EXIT_ROUTE: &str = "0.0.0.0/0";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ForwardService {
@@ -277,7 +276,7 @@ fn grants(
     let mut grants: BTreeMap<String, ForwardService> = BTreeMap::new();
     let exit = router.selected_by(client.exit_request);
     for route in router.approved {
-        if route != EXIT_ROUTE || exit {
+        if !resources::is_default_route(route) || exit {
             grants.insert(route.clone(), ForwardService::everything());
         }
     }
@@ -529,7 +528,9 @@ pub(crate) async fn host_routers(
             .iter()
             .map(String::as_str)
             .chain(distribution.carried_by(id))
-            .filter(|prefix| *prefix != EXIT_ROUTE && resources::cidr_within(host, prefix))
+            .filter(|prefix| {
+                !resources::is_default_route(prefix) && resources::cidr_within(host, prefix)
+            })
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
         for prefix in prefixes {

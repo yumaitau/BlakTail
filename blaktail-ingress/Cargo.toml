@@ -1,0 +1,39 @@
+[package]
+name = "blaktail-ingress"
+description = "Organisation-operated public HTTPS ingress for BlakTail private services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "blaktail-ingress"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+instant-acme = { version = "0.8", default-features = false, features = ["aws-lc-rs", "hyper-rustls", "rcgen"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+x509-parser = "0.18"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+tempfile = "3"

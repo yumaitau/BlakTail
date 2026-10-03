@@ -66,18 +66,35 @@ See [console.md](console.md).
 - Dual-stack overlay addresses (CGNAT IPv4 plus an organisation ULA `/64`)
 - Device inventory: last-seen/online, OS, agent version, search
 - Versioned posture checks that gate policy rules on self-reported agent/OS
-  version and coordinator-observed credential state (not attestation)
+  version and coordinator-observed credential state (not attestation), plus
+  optional MDM/EDR signals from Intune, CrowdStrike Falcon, SentinelOne,
+  FleetDM or Huntress (polling, matched by serial/MAC inside the
+  organisation, fail-closed on outage by default; mock-tested only, no live
+  vendor tenant)
 - Explain access, and SSH rules enforced at Linux destinations (per-user
   limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials
+- Opt-in browser SSH through an onshore gateway node (single-use tickets,
+  session certificates, pinned host keys, revoke within 10 seconds) and
+  owner-approved argv-only remote jobs ([remote-access.md](remote-access.md));
+  RDP through guacd is lab-proven to xrdp at the protocol level only
 - Prometheus metrics and an actor-attributed, paged, filterable audit log with
   audited export and a per-organisation hash chain (tamper-evident, not
   tamper-proof)
 - Signed HTTPS webhooks with an event catalogue and per-destination
-  subscriptions (no email or chat delivery)
+  subscriptions; email (operator SMTP relay), Slack and Teams channels on the
+  same outbox with timezone-aware quiet hours and digests (Slack/Teams need
+  an owner's offshore residency acknowledgement)
+- SCIM Users and Groups, owner-defined directory group to role mappings with
+  drift preview and audited apply, and a deprovision grace period with
+  tombstones
 - Owner opt-in traffic diagnostics endpoint and page; current agents do not
   report traffic yet
 - Single-host SQLite or concurrent PostgreSQL coordinator storage
+- Opt-in hybrid post-quantum WireGuard pre-shared keys (ML-KEM-768 + X25519,
+  rotated every two minutes, negotiated per peer, shown per peer). Classical
+  authentication remains; not independently reviewed yet
+  ([post-quantum.md](post-quantum.md))
 - A disposable Sydney AWS proof harness, not a production SaaS
 - An iPhone client that joins a network as a WireGuard node and still administers All networks
 
@@ -89,18 +106,23 @@ See [console.md](console.md).
   with no physical-device or clean-host proof; the Linux tray controls the
   local agent but has not been validated on a clean desktop. See
   [platform-support.md](platform-support.md)
-- Not a completed iPhone relay path: the phone joins as a WireGuard client over
-  direct UDP; Australian relay fallback and hole punch are still the Mac/Linux
-  agent cut
+- Not a proven iPhone relay path: the packet tunnel now falls back to the
+  Australian relay (UDP, or WSS when UDP is blocked) through the shared Rust
+  core and shows the observed path, but it has only been built for the
+  simulator; no physical-device run across independent NATs is recorded, and
+  the phone does not hole-punch. Android has the UDP relay in code only. See
+  [ios.md](ios.md#relay-fallback)
 - Not a file-sync product (that is BlakSync)
 - Not an anonymity network; the coordinator and relay can still see metadata
 - Not a production-verified NAT claim: agents have hole punching and relay
   fallback, but a forced-relay proof across two independent NAT paths is still
-  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24). Multi-relay
-  failover is implemented and unit-tested; its single-host drill
-  (`deploy/homelab/prove-relay-failover.sh`) has not yet been recorded
-- No HTTPS/WebSocket relay transport: networks that block all UDP cannot
-  connect (ADR 0004)
+  open in [#24](https://github.com/jusso-dev/BlakTail/issues/24). The
+  single-host relay, failover and WSS drills have passed (see
+  [relay.md](relay.md#lab-results-single-docker-host-3-october-2026)); they
+  are not independent-ISP proof
+- HTTPS/WebSocket relay fallback (ADR 0004) is implemented and proven only on
+  one Docker host: no real corporate proxy, ALB-fronted relay or independent
+  ISP has been tested
 - Not an IPv6-only product yet: dual-stack passed on private AWS agents, but
   the drill that removes each BlakTail IPv4 address is still open in
   [#32](https://github.com/jusso-dev/BlakTail/issues/32)
@@ -146,6 +168,17 @@ See the [redacted run report](e2e/aws-fargate-run.md),
 proof, not release proof: forced relay traffic, IPv6-only operation,
 revocation/re-enrolment, published signed agent packages, and secure linking of
 pre-existing distinct login identities remain open acceptance work.
+
+## Agent network (AI model gateway)
+
+Owner-approved on 3 October 2026 ([ADR 0008](adr/0008-agent-network.md)).
+`blaktail-agentgw` is an OpenAI-compatible gateway that runs on an enrolled
+node and listens only on the overlay; the coordinator authorises every
+request against per-agent keys, model allowlists, daily quotas and the
+organisation's offshore policy (forbidden by default). Proven by coordinator
+and gateway tests and a live container lab with a real Ollama; not yet run on
+a WireGuard overlay or against a hosted provider. See
+[agent-gateway.md](agent-gateway.md).
 
 ## Related documents
 

@@ -58,12 +58,21 @@ pub fn plan_overlay_filter(peers: &[Peer]) -> FilterPlan {
             all: true,
             ..crate::PeerIngress::default()
         });
+        let pq_exchange = peer
+            .pq
+            .as_ref()
+            .is_some_and(|pq| pq.mode != crate::pq::Mode::Off && pq.capable);
         for address in overlay_host_addrs(&peer.allowed_ips) {
             let rules = if address.contains(':') {
                 &mut ipv6
             } else {
                 &mut ipv4
             };
+            if pq_exchange {
+                // The in-tunnel PSK exchange must work even when policy
+                // grants this peer nothing else.
+                rules.push(accept_port(&address, "tcp", &crate::pq::PORT.to_string()));
+            }
             append_peer_rules(rules, &address, &ingress);
         }
     }
@@ -208,6 +217,7 @@ fn append_peer_rules(rules: &mut Vec<Vec<String>>, source: &str, ingress: &crate
     if ingress.icmp {
         rules.push(accept_icmp(source));
     }
+    rules.extend(source_reject(source));
 }
 
 fn accept_source(source: &str) -> Vec<String> {
@@ -298,6 +308,15 @@ fn reject_icmp(source: &str) -> Vec<String> {
     ]
 }
 
+/// The chain's final rejects, scoped to one source: same action, but their
+/// counters attribute denied attempts to the peer (traffic reporting).
+fn source_reject(source: &str) -> [Vec<String>; 2] {
+    final_reject(source.contains(':')).map(|mut rule| {
+        rule.splice(2..2, ["-s".to_string(), source.to_string()]);
+        rule
+    })
+}
+
 fn final_reject(ipv6: bool) -> [Vec<String>; 2] {
     let icmp = if ipv6 {
         "icmp6-port-unreachable"
@@ -342,7 +361,98 @@ mod tests {
             dns_name: "store.blaktail".into(),
             tags: vec![],
             relay_endpoint: None,
+            pq: None,
             ingress: Some(ingress),
+        }
+    }
+
+    /// Walks the generated chain like the kernel would for a new inbound
+    /// packet: first matching ACCEPT/REJECT wins, conntrack rule skipped.
+    fn chain_accepts(plan: &FilterPlan, source: &str, proto: &str, port: u16) -> bool {
+        if !plan.enforce {
+            return true;
+        }
+        let rules = if source.contains(':') {
+            &plan.ipv6
+        } else {
+            &plan.ipv4
+        };
+        for rule in rules {
+            if rule.iter().any(|token| token == "conntrack") {
+                continue;
+            }
+            let value = |flag: &str| {
+                rule.iter()
+                    .position(|token| token == flag)
+                    .and_then(|index| rule.get(index + 1))
+                    .map(String::as_str)
+            };
+            if value("-s").is_some_and(|s| s != source) {
+                continue;
+            }
+            let protocol_matches = match value("-p") {
+                None => true,
+                Some("icmp") | Some("icmpv6") => proto == "icmp",
+                Some(other) => other == proto,
+            };
+            if !protocol_matches {
+                continue;
+            }
+            if let Some(range) = value("--dport") {
+                let (start, end) = range.split_once(':').unwrap_or((range, range));
+                let (start, end): (u16, u16) = (start.parse().unwrap(), end.parse().unwrap());
+                if !(start..=end).contains(&port) {
+                    continue;
+                }
+            }
+            return value("-j") == Some("ACCEPT");
+        }
+        true
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VectorPeer {
+        allowed_ips: Vec<String>,
+        #[serde(default)]
+        ingress: Option<PeerIngress>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        name: String,
+        peers: Vec<VectorPeer>,
+        checks: Vec<(String, String, u16, bool)>,
+    }
+
+    /// The vectors the userspace filter (iOS, Android, Windows) is tested
+    /// with: the Linux chain must reach the same decisions.
+    #[test]
+    fn shared_vectors_decide_like_the_userspace_filter() {
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../../blaktail-ios-wg/src/filter_vectors.json"
+        ))
+        .unwrap();
+        for vector in vectors {
+            let peers: Vec<Peer> = vector
+                .peers
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| Peer {
+                    id: Uuid::from_u128(index as u128 + 1),
+                    allowed_ips: entry.allowed_ips.clone(),
+                    ingress: entry.ingress.clone(),
+                    ..peer(PeerIngress::default())
+                })
+                .collect();
+            let plan = plan_overlay_filter(&fail_closed_ssh(&peers, false));
+            for (source, proto, port, expect) in &vector.checks {
+                assert_eq!(
+                    chain_accepts(&plan, source, proto, *port),
+                    *expect,
+                    "{}: {source} {proto}/{port}",
+                    vector.name
+                );
+            }
         }
     }
 

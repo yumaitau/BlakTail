@@ -58,12 +58,14 @@ class MainActivity : AppCompatActivity() {
                         }
                         client.awaitApproved(started.deviceCode)
                         val joined = client.register(started.deviceCode, device, publicKey)
-                        val peers = client.peers(joined.id, joined.nodeToken)
+                        val map = client.peers(joined.id, joined.nodeToken)
                         getSharedPreferences("blaktail", MODE_PRIVATE).edit()
                             .putString("address", joined.address)
                             .putString("nodeId", joined.id)
                             .putString("nodeToken", joined.nodeToken)
-                            .putStringSet("peers", peers.toSet())
+                            .putString("coordinator", coordinator.text.toString())
+                            .putStringSet("peers", map.peers.toSet())
+                            .putString("policy", map.policy)
                             .apply()
                         runOnUiThread {
                             status.text = "Joined as ${joined.address}. Connect to start the tunnel."
@@ -148,6 +150,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(TunnelService.EXTRA_ADDRESS, address)
             putExtra(TunnelService.EXTRA_PRIVATE_KEY, Base64.decode(key, Base64.NO_WRAP))
             putStringArrayListExtra(TunnelService.EXTRA_PEERS, peers)
+            putExtra(TunnelService.EXTRA_POLICY, prefs.getString("policy", null))
         }
         val prepare = VpnService.prepare(this)
         if (prepare == null) {

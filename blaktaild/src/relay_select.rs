@@ -1,13 +1,10 @@
 //! Deterministic, Australia-only relay selection with bounded failover.
 //!
-//! Relays keep registrations in memory, so two peers can only relay to each
-//! other through the same relay. Every agent therefore walks the
-//! coordinator's list in the same order and uses the first relay that is not
-//! cooling down after a failure. A failed relay backs off exponentially
-//! (30 s doubling to 10 min). Once a higher-priority relay's back-off has
-//! elapsed, an authenticated probe must succeed before the agent fails back,
-//! so all agents converge on the same healthy relay without flapping.
+//! The choice and back-off rules live in `blaktail_relay_proto::select` so the
+//! mobile core uses the same order; this wrapper adds DNS resolution for the
+//! desktop agent. See that module for the convergence argument.
 
+use blaktail_relay_proto::select::Selector;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -15,8 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BASE_COOLDOWN: Duration = Duration::from_secs(30);
-const MAX_COOLDOWN: Duration = Duration::from_secs(600);
 /// Re-resolve relay names at most this often while a relay is in use.
 const RESOLVE_TTL: Duration = Duration::from_secs(300);
 
@@ -25,6 +20,9 @@ const RESOLVE_TTL: Duration = Duration::from_secs(300);
 pub struct RelayEndpoint {
     pub endpoint: String,
     pub region: String,
+    /// Coordinator-approved `wss://` fallback served by the same relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wss: Option<String>,
 }
 
 /// Relay names in coordinator priority order, keeping only those declared in
@@ -42,20 +40,23 @@ pub fn eligible_relays(relays: &[String], declared: &[RelayEndpoint]) -> Vec<Str
         .collect()
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Failure {
-    strikes: u32,
-    retry_at: Instant,
+/// The WSS fallback URL for an Australian relay endpoint, if advertised.
+pub fn wss_for<'a>(endpoint: &str, declared: &'a [RelayEndpoint]) -> Option<&'a str> {
+    declared
+        .iter()
+        .find(|relay| {
+            relay.endpoint == endpoint && blaktail_config::is_australian_region(&relay.region)
+        })
+        .and_then(|relay| relay.wss.as_deref())
 }
 
 #[derive(Default)]
 pub struct RelaySelector {
-    failures: HashMap<SocketAddr, Failure>,
+    inner: Selector<SocketAddr>,
     resolved_for: Vec<String>,
     resolved: Vec<SocketAddr>,
+    names: HashMap<SocketAddr, String>,
     resolved_at: Option<Instant>,
-    failovers: u64,
-    failbacks: u64,
 }
 
 impl RelaySelector {
@@ -67,64 +68,40 @@ impl RelaySelector {
             .is_some_and(|at| at.elapsed() < RESOLVE_TTL);
         if !fresh || self.resolved_for != relays || self.resolved.is_empty() {
             let mut resolved = Vec::new();
+            let mut names = HashMap::new();
             for relay in relays {
                 if let Ok(addresses) = tokio::net::lookup_host(relay).await {
                     for address in addresses {
                         if !resolved.contains(&address) {
                             resolved.push(address);
+                            names.insert(address, relay.clone());
                         }
                     }
                 }
             }
             self.resolved_for = relays.to_vec();
             self.resolved = resolved;
+            self.names = names;
             self.resolved_at = Some(Instant::now());
         }
         self.resolved.clone()
     }
 
-    fn cooling(&self, address: SocketAddr, now: Instant) -> bool {
-        self.failures
-            .get(&address)
-            .is_some_and(|failure| failure.retry_at > now)
+    /// The advertised `host:port` an address was resolved from.
+    pub fn endpoint_name(&self, address: SocketAddr) -> Option<&str> {
+        self.names.get(&address).map(String::as_str)
     }
 
-    /// First candidate not cooling down. When every candidate is cooling,
-    /// the one whose back-off ends first, so an agent never gives up on
-    /// relaying while at least one relay is configured.
     pub fn choose(&self, candidates: &[SocketAddr], now: Instant) -> Option<SocketAddr> {
-        candidates
-            .iter()
-            .copied()
-            .find(|address| !self.cooling(*address, now))
-            .or_else(|| {
-                candidates
-                    .iter()
-                    .copied()
-                    .min_by_key(|address| self.failures.get(address).map(|f| f.retry_at))
-            })
+        self.inner.choose(candidates, now)
     }
 
     pub fn record_failure(&mut self, address: SocketAddr, now: Instant) -> Duration {
-        let strikes = self
-            .failures
-            .get(&address)
-            .map_or(1, |failure| failure.strikes.saturating_add(1));
-        let cooldown = BASE_COOLDOWN
-            .saturating_mul(1u32 << (strikes - 1).min(10))
-            .min(MAX_COOLDOWN);
-        self.failures.insert(
-            address,
-            Failure {
-                strikes,
-                retry_at: now + cooldown,
-            },
-        );
-        cooldown
+        self.inner.record_failure(address, now)
     }
 
     pub fn record_healthy(&mut self, address: SocketAddr) {
-        self.failures.remove(&address);
+        self.inner.record_healthy(&address);
     }
 
     /// A higher-priority relay whose back-off has ended, if any. The caller
@@ -135,27 +112,23 @@ impl RelaySelector {
         candidates: &[SocketAddr],
         now: Instant,
     ) -> Option<SocketAddr> {
-        candidates
-            .iter()
-            .copied()
-            .take_while(|address| *address != active)
-            .find(|address| !self.cooling(*address, now))
+        self.inner.failback_target(&active, candidates, now)
     }
 
     pub fn note_failover(&mut self) {
-        self.failovers += 1;
+        self.inner.note_failover();
     }
 
     pub fn note_failback(&mut self) {
-        self.failbacks += 1;
+        self.inner.note_failback();
     }
 
     pub fn failovers(&self) -> u64 {
-        self.failovers
+        self.inner.failovers()
     }
 
     pub fn failbacks(&self) -> u64 {
-        self.failbacks
+        self.inner.failbacks()
     }
 }
 
@@ -177,14 +150,17 @@ mod tests {
             RelayEndpoint {
                 endpoint: "relay-b:3478".into(),
                 region: "australia-southeast1".into(),
+                wss: None,
             },
             RelayEndpoint {
                 endpoint: "relay-x:3478".into(),
                 region: "ap-southeast-1".into(),
+                wss: Some("wss://relay-x.example.com/v1/relay".into()),
             },
             RelayEndpoint {
                 endpoint: "relay-a:3478".into(),
                 region: "ap-southeast-2".into(),
+                wss: Some("wss://relay-a.example.au/v1/relay".into()),
             },
         ];
         assert_eq!(
@@ -197,6 +173,13 @@ mod tests {
         );
         let offshore_only = &declared[1..2];
         assert!(eligible_relays(&["relay-x:3478".into()], offshore_only).is_empty());
+        assert_eq!(
+            wss_for("relay-a:3478", &declared),
+            Some("wss://relay-a.example.au/v1/relay")
+        );
+        assert_eq!(wss_for("relay-b:3478", &declared), None);
+        // An offshore relay's WSS URL is never used.
+        assert_eq!(wss_for("relay-x:3478", &declared), None);
     }
 
     #[test]

@@ -13,7 +13,12 @@
     "manage_integrations",
     "manage_api_clients",
     "manage_security",
-    "view_operations"
+    "view_operations",
+    "manage_agent_gateway",
+    "view_agent_usage",
+    "use_remote_sessions",
+    "manage_remote_jobs",
+    "manage_public_ingress"
   ],
   "roles": {
     "owner": [
@@ -29,7 +34,12 @@
       "manage_integrations",
       "manage_api_clients",
       "manage_security",
-      "view_operations"
+      "view_operations",
+      "manage_agent_gateway",
+      "view_agent_usage",
+      "use_remote_sessions",
+      "manage_remote_jobs",
+      "manage_public_ingress"
     ],
     "admin": [
       "view_network",
@@ -41,7 +51,10 @@
       "manage_services",
       "view_audit",
       "export_audit",
-      "manage_integrations"
+      "manage_integrations",
+      "manage_agent_gateway",
+      "view_agent_usage",
+      "use_remote_sessions"
     ],
     "network_admin": [
       "view_network",
@@ -51,9 +64,10 @@
       "manage_policy",
       "manage_dns",
       "manage_services",
-      "view_audit"
+      "view_audit",
+      "use_remote_sessions"
     ],
-    "auditor": ["view_network", "view_audit", "export_audit", "view_operations"],
+    "auditor": ["view_network", "view_audit", "export_audit", "view_operations", "view_agent_usage"],
     "member": ["view_network", "view_audit"]
   }
 }

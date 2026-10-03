@@ -30,7 +30,7 @@ Until the first release is published, build from source. Do not use
 
 #### Mobile
 
-- iPhone — native client (`apps/ios`, iOS 17+). Direct UDP only; relay fallback is still the Mac/Linux agent cut.
+- iPhone — native client (`apps/ios`, iOS 17+). Direct UDP with Australian relay fallback (UDP or HTTPS/WSS) in code; not yet proven on a physical device.
 
 Windows agents and a Windows/Linux desktop app are not in this repository.
 

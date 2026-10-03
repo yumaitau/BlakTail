@@ -9,6 +9,7 @@ function scimError(error: unknown) {
       { status: error.status },
     );
   }
+  console.error("SCIM request failed:", error instanceof Error ? error.message : error);
   return NextResponse.json(
     { schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], detail: "SCIM request failed." },
     { status: 500 },

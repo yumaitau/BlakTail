@@ -30,10 +30,25 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     links: [
       { href: "/acls", label: "Access policy" },
       { href: "/posture", label: "Posture checks" },
+      { href: "/tunnel-protection", label: "Tunnel protection" },
     ],
   },
   { label: "DNS", links: [{ href: "/dns", label: "DNS" }] },
-  { label: "Services", links: [{ href: "/services", label: "Private services" }] },
+  {
+    label: "Services",
+    links: [
+      { href: "/services", label: "Private services" },
+      { href: "/ingress", label: "Public ingress" },
+    ],
+  },
+  { label: "Agents", links: [{ href: "/agents", label: "Agent network" }] },
+  {
+    label: "Remote",
+    links: [
+      { href: "/remote-access", label: "Remote access" },
+      { href: "/remote-jobs", label: "Remote jobs" },
+    ],
+  },
   {
     label: "Events",
     links: [

@@ -22,9 +22,16 @@ tested against it, so the two cannot drift silently.
 | Access policy | ✓ | ✓ | ✓ | | |
 | DNS | ✓ | ✓ | ✓ | | |
 | Private services | ✓ | ✓ | ✓ | | |
+| Public ingress: enable, publish, change, re-enable, delete | ✓ | | | | |
+| Public ingress: emergency-disable a route | ✓ | ✓ | ✓ | | |
 | Webhooks and integrations | ✓ | ✓ | | | |
 | Automation credentials (service users) | ✓ | | | | |
 | People, roles, SSO, SCIM, sign-in policy and domains | ✓ | | | | |
+| Browser SSH/RDP sessions; request remote jobs | ✓ | ✓ | ✓ | | |
+| Define remote job templates; approve runs | ✓ | | | | |
+
+Browser sessions also need a sign-in within the last 5 minutes and pass the
+organisation's MFA rule; see [remote-access.md](remote-access.md).
 
 Everyone in an organisation can approve enrolment of their own untagged device.
 Owner, admin and member access is exactly what it was before network admin and
@@ -128,8 +135,9 @@ resolver with a 5-second timeout; nothing is re-checked automatically.
 
 ## Not yet built
 
-- SCIM or IdP group to role mapping with a drift preview. SCIM still only
-  activates and deactivates memberships; roles are set in the console.
+- Automatic role sync. Directory group mappings
+  ([identity.md](identity.md#directory-groups-and-roles)) change roles only
+  when an owner applies a previewed drift.
 - Session inactivity timeout and revoking other sessions on role change. A
   demoted person's next request uses the new role because roles are resolved
   live, but their session stays signed in.
