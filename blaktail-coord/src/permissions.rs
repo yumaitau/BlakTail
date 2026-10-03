@@ -48,6 +48,9 @@ pub(crate) enum Permission {
     /// Define remote job templates and approve runs. Owner-only: a job runs
     /// on devices without anyone at the keyboard.
     ManageRemoteJobs,
+    /// Enable public ingress for the organisation and create, change or
+    /// re-enable public routes. Owner-only: it exposes a device to the Internet.
+    ManagePublicIngress,
 }
 
 impl Role {
@@ -57,7 +60,11 @@ impl Role {
             Role::Owner => true,
             Role::Admin => !matches!(
                 permission,
-                ManageSecurity | ManageApiClients | ViewOperations | ManageRemoteJobs
+                ManageSecurity
+                    | ManageApiClients
+                    | ViewOperations
+                    | ManageRemoteJobs
+                    | ManagePublicIngress
             ),
             Role::NetworkAdmin => matches!(
                 permission,
@@ -101,7 +108,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 17] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 18] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -119,6 +126,7 @@ pub(crate) mod tests {
         (Permission::ViewAgentUsage, "view_agent_usage"),
         (Permission::UseRemoteSessions, "use_remote_sessions"),
         (Permission::ManageRemoteJobs, "manage_remote_jobs"),
+        (Permission::ManagePublicIngress, "manage_public_ingress"),
     ];
 
     #[test]
@@ -177,6 +185,7 @@ pub(crate) mod tests {
             Permission::ManageApiClients,
             Permission::ManageSecurity,
             Permission::ExportAudit,
+            Permission::ManagePublicIngress,
         ] {
             assert!(!Role::NetworkAdmin.can(permission));
         }

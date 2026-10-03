@@ -6,6 +6,7 @@ members = [
     "blaktail-coord",
     "blaktail-relay",
     "blaktail-gateway",
+    "blaktail-ingress",
     "blaktail-ios-wg",
     "blaktail-agentgw",
 ]

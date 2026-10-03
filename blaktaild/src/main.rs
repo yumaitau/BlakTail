@@ -87,6 +87,11 @@ enum Command {
         /// node may authorise agent requests. `--agent-gateway=false` turns it off.
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         agent_gateway: Option<bool>,
+        /// Report the `public-ingress` capability so a co-located
+        /// blaktail-ingress may fetch this organisation's public routes.
+        /// `--public-ingress=false` turns it off again.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        public_ingress: Option<bool>,
     },
     /// Resume the persisted enrollment and keep WireGuard peers synchronized.
     Run {
@@ -1214,6 +1219,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             ephemeral,
             app_connector,
             agent_gateway,
+            public_ingress,
         } => {
             let coord = coord
                 .or_else(|| operator_config.coordinator_url.clone())
@@ -1323,6 +1329,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             }
             if let Some(enabled) = agent_gateway {
                 state.agent_gateway = enabled;
+            }
+            if let Some(enabled) = public_ingress {
+                state.public_ingress = enabled;
             }
             let mut network = make_network();
             let interface_addresses = state.interface_addresses();

@@ -22,6 +22,8 @@ tested against it, so the two cannot drift silently.
 | Access policy | ✓ | ✓ | ✓ | | |
 | DNS | ✓ | ✓ | ✓ | | |
 | Private services | ✓ | ✓ | ✓ | | |
+| Public ingress: enable, publish, change, re-enable, delete | ✓ | | | | |
+| Public ingress: emergency-disable a route | ✓ | ✓ | ✓ | | |
 | Webhooks and integrations | ✓ | ✓ | | | |
 | Automation credentials (service users) | ✓ | | | | |
 | People, roles, SSO, SCIM, sign-in policy and domains | ✓ | | | | |

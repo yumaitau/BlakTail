@@ -28,7 +28,8 @@ export type Permission =
   | "manage_agent_gateway"
   | "view_agent_usage"
   | "use_remote_sessions"
-  | "manage_remote_jobs";
+  | "manage_remote_jobs"
+  | "manage_public_ingress";
 
 const NETWORK_WRITE: readonly Permission[] = [
   "manage_peers",
@@ -55,6 +56,7 @@ export const PERMISSION_MATRIX: Readonly<Record<OrgRole, readonly Permission[]>>
     "view_agent_usage",
     "use_remote_sessions",
     "manage_remote_jobs",
+    "manage_public_ingress",
   ],
   admin: [
     "view_network",
@@ -103,6 +105,7 @@ const PERMISSION_TASK: Record<Permission, string> = {
   view_agent_usage: "read AI agent usage",
   use_remote_sessions: "open browser remote sessions or request remote jobs",
   manage_remote_jobs: "define or approve remote jobs",
+  manage_public_ingress: "publish services to the Internet",
 };
 
 const HOLDERS: Record<Permission, string> = Object.fromEntries(

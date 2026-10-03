@@ -24,6 +24,7 @@ mod post_quantum;
 mod posture;
 mod posture_integrations;
 mod private_services;
+mod public_ingress;
 mod remote_access;
 mod resources;
 mod service_users;
@@ -1548,6 +1549,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(admin::api_routes())
         .merge(dns_workspace::routes())
         .merge(private_services::routes())
+        .merge(public_ingress::routes())
         .merge(topology::routes())
         .merge(change_drafts::routes())
         .merge(operations::routes())

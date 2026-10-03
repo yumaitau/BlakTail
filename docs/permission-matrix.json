@@ -17,7 +17,8 @@
     "manage_agent_gateway",
     "view_agent_usage",
     "use_remote_sessions",
-    "manage_remote_jobs"
+    "manage_remote_jobs",
+    "manage_public_ingress"
   ],
   "roles": {
     "owner": [
@@ -37,7 +38,8 @@
       "manage_agent_gateway",
       "view_agent_usage",
       "use_remote_sessions",
-      "manage_remote_jobs"
+      "manage_remote_jobs",
+      "manage_public_ingress"
     ],
     "admin": [
       "view_network",

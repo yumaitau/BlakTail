@@ -1300,6 +1300,7 @@ mod tests {
             agent_gateway: false,
             connector_routes: Vec::new(),
             remote: Default::default(),
+            public_ingress: false,
         }
     }
 

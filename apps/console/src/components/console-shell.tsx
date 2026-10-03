@@ -34,7 +34,13 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
     ],
   },
   { label: "DNS", links: [{ href: "/dns", label: "DNS" }] },
-  { label: "Services", links: [{ href: "/services", label: "Private services" }] },
+  {
+    label: "Services",
+    links: [
+      { href: "/services", label: "Private services" },
+      { href: "/ingress", label: "Public ingress" },
+    ],
+  },
   { label: "Agents", links: [{ href: "/agents", label: "Agent network" }] },
   {
     label: "Remote",
