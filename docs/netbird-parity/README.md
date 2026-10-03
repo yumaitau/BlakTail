@@ -38,20 +38,20 @@ Do not reopen or duplicate #5, #11, #12, #24, #27, #29, #31, #32, #36–#40, #43
 2. Review each issue for scope, dependencies, priority, cultural/product fit, edition/licensing, owner, and external exposure. Decide whether decision-gate issues should be posted.
 3. Fix GitHub authentication, then obtain immediate approval for the exact issue batch before submitting. Post bodies individually, verify every returned URL/title/body, and link dependencies using actual issue numbers. Do not apply labels or milestones that do not exist.
 
-## Implementation status (3 October 2026, branch `netbird-parity`)
+## Implementation status (3 October 2026, after round 2)
 
-Each draft ends with its own **Status** section listing what is done, what tests prove, and what still needs live or field proof. Summary:
+Each draft ends with its own **Status** section listing what is done, what tests prove, what the live labs on a Linux Docker host proved, and what still needs field proof. Billing and multi-tenant customer portals are out of scope by owner decision. Summary:
 
 | Draft | State |
 | --- | --- |
-| 01 navigation, 02 topology, 03 change drafts | Built and tested; browser/accessibility tests and Postgres-specific publish races not yet run |
-| 04 resources, 05 routing, 26 IPAM, 06 connectors | Built and tested, including router-side forwarding enforcement and persisted exit-node choice; no two-site, router or connector field run yet |
-| 07 explain and SSH, 08 posture | Built and tested; Linux only enforces port/SSH rules, real sshd and two-node checks not run; MDM/EDR adapters are design only (ADR 0005) |
-| 09 DNS, 10 private services | DNS built and tested; services reach certificate issuance, but no serving-agent listener exists yet |
-| 12 peer lifecycle, 16 enrolment | Built and tested; `--join-key` argument removed (stdin or `BLAKTAIL_JOIN_KEY` only) |
-| 13 browser access, 11 public ingress, 24 agent network, 25 post-quantum | Decision records only (ADRs 0006–0009); proposed, awaiting owner sign-off |
-| 14 roles, 15 sign-in | Built and tested, including Postgres; SCIM group-to-role mapping not built |
-| 17 audit and traffic, 18 notifications, 22 API and IaC | Built and tested; no agent sends traffic data yet; Terraform example validated, not applied |
-| 19 clients, 20 profiles, 21 relay, 23 operations | Operator health, signed-release path, multi-relay failover, tray, WSS relay fallback and mobile relay (iPhone UDP+WSS, Android UDP) built; single-host relay, failover and WSS labs passed; no device, independent-NAT or release drill run |
+| 01 navigation, 02 topology, 03 change drafts | Built and tested; Postgres publish races proven with two replicas (no lost update); browser/accessibility tests not run |
+| 04 resources, 05 routing, 26 IPAM, 06 connectors | Built; two-site routing, router forward filter (iptables-nft and legacy), exit node, standby failover (~82 s), IPv6 subnet routes, staged renumbering and app connector proven in labs; IPv6 exit and multi-host WAN not proven |
+| 07 explain and SSH, 08 posture | Built; real OpenSSH user limits proven; userspace inbound filter on iOS/Android/Windows and pf on macOS (no device runs); EDR/MDM adapters for Intune, CrowdStrike, SentinelOne, FleetDM, Huntress tested against mocks only |
+| 09 DNS, 10 private services | Built; serving agent proven in lab (allowed client by name, denied by name and raw IP) |
+| 11 public ingress, 13 browser access, 24 agent gateway, 25 post-quantum | Built (ADRs 0006–0009 accepted); ingress, SSH/jobs, AI gateway and hybrid PQ PSK labs passed; RDP proven at protocol level only; PQ awaits independent cryptographic review |
+| 12 peer lifecycle, 16 enrolment | Built; clean Debian/Ubuntu install, enrol, restart, revoke and uninstall proven; `--join-key` argument removed |
+| 14 roles, 15 sign-in | Built, incl. SCIM group-to-role mapping and grace-period deprovisioning; real Entra/Okta clients not tested |
+| 17 audit and traffic, 18 notifications, 22 API and IaC | Built; agent traffic reporting proven in lab; email alerts proven against a mail sink; Slack/Teams mocks only |
+| 19 clients, 20 profiles, 21 relay, 23 operations | Relay through NAT, WSS-over-443 fallback and relay failover proven in labs; iPhone relay built (simulator only), Android UDP relay (not compiled here); upgrade from round 1 proven on SQLite and Postgres; no signed release cut yet |
 
-Three independent security reviews (coordinator authorisation, data-plane enforcement, console sign-in) ran after merging; every confirmed finding was fixed with a regression test.
+Security reviews ran after each round (six reviewers in total); every confirmed finding was fixed with a regression test.
