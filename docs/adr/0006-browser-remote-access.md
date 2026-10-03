@@ -176,3 +176,27 @@ omit command contents unless explicitly opted in.
   and an external review are still open.
 - Host keys are reported through a dedicated agent endpoint rather than the
   heartbeat query string.
+
+## Status (2 October 2026)
+
+**Done:** Accepted and implemented. Built in:
+- `blaktail-coord/src/remote_access.rs` (migration slot 30);
+- the `blaktail-gateway` crate;
+- the `blaktaild` sshd CA block, host-key report and remote jobs executor;
+- the console terminal, desktop, remote access and remote jobs pages.
+
+See [remote-access.md](../remote-access.md) and draft 13.
+
+**Proven by tests:**
+- The coordinator, agent and gateway suites listed in draft 13.
+- The m3-max lab: browser-style SSH `id`, refusals, revoke and suspend within 10 s, host-key mismatch failing closed, signed jobs with timeout and cancel, and RDP frames via guacd.
+
+**Still needs live/field proof or a decision:**
+- A real-browser run.
+- Windows RDP.
+- RDP certificate pinning.
+- Public TLS or NAT deployment of the gateway.
+- Postgres.
+- SCIM-driven revocation.
+- CA and job-key rotation.
+- An external review of the gateway.

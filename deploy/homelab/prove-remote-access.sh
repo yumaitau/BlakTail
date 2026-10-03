@@ -9,7 +9,8 @@
 #   - ends live sessions by revoke and by suspending the device;
 #   - swaps sshd's host key behind the agent's back: the gateway refuses it;
 #   - lets the agent report the new key: new sessions are blocked;
-#   - runs approved jobs as an unprivileged user with timeout and cancel.
+#   - runs approved jobs as an unprivileged user with timeout and cancel;
+#   - opens an RDP desktop on xrdp through guacd (set LAB_RDP=0 to skip).
 #
 # Usage: DOCKER_CONTEXT=m3-max deploy/homelab/prove-remote-access.sh
 # Everything it creates is named ${LAB_PREFIX:-rax}-* and removed on exit.
@@ -32,7 +33,7 @@ cleanup() {
     echo "KEEP_LAB set: leaving ${P}-* running" >&2
     return
   fi
-  docker rm -f -v "${P}-coord" "${P}-gw" "${P}-target" "${P}-driver" >/dev/null 2>&1 || true
+  docker rm -f -v "${P}-guacd" "${P}-coord" "${P}-gw" "${P}-target" "${P}-driver" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   if [[ -z "${KEEP_IMAGES:-}" ]]; then
     docker rmi -f "${P}-coord:lab" "${P}-gateway:lab" >/dev/null 2>&1 || true
@@ -166,7 +167,7 @@ docker exec "${P}-gw" wg set blaktail0 listen-port "$LISTEN_PORT"
 docker exec "${P}-target" wg set blaktail0 listen-port "$LISTEN_PORT"
 docker exec -d "${P}-gw" blaktail-gateway --coord https://coord:8443 --coord-ca /certs/ca.crt \
   --state-dir /var/lib/blaktail --listen 0.0.0.0:8443 --allowed-origin https://console.invalid \
-  --tls-cert /certs/gateway.crt --tls-key /certs/gateway.key
+  --tls-cert /certs/gateway.crt --tls-key /certs/gateway.key --guacd 127.0.0.1:4822
 
 step "policy, gateway and readiness"
 drive configure "$org"
@@ -181,6 +182,21 @@ drive suspend-live "$org"
 
 step "remote jobs"
 drive jobs "$org"
+
+if [[ "${LAB_RDP:-1}" != 0 ]]; then
+  step "RDP through guacd to xrdp"
+  docker exec "${P}-target" sh -ceu '
+    apt-get install -y -qq --no-install-recommends xrdp xorgxrdp xterm dbus-x11 >/dev/null
+    printf "deploy:lab-rdp-pass\n" | chpasswd
+    printf "exec xterm\n" > /home/deploy/.xsession && chown deploy /home/deploy/.xsession
+    mkdir -p /run/xrdp && chown xrdp /run/xrdp 2>/dev/null || true
+    /usr/sbin/xrdp-sesman && /usr/sbin/xrdp
+  '
+  # guacd shares the gateway node's network namespace, so it dials over the overlay.
+  docker run -d --name "${P}-guacd" --network "container:${P}-gw" guacamole/guacd:1.5.5 >/dev/null
+  sleep 3
+  drive rdp "$org"
+fi
 
 step "host key swapped behind the agent's back"
 docker exec "${P}-target" sh -ceu '

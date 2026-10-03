@@ -179,8 +179,9 @@ upload, download, drive and printing are disabled.
 
 Limits: the RDP server certificate is not pinned (`ignore-cert`); the device's
 identity rests on its WireGuard-authenticated overlay address. The device's
-own Windows or xrdp sign-in is enforced. No RDP target has been tested in the
-lab yet (see the status below).
+own Windows or xrdp sign-in is enforced. The lab proved the path to xrdp at
+the protocol level (desktop image instructions reached the client); it has
+not been checked visually in a browser or against Windows.
 
 ## Remote jobs
 
@@ -217,6 +218,54 @@ only.
 ## Live lab proof
 
 `deploy/homelab/prove-remote-access.sh` (run with
-`DOCKER_CONTEXT=m3-max`) builds the coordinator and gateway images from
-tracked sources and proves the SSH and job paths on real containers. Results
-are recorded below.
+`DOCKER_CONTEXT=m3-max`) builds the coordinator image and
+`deploy/docker/gateway.Dockerfile` from tracked sources and runs a
+coordinator, a gateway node (blaktaild, blaktail-gateway, guacd sidecar) and a
+Linux target (blaktaild, OpenSSH with the opt-in drop-in and CA, xrdp) on one
+Docker network, with kernel WireGuard between the nodes. A Node 22 driver
+signs console assertions like the console and opens the gateway WebSocket
+like the browser terminal.
+
+Run on 3 October 2026 (m3-max, Linux containers), commit `d05f493` plus the
+lab script changes recorded with these docs. Summarised output:
+
+```
+ok target ready: capabilities=acl-filter,forward-filter,magicdns,remote-jobs,remote-ssh-ca,ssh-users,wireguard
+Match Address 100.64.0.1,fda4:…::1      # gateway only
+    TrustedUserCAKeys /var/lib/blaktail/ssh_user_ca.pub
+== browser SSH session
+ok browser session ran id: uid=1000(deploy) gid=1000(deploy) groups=1000(deploy)
+ok reused ticket refused by the coordinator
+ok member refused (403)
+ok OS user outside the SSH rule refused: no SSH rule lets the gateway log in to this device as root
+ok live session ended 10.0s after revoke (reason revoked)
+ok live session ended 10.0s after the device was suspended (policy: the device is suspended)
+ok suspended device refused: the device is suspended
+== remote jobs
+ok shell template refused
+ok approved job ran as the unprivileged user: uid=1001(jobrunner) gid=1001(jobrunner) groups=1001(jobrunner)
+ok job killed at its 2 s timeout (timed_out)
+ok running job cancelled from the console
+ok audit chain intact over 34 events
+== RDP through guacd to xrdp
+ok RDP desktop drawn through guacd: {"size":5,"img":5,"blob":5,"cursor":4,"sync":5,…}
+== host key swapped behind the agent's back
+ok host key mismatch failed closed before login and was audited
+== agent reports the new key
+ok changed host key blocks new sessions: this device reported a new SSH host key; an administrator must acknowledge it
+== gateway logs carry no terminal content
+remote_access_proof passed
+```
+
+sshd logged each login as `Accepted certificate ID
+"blaktail-session:<session>:<person>" … via /var/lib/blaktail/ssh_user_ca.pub`.
+Two defects found by the lab were fixed before the passing run: sshd has no
+`AuthorizedPrincipalsFile none` value (the drop-in now relies on the built-in
+mapping and checks no other principals source is set), and job privileges
+were dropped in the wrong order (setgroups after setuid). `cargo clippy
+--workspace --all-targets -D warnings` and the agent and gateway tests also
+pass on Linux.
+
+Not proven by the lab: a real browser (xterm.js and Guacamole rendering,
+keyboard focus, tab-close behaviour), Windows RDP targets, TLS through a
+public proxy, gateway behaviour across NAT or relay paths, and Postgres.

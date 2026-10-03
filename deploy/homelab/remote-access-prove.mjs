@@ -110,7 +110,7 @@ async function configure(orgId) {
         defaults: "deny",
         groups: { crew: [OWNER] },
         rules: [
-          { action: "allow", src_groups: ["crew"], dst_groups: ["crew"], dst_ports: ["22"], protocols: ["tcp"] },
+          { action: "allow", src_groups: ["crew"], dst_groups: ["crew"], dst_ports: ["22", "3389"], protocols: ["tcp"] },
         ],
         ssh: [{ action: "allow", src_groups: ["crew"], dst_groups: ["crew"], users: ["deploy"] }],
       },
@@ -293,7 +293,7 @@ async function expectMismatch(orgId) {
 }
 
 async function expectPending(orgId) {
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     const refused = await issue(orgId);
     if (refused.status === 409 && String(refused.body.error).includes("new SSH host key")) {
@@ -301,9 +301,13 @@ async function expectPending(orgId) {
       return;
     }
     if (refused.status === 201) {
-      // Not yet reported; let that ticket lapse.
-      await sleep(61_000);
-      continue;
+      // Not reported yet: withdraw that ticket and try again.
+      await api("POST", `/v1/orgs/${orgId}/remote-access/sessions/${refused.body.session_id}/revoke`, {
+        orgId,
+        sub: "lab-admin",
+        role: "admin",
+        body: {},
+      });
     }
     await sleep(3000);
   }
@@ -381,6 +385,61 @@ async function jobs(orgId) {
   console.log(`ok audit chain intact over ${verify.chained_events} events`);
 }
 
+async function rdp(orgId) {
+  const target = await nodeByName(orgId, "lab-target");
+  const issued = must(
+    await api("POST", `/v1/orgs/${orgId}/remote-access/sessions`, {
+      orgId,
+      sub: "lab-admin",
+      role: "admin",
+      body: { kind: "rdp", target_node_id: target.id, os_user: "deploy", reason: "remote desktop lab proof" },
+    }),
+    201,
+    "issue rdp session",
+  );
+  const result = await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${issued.gateway_url}/v1/session`);
+    const opcodes = new Map();
+    const statuses = [];
+    let syncs = 0;
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error(`rdp timed out: ${JSON.stringify(statuses)} ${JSON.stringify([...opcodes])}`));
+    }, 90_000);
+    ws.onopen = () =>
+      ws.send(JSON.stringify({ ticket: issued.ticket, password: "lab-rdp-pass", width: 1024, height: 768, dpi: 96 }));
+    ws.onmessage = (event) => {
+      const data = String(event.data);
+      if (data.startsWith("{")) {
+        statuses.push(JSON.parse(data));
+        return;
+      }
+      for (const match of data.matchAll(/(?:^|;)\d+\.([a-z]+)/g)) {
+        opcodes.set(match[1], (opcodes.get(match[1]) ?? 0) + 1);
+      }
+      for (const match of data.matchAll(/(?:^|;)4\.sync,\d+\.(\d+)/g)) {
+        syncs += 1;
+        ws.send(`4.sync,${match[1].length}.${match[1]};`);
+      }
+      if ((opcodes.get("img") ?? 0) + (opcodes.get("png") ?? 0) > 0 && syncs >= 3) {
+        ws.send("10.disconnect;");
+        ws.close();
+      }
+    };
+    ws.onclose = () => {
+      clearTimeout(timer);
+      resolve({ statuses, opcodes: Object.fromEntries(opcodes) });
+    };
+  });
+  const connected = result.statuses.some((status) => status.state === "connected");
+  const drawn = (result.opcodes.img ?? 0) + (result.opcodes.png ?? 0);
+  if (!connected || drawn === 0) throw new Error(`no desktop frames: ${JSON.stringify(result)}`);
+  console.log(`ok RDP desktop drawn through guacd: ${JSON.stringify(result.opcodes)}`);
+  const sessions = must(await api("GET", `/v1/orgs/${orgId}/remote-access/sessions`, { orgId }), 200, "sessions");
+  const row = sessions.find((session) => session.id === issued.session_id);
+  console.log(`ok RDP session recorded: status=${row.status} bytes_from_target=${row.bytes_from_target}`);
+}
+
 const [command, orgId] = process.argv.slice(2);
 const commands = {
   bootstrap,
@@ -393,6 +452,7 @@ const commands = {
   "expect-mismatch": () => expectMismatch(orgId),
   "expect-pending": () => expectPending(orgId),
   jobs: () => jobs(orgId),
+  rdp: () => rdp(orgId),
 };
 if (!commands[command]) {
   console.error(`usage: remote-access-prove.mjs <${Object.keys(commands).join("|")}> [orgId]`);

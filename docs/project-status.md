@@ -73,7 +73,7 @@ See [console.md](console.md).
 - Opt-in browser SSH through an onshore gateway node (single-use tickets,
   session certificates, pinned host keys, revoke within 10 seconds) and
   owner-approved argv-only remote jobs ([remote-access.md](remote-access.md));
-  RDP through guacd is built but not yet lab-proven
+  RDP through guacd is lab-proven to xrdp at the protocol level only
 - Prometheus metrics and an actor-attributed, paged, filterable audit log with
   audited export and a per-organisation hash chain (tamper-evident, not
   tamper-proof)
