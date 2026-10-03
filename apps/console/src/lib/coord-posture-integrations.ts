@@ -33,13 +33,14 @@ export type PostureIntegration = {
   kind: ProviderKind;
   provider: string;
   name: string;
-  config: ProviderConfig;
+  /** Configuration and credential metadata come only to security managers. */
+  config?: ProviderConfig;
   /** A short hash so rotations are visible. The secret itself is write-only. */
-  secret_fingerprint: string;
+  secret_fingerprint?: string;
   interval_secs: number;
   enabled: boolean;
   privacy_acknowledged_at: number;
-  privacy_acknowledged_by: string;
+  privacy_acknowledged_by?: string;
   created_at: number;
   updated_at: number;
   next_sync_at: number;
@@ -51,6 +52,10 @@ export type PostureIntegration = {
   provider_devices: number;
   matched_devices: number;
   ambiguous_devices: number;
+  /** Devices whose provider record a device that reported first keeps. */
+  contested_devices: number;
+  /** Devices whose changed hardware identifiers await approval. */
+  identity_changes_pending: number;
   unmatched_devices: number;
   unmatched_records: number;
   referenced_by: string[];
@@ -73,6 +78,8 @@ export type SyncReport = {
 export type DeviceMatch =
   | { state: "unmatched" }
   | { state: "ambiguous"; candidates: number }
+  | { state: "identity_changed" }
+  | { state: "contested" }
   | {
       state: "matched";
       external_id: string;
@@ -157,4 +164,9 @@ export function deletePostureIntegration(ctx: ConsoleContext, id: string): Promi
 
 export function syncPostureIntegration(ctx: ConsoleContext, id: string): Promise<SyncReport> {
   return request(ctx, `/${encodeURIComponent(id)}/sync`, { method: "POST" });
+}
+
+/** Accepts a device's changed serial number or MAC addresses as its new pins. */
+export function approveDeviceHardware(ctx: ConsoleContext, nodeId: string): Promise<void> {
+  return request(ctx, `/devices/${encodeURIComponent(nodeId)}/approve-hardware`, { method: "POST" });
 }

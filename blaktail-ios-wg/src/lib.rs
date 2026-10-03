@@ -376,10 +376,26 @@ pub unsafe extern "C" fn blaktail_tunnel_decapsulate(
                 let public = peer.public_key;
                 let result = peer.tunn.decapsulate(None, packet, output);
                 if !matches!(result, TunnResult::Err(_)) {
+                    let source_allowed = match &result {
+                        TunnResult::WriteToTunnelV4(_, source) => {
+                            peer.allowed.iter().any(|cidr| cidr.contains_v4(*source))
+                        }
+                        TunnResult::WriteToTunnelV6(_, source) => {
+                            peer.allowed.iter().any(|cidr| cidr.contains_v6(*source))
+                        }
+                        _ => true,
+                    };
                     if let TunnResult::WriteToTunnelV4(plain, _)
                     | TunnResult::WriteToTunnelV6(plain, _) = &result
                     {
                         peer.last_handshake_unix = unix_now();
+                        // boringtun's Tunn leaves the AllowedIPs source check
+                        // to the caller: a peer may only speak from its own
+                        // addresses, or it could pose as another peer to the
+                        // inbound filter below.
+                        if !source_allowed {
+                            return RESULT_DONE;
+                        }
                         // Inbound policy sits between decrypt and the tunnel
                         // device; a dropped packet reports nothing to write.
                         if !filter.inbound_now(plain) {
@@ -467,12 +483,108 @@ mod tests {
     use super::*;
 
     fn ipv4_packet(dest: [u8; 4]) -> Vec<u8> {
+        ipv4_packet_from([100, 64, 0, 1], dest)
+    }
+
+    fn ipv4_packet_from(source: [u8; 4], dest: [u8; 4]) -> Vec<u8> {
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
         packet[2] = 0;
         packet[3] = 20;
+        packet[12..16].copy_from_slice(&source);
         packet[16..20].copy_from_slice(&dest);
         packet
+    }
+
+    fn encap(tunnel: *mut BlakTailTunnel, packet: &[u8]) -> (i32, Vec<u8>) {
+        let mut out = vec![0u8; 512];
+        let mut len = 0usize;
+        let mut peer = [0u8; 32];
+        let code = unsafe {
+            blaktail_tunnel_encapsulate(
+                tunnel,
+                packet.as_ptr(),
+                packet.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut len,
+                peer.as_mut_ptr(),
+            )
+        };
+        out.truncate(len);
+        (code, out)
+    }
+
+    fn decap(tunnel: *mut BlakTailTunnel, packet: &[u8]) -> (i32, Vec<u8>) {
+        let mut out = vec![0u8; 512];
+        let mut len = 0usize;
+        let mut peer = [0u8; 32];
+        let code = unsafe {
+            blaktail_tunnel_decapsulate(
+                tunnel,
+                packet.as_ptr(),
+                packet.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut len,
+                peer.as_mut_ptr(),
+            )
+        };
+        out.truncate(len);
+        (code, out)
+    }
+
+    #[test]
+    fn decapsulate_drops_inner_source_outside_peer_allowed_ips() {
+        // Alice is 100.64.0.1; Bob's allowed IPs for her are 100.64.0.1/32.
+        // A packet from Alice claiming to be 100.64.0.3 (another peer) must
+        // not reach Bob's filter or tunnel device.
+        let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let alice = unsafe { blaktail_tunnel_create(alice_secret.to_bytes().as_ptr()) };
+        let bob = unsafe { blaktail_tunnel_create(bob_secret.to_bytes().as_ptr()) };
+        let to_bob = std::ffi::CString::new("100.64.0.2/32").unwrap();
+        let from_alice = std::ffi::CString::new("100.64.0.1/32").unwrap();
+        unsafe {
+            blaktail_tunnel_add_peer(
+                alice,
+                PublicKey::from(&bob_secret).as_bytes().as_ptr(),
+                to_bob.as_ptr(),
+                0,
+            );
+            blaktail_tunnel_add_peer(
+                bob,
+                PublicKey::from(&alice_secret).as_bytes().as_ptr(),
+                from_alice.as_ptr(),
+                0,
+            );
+        }
+        let honest = ipv4_packet_from([100, 64, 0, 1], [100, 64, 0, 2]);
+        let (code, initiation) = encap(alice, &honest);
+        assert_eq!(code, RESULT_WRITE_NETWORK);
+        let (code, response) = decap(bob, &initiation);
+        assert_eq!(code, RESULT_WRITE_NETWORK);
+        let (code, keepalive) = decap(alice, &response);
+        assert_eq!(code, RESULT_WRITE_NETWORK);
+        assert_eq!(decap(bob, &keepalive).0, RESULT_DONE);
+
+        let spoofed = ipv4_packet_from([100, 64, 0, 3], [100, 64, 0, 2]);
+        let (code, sealed) = encap(alice, &spoofed);
+        assert_eq!(code, RESULT_WRITE_NETWORK);
+        let (code, plain) = decap(bob, &sealed);
+        assert_eq!(code, RESULT_DONE);
+        assert!(plain.is_empty());
+
+        let (code, sealed) = encap(alice, &honest);
+        assert_eq!(code, RESULT_WRITE_NETWORK);
+        let (code, plain) = decap(bob, &sealed);
+        assert_eq!(code, RESULT_WRITE_TUNNEL);
+        assert_eq!(plain, honest);
+
+        unsafe {
+            blaktail_tunnel_free(alice);
+            blaktail_tunnel_free(bob);
+        }
     }
 
     #[test]

@@ -4,10 +4,15 @@
 //! is `prefer` or `require` run a small key exchange *inside* their existing
 //! WireGuard tunnel, so the classical WireGuard session authenticates it. The
 //! exchange combines a fresh ML-KEM-768 encapsulation (RustCrypto `ml-kem`)
-//! with a fresh X25519 exchange; HKDF-SHA256 over both shared secrets, keyed
-//! by a transcript hash that binds both WireGuard public keys and an epoch
-//! counter, yields the 32-byte WireGuard preshared key for that peer. Nothing
-//! here is a new KEM or handshake; the PSK is only mixed into WireGuard's own.
+//! with a fresh X25519 exchange; HKDF-SHA256 over both shared secrets and the
+//! peers' static X25519 agreement (each side's WireGuard private key with the
+//! other's WireGuard public key), keyed by a transcript hash that binds both
+//! WireGuard public keys and an epoch counter, yields the 32-byte WireGuard
+//! preshared key for that peer. The static agreement authenticates the
+//! exchange end to end: a local process that squats the listener port, or
+//! anything else without the WireGuard private key, cannot produce a valid
+//! key confirmation. Nothing here is a new KEM or handshake; the PSK is only
+//! mixed into WireGuard's own.
 //!
 //! Limits, stated plainly: WireGuard authentication stays classical
 //! (Curve25519), the coordinator never sees or relays a PSK, and this layer
@@ -34,7 +39,7 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
 use uuid::Uuid;
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 /// Capability token both peers must advertise before an exchange is tried.
@@ -54,11 +59,14 @@ pub const PSK_LIFETIME_SECS: u64 = 600;
 pub const STALE_REVERT_SECS: u64 = 200;
 /// Setting this to `1` makes the agent stop advertising [`CAPABILITY`].
 pub const DISABLE_ENV: &str = "BLAKTAIL_DISABLE_PQ_PSK";
-/// iptables chain (raw table) holding per-peer blocks under `require`.
+/// iptables chain holding per-peer blocks under `require`. It lives in the
+/// mangle table, after connection tracking, so replies can be told apart
+/// from new connections.
 pub const BLOCK_CHAIN: &str = "BLAKTAIL-PQ";
+const BLOCK_TABLE: &str = "mangle";
 
-const VERSION: u8 = 1;
-const LABEL: &[u8] = b"blaktail pq-psk v1";
+const VERSION: u8 = 2;
+const LABEL: &[u8] = b"blaktail pq-psk v2";
 const MAX_LINE: u64 = 8 * 1024;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_SECS: u64 = 10;
@@ -210,22 +218,49 @@ pub fn transcript(
     hash.finalize().into()
 }
 
-/// HKDF-SHA256(salt = transcript, ikm = ML-KEM secret || X25519 secret).
-/// Returns the WireGuard PSK and a separate key-confirmation key.
+/// Reads the WireGuard private key file `ensure_private_key` maintains.
+pub fn read_private_key(path: &Path) -> Option<StaticSecret> {
+    let encoded = Zeroizing::new(std::fs::read_to_string(path).ok()?);
+    let bytes = Zeroizing::new(STANDARD.decode(encoded.trim()).ok()?);
+    let raw: [u8; 32] = bytes.as_slice().try_into().ok()?;
+    Some(StaticSecret::from(raw))
+}
+
+/// X25519 of this node's WireGuard private key with the peer's WireGuard
+/// public key. Both sides compute the same value; only holders of one of
+/// the two private keys can.
+pub fn static_agreement(
+    own: &StaticSecret,
+    peer: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, PqError> {
+    let shared = own.diffie_hellman(&PublicKey::from(*peer));
+    if !shared.was_contributory() {
+        return Err(PqError::WeakDh);
+    }
+    Ok(Zeroizing::new(shared.to_bytes()))
+}
+
+/// HKDF-SHA256(salt = transcript, ikm = ML-KEM secret || X25519 secret ||
+/// static agreement). Returns the WireGuard PSK and a separate
+/// key-confirmation key.
 pub fn derive(
     mlkem_secret: &[u8],
     x25519_secret: &[u8],
+    static_secret: &[u8; 32],
     transcript: &[u8; 32],
 ) -> (Psk, Zeroizing<[u8; 32]>) {
-    let mut ikm = Zeroizing::new(Vec::with_capacity(mlkem_secret.len() + x25519_secret.len()));
+    let mut ikm = Zeroizing::new(Vec::with_capacity(
+        mlkem_secret.len() + x25519_secret.len() + static_secret.len(),
+    ));
     ikm.extend_from_slice(mlkem_secret);
     ikm.extend_from_slice(x25519_secret);
+    ikm.extend_from_slice(static_secret);
     let hkdf = Hkdf::<Sha256>::new(Some(transcript), &ikm);
     let mut psk = Zeroizing::new([0u8; 32]);
     let mut confirm = Zeroizing::new([0u8; 32]);
-    hkdf.expand(b"blaktail pq-psk v1 wireguard psk", psk.as_mut())
+    hkdf.expand(b"blaktail pq-psk v2 wireguard psk", psk.as_mut())
         .expect("32 bytes is a valid HKDF-SHA256 length");
-    hkdf.expand(b"blaktail pq-psk v1 key confirmation", confirm.as_mut())
+    hkdf.expand(b"blaktail pq-psk v2 key confirmation", confirm.as_mut())
         .expect("32 bytes is a valid HKDF-SHA256 length");
     (Psk(psk), confirm)
 }
@@ -279,6 +314,7 @@ pub struct Initiator {
     epoch: u64,
     own: [u8; 32],
     peer: [u8; 32],
+    static_secret: Zeroizing<[u8; 32]>,
     x25519: EphemeralSecret,
     x25519_public: [u8; 32],
     dk: <MlKem768 as Kem>::DecapsulationKey,
@@ -286,9 +322,11 @@ pub struct Initiator {
 }
 
 /// Starts an exchange from `own` (the lower WireGuard key) to `peer`.
+/// `static_secret` is [`static_agreement`] for the pair.
 pub fn initiate(
     own: &[u8; 32],
     peer: &[u8; 32],
+    static_secret: &[u8; 32],
     epoch: u64,
 ) -> Result<(Initiator, Message), PqError> {
     if own >= peer {
@@ -311,6 +349,7 @@ pub fn initiate(
             epoch,
             own: *own,
             peer: *peer,
+            static_secret: Zeroizing::new(*static_secret),
             x25519,
             x25519_public,
             dk,
@@ -380,7 +419,7 @@ impl Initiator {
             &responder_x25519,
             &ct_bytes,
         );
-        let (psk, confirm_key) = derive(&kem_secret, dh.as_bytes(), &th);
+        let (psk, confirm_key) = derive(&kem_secret, dh.as_bytes(), &self.static_secret, &th);
         confirm_tag(&confirm_key, b"responder", &th)
             .verify_slice(&confirm)
             .map_err(|_| PqError::Confirmation)?;
@@ -423,10 +462,11 @@ fn reject(reason: &str, last_epoch: u64) -> Message {
 
 /// Answers an `Init` from `peer` (which must hold the lower key). `last_epoch`
 /// is the newest epoch this side accepted for the pair; anything not newer is
-/// a replay and is refused.
+/// a replay and is refused. `static_secret` is [`static_agreement`].
 pub fn respond(
     own: &[u8; 32],
     peer: &[u8; 32],
+    static_secret: &[u8; 32],
     last_epoch: u64,
     init: &Message,
 ) -> Result<(Responder, Message), PqError> {
@@ -482,7 +522,7 @@ pub fn respond(
         &responder_x25519,
         &ct_bytes,
     );
-    let (psk, confirm_key) = derive(&kem_secret, dh.as_bytes(), &th);
+    let (psk, confirm_key) = derive(&kem_secret, dh.as_bytes(), static_secret, &th);
     let tag = confirm_tag(&confirm_key, b"responder", &th)
         .finalize()
         .into_bytes();
@@ -572,11 +612,12 @@ pub async fn run_initiator<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     own: &[u8; 32],
     peer: &[u8; 32],
+    static_secret: &[u8; 32],
     epoch: u64,
 ) -> Result<(u64, Psk), PqError> {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = tokio::io::BufReader::new(read);
-    let (state, init) = initiate(own, peer, epoch)?;
+    let (state, init) = initiate(own, peer, static_secret, epoch)?;
     send(&mut write, &init).await?;
     let response = recv(&mut read).await?;
     let (psk, confirm) = state.finish(&response)?;
@@ -597,6 +638,7 @@ pub async fn run_initiator<S: AsyncRead + AsyncWrite + Unpin>(
 pub struct ResponderContext {
     pub own: [u8; 32],
     pub peer: [u8; 32],
+    pub static_secret: Zeroizing<[u8; 32]>,
     pub last_epoch: u64,
 }
 
@@ -614,8 +656,13 @@ where
     let (read, mut write) = tokio::io::split(stream);
     let mut read = tokio::io::BufReader::new(read);
     let init = recv(&mut read).await?;
-    let (pending, response) = match respond(&context.own, &context.peer, context.last_epoch, &init)
-    {
+    let (pending, response) = match respond(
+        &context.own,
+        &context.peer,
+        &context.static_secret,
+        context.last_epoch,
+        &init,
+    ) {
         Ok(ok) => ok,
         Err(error) => {
             let reason = match &error {
@@ -839,13 +886,16 @@ impl WgCommandDevice {
 
     pub fn clear_blocks() {
         for bin in ["iptables", "ip6tables"] {
-            for hook in ["PREROUTING", "OUTPUT"] {
-                for _ in 0..4 {
-                    let _ = Self::iptables(bin, &["-t", "raw", "-D", hook, "-j", BLOCK_CHAIN]);
+            // `raw` held the chain in earlier releases; clear it there too.
+            for table in ["raw", BLOCK_TABLE] {
+                for hook in ["PREROUTING", "OUTPUT"] {
+                    for _ in 0..4 {
+                        let _ = Self::iptables(bin, &["-t", table, "-D", hook, "-j", BLOCK_CHAIN]);
+                    }
                 }
+                let _ = Self::iptables(bin, &["-t", table, "-F", BLOCK_CHAIN]);
+                let _ = Self::iptables(bin, &["-t", table, "-X", BLOCK_CHAIN]);
             }
-            let _ = Self::iptables(bin, &["-t", "raw", "-F", BLOCK_CHAIN]);
-            let _ = Self::iptables(bin, &["-t", "raw", "-X", BLOCK_CHAIN]);
         }
     }
 }
@@ -877,13 +927,16 @@ impl PskDevice for WgCommandDevice {
         }
         let plan = block_rules(blocked);
         for (bin, rules) in [("iptables", &plan.ipv4), ("ip6tables", &plan.ipv6)] {
-            Self::iptables(bin, &["-t", "raw", "-N", BLOCK_CHAIN])?;
+            Self::iptables(bin, &["-t", BLOCK_TABLE, "-N", BLOCK_CHAIN])?;
             for rule in rules {
                 let args: Vec<&str> = rule.iter().map(String::as_str).collect();
                 Self::iptables(bin, &args)?;
             }
             for hook in ["PREROUTING", "OUTPUT"] {
-                Self::iptables(bin, &["-t", "raw", "-I", hook, "1", "-j", BLOCK_CHAIN])?;
+                Self::iptables(
+                    bin,
+                    &["-t", BLOCK_TABLE, "-I", hook, "1", "-j", BLOCK_CHAIN],
+                )?;
             }
         }
         Ok(true)
@@ -917,10 +970,13 @@ pub struct BlockPlan {
     pub ipv6: Vec<Vec<String>>,
 }
 
-/// raw-table rules: per blocked peer, let the exchange port through in both
-/// directions and drop everything else to or from its routes. Default routes
-/// are skipped (blocking `0.0.0.0/0` would cut the whole host off); the exit
-/// node's own agent still blocks the pair from its side.
+/// Per blocked peer, let only the exchange through and drop everything else
+/// to or from its routes. Inbound, the peer may open a connection to our
+/// listener port, and its packets from its listener port pass only as
+/// replies (conntrack ESTABLISHED) to a connection we opened; outbound
+/// mirrors that. A source or destination port of 51822 alone opens nothing.
+/// Default routes are skipped (blocking `0.0.0.0/0` would cut the whole host
+/// off); the exit node's own agent still blocks the pair from its side.
 pub fn block_rules(blocked: &[PeerPlan]) -> BlockPlan {
     let mut plan = BlockPlan::default();
     let port = PORT.to_string();
@@ -943,21 +999,35 @@ pub fn block_rules(blocked: &[PeerPlan]) -> BlockPlan {
                 &mut plan.ipv6
             };
             let base = |direction: &str, rest: &[&str]| {
-                let mut rule: Vec<String> = ["-t", "raw", "-A", BLOCK_CHAIN, direction, route]
-                    .iter()
-                    .map(|part| part.to_string())
-                    .collect();
+                let mut rule: Vec<String> =
+                    ["-t", BLOCK_TABLE, "-A", BLOCK_CHAIN, direction, route]
+                        .iter()
+                        .map(|part| part.to_string())
+                        .collect();
                 rule.extend(rest.iter().map(|part| part.to_string()));
                 rule
             };
             if host {
                 for direction in ["-s", "-d"] {
-                    for port_flag in ["--dport", "--sport"] {
-                        rules.push(base(
-                            direction,
-                            &["-p", "tcp", port_flag, &port, "-j", "RETURN"],
-                        ));
-                    }
+                    rules.push(base(
+                        direction,
+                        &["-p", "tcp", "--dport", &port, "-j", "RETURN"],
+                    ));
+                    rules.push(base(
+                        direction,
+                        &[
+                            "-p",
+                            "tcp",
+                            "--sport",
+                            &port,
+                            "-m",
+                            "conntrack",
+                            "--ctstate",
+                            "ESTABLISHED",
+                            "-j",
+                            "RETURN",
+                        ],
+                    ));
                 }
             }
             rules.push(base("-s", &["-j", "DROP"]));
@@ -1137,6 +1207,8 @@ fn save_tracks(dir: &Path, tracks: &HashMap<String, Track>) -> Result<(), Error>
 
 struct Shared {
     own: [u8; 32],
+    /// This node's WireGuard private key, for [`static_agreement`].
+    secret: Option<StaticSecret>,
     local_capable: bool,
     plans: BTreeMap<String, PeerPlan>,
     tracks: HashMap<String, Track>,
@@ -1211,12 +1283,18 @@ fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
 }
 
 impl PqRuntime {
-    pub fn new(own_key: &str, dir: &Path, device: Option<Arc<dyn PskDevice>>) -> Self {
-        Self::with_options(own_key, dir, device, locally_capable(), PORT)
+    /// `private_key` is this node's WireGuard private key; without it the
+    /// node does not take part.
+    pub fn new(
+        private_key: Option<StaticSecret>,
+        dir: &Path,
+        device: Option<Arc<dyn PskDevice>>,
+    ) -> Self {
+        Self::with_options(private_key, dir, device, locally_capable(), PORT)
     }
 
     pub fn with_options(
-        own_key: &str,
+        private_key: Option<StaticSecret>,
         dir: &Path,
         device: Option<Arc<dyn PskDevice>>,
         local_capable: bool,
@@ -1225,8 +1303,11 @@ impl PqRuntime {
         let tracks = load_tracks(dir, unix_now());
         Self {
             shared: Arc::new(Mutex::new(Shared {
-                own: decode_key(own_key).unwrap_or([0; 32]),
-                local_capable: local_capable && device.is_some(),
+                own: private_key
+                    .as_ref()
+                    .map_or([0; 32], |secret| PublicKey::from(secret).to_bytes()),
+                local_capable: local_capable && device.is_some() && private_key.is_some(),
+                secret: private_key,
                 plans: BTreeMap::new(),
                 tracks,
                 dir: dir.to_path_buf(),
@@ -1435,6 +1516,10 @@ async fn accept_one(
         ResponderContext {
             own: shared.own,
             peer: plan.raw_key,
+            static_secret: static_agreement(
+                shared.secret.as_ref().ok_or(PqError::WrongPeer)?,
+                &plan.raw_key,
+            )?,
             last_epoch: shared.tracks.get(&plan.key).map_or(0, |t| t.last_epoch),
         }
     };
@@ -1514,20 +1599,34 @@ async fn drive(shared: Arc<Mutex<Shared>>, device: Arc<dyn PskDevice>) {
                     .is_none_or(|installed| now.saturating_sub(installed.at) >= ROTATE_SECS);
                 if due && now.saturating_sub(track.last_attempt_at) >= RETRY_SECS {
                     track.last_attempt_at = now;
-                    jobs.push((plan.key.clone(), plan.raw_key, *host, track.last_epoch + 1));
+                    let Some(Ok(static_secret)) = shared
+                        .secret
+                        .as_ref()
+                        .map(|secret| static_agreement(secret, &plan.raw_key))
+                    else {
+                        track.last_error = Some(PqError::WeakDh.to_string());
+                        continue;
+                    };
+                    jobs.push((
+                        plan.key.clone(),
+                        plan.raw_key,
+                        *host,
+                        track.last_epoch + 1,
+                        static_secret,
+                    ));
                 }
             }
             shared.refresh(Some(device.as_ref()), now);
             (jobs, own, shared.port)
         };
-        for (key, peer, host, epoch) in jobs {
+        for (key, peer, host, epoch, static_secret) in jobs {
             let shared = shared.clone();
             let device = device.clone();
             tokio::spawn(async move {
                 let outcome = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
                     let stream =
                         tokio::net::TcpStream::connect(SocketAddr::new(host, port)).await?;
-                    run_initiator(stream, &own, &peer, epoch).await
+                    run_initiator(stream, &own, &peer, &static_secret, epoch).await
                 })
                 .await
                 .unwrap_or(Err(PqError::Timeout));
@@ -1580,6 +1679,66 @@ fn record_initiator_outcome(
 mod tests {
     use super::*;
 
+    /// Stand-in static agreement for protocol tests on fixed keys.
+    const STATIC: [u8; 32] = [5u8; 32];
+
+    /// Two WireGuard key pairs, the lower public key first.
+    fn ordered_secrets() -> (StaticSecret, StaticSecret) {
+        let one = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let two = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        if PublicKey::from(&one).to_bytes() < PublicKey::from(&two).to_bytes() {
+            (one, two)
+        } else {
+            (two, one)
+        }
+    }
+
+    #[test]
+    fn exchange_without_the_wireguard_private_key_fails() {
+        let (low_secret, high_secret) = ordered_secrets();
+        let low = PublicKey::from(&low_secret).to_bytes();
+        let high = PublicKey::from(&high_secret).to_bytes();
+        let ours = static_agreement(&low_secret, &high).unwrap();
+        assert_eq!(*ours, *static_agreement(&high_secret, &low).unwrap());
+
+        // A squatter on the responder's listener holds some other key: its
+        // confirmation does not verify and the initiator installs nothing.
+        let squatter = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let forged = static_agreement(&squatter, &low).unwrap();
+        let (initiator, init) = initiate(&low, &high, &ours, 1).unwrap();
+        let (_, resp) = respond(&high, &low, &forged, 0, &init).unwrap();
+        assert_eq!(initiator.finish(&resp).err(), Some(PqError::Confirmation));
+
+        // A squatting initiator is refused by the genuine responder.
+        let (impostor, init) = initiate(&low, &high, &forged, 1).unwrap();
+        let (responder, resp) = respond(&high, &low, &ours, 0, &init).unwrap();
+        assert_eq!(impostor.finish(&resp).err(), Some(PqError::Confirmation));
+        let (impostor, init) = initiate(&low, &high, &forged, 2).unwrap();
+        let (genuine, _) = respond(&high, &low, &ours, 0, &init).unwrap();
+        drop(responder);
+        let forged_confirm = Message::Confirm {
+            v: VERSION,
+            epoch: 2,
+            confirm: STANDARD.encode([0u8; 32]),
+        };
+        assert_eq!(
+            genuine.finish(&forged_confirm).err(),
+            Some(PqError::Confirmation)
+        );
+        drop(impostor);
+
+        // The genuine keys agree.
+        let (initiator, init) = initiate(&low, &high, &ours, 1).unwrap();
+        let (responder, resp) = respond(&high, &low, &ours, 0, &init).unwrap();
+        let (psk, confirm) = initiator.finish(&resp).unwrap();
+        assert_eq!(responder.finish(&confirm).unwrap(), psk);
+        // A low-order peer key gives no agreement at all.
+        assert_eq!(
+            static_agreement(&low_secret, &[0u8; 32]).err(),
+            Some(PqError::WeakDh)
+        );
+    }
+
     fn key(byte: u8) -> [u8; 32] {
         let mut key = [byte; 32];
         key[0] = byte;
@@ -1598,15 +1757,16 @@ mod tests {
         let th = |epoch, i: &[u8; 32], r: &[u8; 32]| {
             transcript(epoch, i, r, &parts.0, &parts.1, &parts.2, &parts.3)
         };
-        let (kem, dh) = ([7u8; 32], [8u8; 32]);
-        let (psk, _) = derive(&kem, &dh, &th(1, &a, &b));
-        let (swapped, _) = derive(&kem, &dh, &th(1, &b, &a));
-        let (next_epoch, _) = derive(&kem, &dh, &th(2, &a, &b));
+        let (kem, dh, st) = ([7u8; 32], [8u8; 32], [6u8; 32]);
+        let (psk, _) = derive(&kem, &dh, &st, &th(1, &a, &b));
+        let (swapped, _) = derive(&kem, &dh, &st, &th(1, &b, &a));
+        let (next_epoch, _) = derive(&kem, &dh, &st, &th(2, &a, &b));
         assert_ne!(psk, swapped, "swapping WireGuard keys must change the PSK");
         assert_ne!(psk, next_epoch, "the epoch must change the PSK");
         // Each shared secret contributes.
-        assert_ne!(psk, derive(&[9u8; 32], &dh, &th(1, &a, &b)).0);
-        assert_ne!(psk, derive(&kem, &[9u8; 32], &th(1, &a, &b)).0);
+        assert_ne!(psk, derive(&[9u8; 32], &dh, &st, &th(1, &a, &b)).0);
+        assert_ne!(psk, derive(&kem, &[9u8; 32], &st, &th(1, &a, &b)).0);
+        assert_ne!(psk, derive(&kem, &dh, &[9u8; 32], &th(1, &a, &b)).0);
         assert!(!psk.is_zero());
         assert_eq!(format!("{psk:?}"), "Psk(<redacted>)");
     }
@@ -1614,8 +1774,8 @@ mod tests {
     #[test]
     fn both_sides_agree_and_confirm() {
         let (low, high) = (key(1), key(2));
-        let (initiator, init) = initiate(&low, &high, 1).unwrap();
-        let (responder, resp) = respond(&high, &low, 0, &init).unwrap();
+        let (initiator, init) = initiate(&low, &high, &STATIC, 1).unwrap();
+        let (responder, resp) = respond(&high, &low, &STATIC, 0, &init).unwrap();
         let (initiator_psk, confirm) = initiator.finish(&resp).unwrap();
         let responder_psk = responder.finish(&confirm).unwrap();
         assert_eq!(initiator_psk, responder_psk);
@@ -1625,30 +1785,33 @@ mod tests {
     #[test]
     fn replayed_or_old_epoch_init_is_rejected() {
         let (low, high) = (key(1), key(2));
-        let (_, init) = initiate(&low, &high, 5).unwrap();
+        let (_, init) = initiate(&low, &high, &STATIC, 5).unwrap();
         assert!(matches!(
-            respond(&high, &low, 5, &init),
+            respond(&high, &low, &STATIC, 5, &init),
             Err(PqError::StaleEpoch { epoch: 5, last: 5 })
         ));
         assert!(matches!(
-            respond(&high, &low, 9, &init),
+            respond(&high, &low, &STATIC, 9, &init),
             Err(PqError::StaleEpoch { .. })
         ));
-        assert!(respond(&high, &low, 4, &init).is_ok());
+        assert!(respond(&high, &low, &STATIC, 4, &init).is_ok());
     }
 
     #[test]
     fn wrong_keys_role_and_tampering_are_refused() {
         let (low, high, other) = (key(1), key(2), key(3));
-        assert_eq!(initiate(&high, &low, 1).err(), Some(PqError::WrongRole));
-        let (_, init) = initiate(&low, &high, 1).unwrap();
+        assert_eq!(
+            initiate(&high, &low, &STATIC, 1).err(),
+            Some(PqError::WrongRole)
+        );
+        let (_, init) = initiate(&low, &high, &STATIC, 1).unwrap();
         // Init names `high` as responder; another node must refuse it.
         assert_eq!(
-            respond(&other, &low, 0, &init).err(),
+            respond(&other, &low, &STATIC, 0, &init).err(),
             Some(PqError::WrongPeer)
         );
-        let (initiator, init) = initiate(&low, &high, 1).unwrap();
-        let (_, resp) = respond(&high, &low, 0, &init).unwrap();
+        let (initiator, init) = initiate(&low, &high, &STATIC, 1).unwrap();
+        let (_, resp) = respond(&high, &low, &STATIC, 0, &init).unwrap();
         let Message::Resp {
             v,
             epoch,
@@ -1775,11 +1938,28 @@ mod tests {
     fn block_rules_keep_only_the_exchange_port_and_skip_default_routes() {
         let rules = block_rules(&[plan(PeerPq::default())]);
         let flat: Vec<String> = rules.ipv4.iter().map(|rule| rule.join(" ")).collect();
-        assert!(flat.contains(
-            &"-t raw -A BLAKTAIL-PQ -s 100.64.0.2/32 -p tcp --dport 51822 -j RETURN".to_string()
-        ));
-        assert!(flat.contains(&"-t raw -A BLAKTAIL-PQ -d 100.64.0.2/32 -j DROP".to_string()));
-        assert!(flat.contains(&"-t raw -A BLAKTAIL-PQ -s 10.9.0.0/24 -j DROP".to_string()));
+        let returns: Vec<&String> = flat
+            .iter()
+            .filter(|rule| rule.ends_with("RETURN"))
+            .collect();
+        // Inbound: new connections only to our listener; from the peer's
+        // listener port only replies. Outbound mirrors it.
+        assert_eq!(
+            returns,
+            [
+                "-t mangle -A BLAKTAIL-PQ -s 100.64.0.2/32 -p tcp --dport 51822 -j RETURN",
+                "-t mangle -A BLAKTAIL-PQ -s 100.64.0.2/32 -p tcp --sport 51822 -m conntrack --ctstate ESTABLISHED -j RETURN",
+                "-t mangle -A BLAKTAIL-PQ -d 100.64.0.2/32 -p tcp --dport 51822 -j RETURN",
+                "-t mangle -A BLAKTAIL-PQ -d 100.64.0.2/32 -p tcp --sport 51822 -m conntrack --ctstate ESTABLISHED -j RETURN",
+            ]
+        );
+        // No rule lets a bare source or destination port through
+        // regardless of state (e.g. sport 51822 to any local port).
+        assert!(!flat
+            .iter()
+            .any(|rule| rule.contains("--sport") && !rule.contains("ESTABLISHED")));
+        assert!(flat.contains(&"-t mangle -A BLAKTAIL-PQ -d 100.64.0.2/32 -j DROP".to_string()));
+        assert!(flat.contains(&"-t mangle -A BLAKTAIL-PQ -s 10.9.0.0/24 -j DROP".to_string()));
         assert!(!flat.iter().any(|rule| rule.contains("0.0.0.0/0")));
         assert!(!flat
             .iter()
@@ -1848,7 +2028,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_agents_agree_on_a_psk_in_process() {
-        let (low, high) = (key(1), key(2));
+        let (low_secret, high_secret) = ordered_secrets();
+        let low = PublicKey::from(&low_secret).to_bytes();
+        let high = PublicKey::from(&high_secret).to_bytes();
         let port = free_port();
         let require = PeerPq {
             mode: Mode::Require,
@@ -1861,14 +2043,14 @@ mod tests {
             Arc::new(FakeDevice::default()),
         );
         let mut a = PqRuntime::with_options(
-            &STANDARD.encode(low),
+            Some(low_secret),
             dir_a.path(),
             Some(dev_a.clone()),
             true,
             port,
         );
         let mut b = PqRuntime::with_options(
-            &STANDARD.encode(high),
+            Some(high_secret),
             dir_b.path(),
             Some(dev_b.clone()),
             true,
@@ -1947,21 +2129,25 @@ mod tests {
             ResponderContext {
                 own: high,
                 peer: low,
+                static_secret: Zeroizing::new(STATIC),
                 last_epoch: 0,
             },
             |_, _| Ok(()),
         ));
-        let (epoch, psk) = run_initiator(client, &low, &high, 1).await.unwrap();
+        let (epoch, psk) = run_initiator(client, &low, &high, &STATIC, 1)
+            .await
+            .unwrap();
         let (r_epoch, r_psk) = responder.await.unwrap().unwrap();
         assert_eq!((epoch, &psk), (r_epoch, &r_psk));
         // Replay epoch 1 (or older) against a responder that accepted it.
-        let (state, init) = initiate(&low, &high, 1).unwrap();
+        let (state, init) = initiate(&low, &high, &STATIC, 1).unwrap();
         let (client, server) = tokio::io::duplex(16 * 1024);
         let responder = tokio::spawn(run_responder(
             server,
             ResponderContext {
                 own: high,
                 peer: low,
+                static_secret: Zeroizing::new(STATIC),
                 last_epoch: 1,
             },
             |_, _| panic!("a replay must never install a key"),

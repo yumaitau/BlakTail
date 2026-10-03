@@ -320,6 +320,10 @@ pub struct NodeState {
     /// Operator opted this node in to serve private services that target it.
     #[serde(default)]
     pub serve_services: bool,
+    /// Loopback ports the operator allows private services to expose; a
+    /// service on any other port is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve_services_ports: Vec<u16>,
     /// Overlay TCP port for the private service listener (default 443).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_listen_port: Option<u16>,
@@ -750,6 +754,7 @@ impl Coordinator {
             remote: Default::default(),
             public_ingress: false,
             serve_services: false,
+            serve_services_ports: Vec::new(),
             service_listen_port: None,
             service_access: Vec::new(),
             service_records: Vec::new(),
@@ -3362,6 +3367,7 @@ mod tests {
             remote: Default::default(),
             public_ingress: false,
             serve_services: false,
+            serve_services_ports: Vec::new(),
             service_listen_port: None,
             service_access: Vec::new(),
             service_records: Vec::new(),
@@ -3449,6 +3455,7 @@ mod tests {
             remote: Default::default(),
             public_ingress: false,
             serve_services: false,
+            serve_services_ports: Vec::new(),
             service_listen_port: None,
             service_access: Vec::new(),
             service_records: Vec::new(),

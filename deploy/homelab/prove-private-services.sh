@@ -3,7 +3,8 @@
 # One coordinator and three privileged Linux agents on kernel WireGuard, on
 # one Docker host (default context m3-max):
 #
-#   server   tags office,ranger; `blaktaild up --serve-services`; a loopback
+#   server   tags office,ranger; `blaktaild up --serve-services
+#            --serve-services-ports 8080`; a loopback
 #            HTTP target on 127.0.0.1:8080
 #   ally     tag office (the service's access tag)
 #   outsider tag ranger (a policy peer of the server without the access tag)
@@ -122,7 +123,7 @@ for name in server ally outsider; do
 done
 echo "== enrol server (office,ranger; --serve-services), ally (office), outsider (ranger)"
 start_target
-start_agent server office,ranger --serve-services
+start_agent server office,ranger --serve-services --serve-services-ports 8080
 start_agent ally office
 start_agent outsider ranger
 for name in server ally outsider; do pin_port "$name"; done

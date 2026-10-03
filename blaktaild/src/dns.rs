@@ -1336,6 +1336,7 @@ mod tests {
             remote: Default::default(),
             public_ingress: false,
             serve_services: false,
+            serve_services_ports: Vec::new(),
             service_listen_port: None,
             service_access: Vec::new(),
             service_records: Vec::new(),

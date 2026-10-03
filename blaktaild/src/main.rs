@@ -98,6 +98,11 @@ enum Command {
         /// `--serve-services=false` stops serving and deletes the keys.
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         serve_services: Option<bool>,
+        /// Comma-separated loopback ports private services may expose, for
+        /// example `8080,3000`. A service on any other port is refused. Each
+        /// use replaces the stored list.
+        #[arg(long, value_delimiter = ',')]
+        serve_services_ports: Option<Vec<u16>>,
         /// Overlay TCP port for the private service listener (default 443).
         #[arg(long)]
         service_listen_port: Option<u16>,
@@ -457,10 +462,10 @@ async fn sync_loop(
     let mut shares: Option<ShareServer> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
     let mut connector = ConnectorRuntime::default();
-    let own_key = ensure_private_key(state_dir)
-        .map(|(_, public)| public)
-        .unwrap_or_default();
-    let mut pq = PqRuntime::new(&own_key, state_dir, network.psk_device(&state.interface));
+    let own_secret = ensure_private_key(state_dir)
+        .ok()
+        .and_then(|(path, _)| pq::read_private_key(&path));
+    let mut pq = PqRuntime::new(own_secret, state_dir, network.psk_device(&state.interface));
     let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
     let mut serving = ServiceRuntime::default();
     let mut traffic = blaktaild::traffic::Reporter::default();
@@ -1371,6 +1376,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             agent_gateway,
             public_ingress,
             serve_services,
+            serve_services_ports,
             service_listen_port,
         } => {
             let coord = coord
@@ -1488,6 +1494,16 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             }
             if let Some(enabled) = serve_services {
                 state.serve_services = enabled;
+            }
+            if let Some(mut ports) = serve_services_ports {
+                if ports.contains(&0) {
+                    return Err(blaktaild::Error::Message(
+                        "--serve-services-ports must list ports 1-65535".into(),
+                    ));
+                }
+                ports.sort_unstable();
+                ports.dedup();
+                state.serve_services_ports = ports;
             }
             if let Some(port) = service_listen_port {
                 if port == 0 {

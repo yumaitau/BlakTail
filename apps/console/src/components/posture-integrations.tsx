@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
+  approveHardwareAction,
   createIntegrationAction,
   deleteIntegrationAction,
   rotateIntegrationSecretAction,
@@ -280,6 +281,8 @@ function IntegrationCard({
           <dt>Devices</dt>
           <dd>
             {integration.matched_devices} matched · {integration.ambiguous_devices} ambiguous ·{" "}
+            {integration.contested_devices} held by an earlier device ·{" "}
+            {integration.identity_changes_pending} awaiting hardware approval ·{" "}
             {integration.unmatched_devices} BlakTail devices not found · {integration.unmatched_records} of{" "}
             {integration.provider_devices} provider records unmatched
           </dd>
@@ -293,10 +296,12 @@ function IntegrationCard({
             </dd>
           </div>
         ) : null}
-        <div>
-          <dt>Secret</dt>
-          <dd className="mono">{integration.secret_fingerprint}</dd>
-        </div>
+        {integration.secret_fingerprint ? (
+          <div>
+            <dt>Secret</dt>
+            <dd className="mono">{integration.secret_fingerprint}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Used by</dt>
           <dd>{integration.referenced_by.length ? integration.referenced_by.join(", ") : "No posture checks"}</dd>
@@ -304,7 +309,8 @@ function IntegrationCard({
         <div>
           <dt>Privacy notice acknowledged</dt>
           <dd>
-            {when(integration.privacy_acknowledged_at)} by {integration.privacy_acknowledged_by}
+            {when(integration.privacy_acknowledged_at)}
+            {integration.privacy_acknowledged_by ? ` by ${integration.privacy_acknowledged_by}` : ""}
           </dd>
         </div>
       </dl>
@@ -377,6 +383,60 @@ export function PostureIntegrations({
         {reason ? <p className="muted">{reason}</p> : null}
         <AddIntegration providers={providers} residencyNotice={residencyNotice} disabled={!canManage} />
       </div>
+    </div>
+  );
+}
+
+/** Shown on a device whose reported identifiers await approval. */
+export function ApproveHardwareButton({
+  nodeId,
+  deviceName,
+  canManage,
+  reason,
+}: {
+  nodeId: string;
+  deviceName: string;
+  canManage: boolean;
+  reason: string | null;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="stack">
+      <button
+        type="button"
+        className="secondary"
+        disabled={!canManage || pending}
+        title={canManage ? undefined : (reason ?? undefined)}
+        aria-label={`Approve new hardware identifiers for ${deviceName}`}
+        onClick={() => {
+          if (
+            !window.confirm(
+              `Approve ${deviceName}'s new serial number or MAC addresses? Only do this after a known hardware change. Another device that already holds an identifier keeps its provider match.`,
+            )
+          ) {
+            return;
+          }
+          setError(null);
+          startTransition(async () => {
+            const result = await approveHardwareAction(nodeId);
+            if (!result.ok) {
+              setError(result.error);
+              return;
+            }
+            router.refresh();
+          });
+        }}
+      >
+        {pending ? "Approving…" : "Approve hardware change"}
+      </button>
+      {!canManage && reason ? <span className="muted">{reason}</span> : null}
+      {error ? (
+        <span className="error" role="alert">
+          {error}
+        </span>
+      ) : null}
     </div>
   );
 }

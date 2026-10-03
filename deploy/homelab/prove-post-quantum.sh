@@ -160,7 +160,7 @@ until [[ "$(row a b state)" == required_not_established && "$(row a b blocked)" 
 done
 echo "ok a reports b: required_not_established, reason $(row a b reason), blocked"
 [[ "$(psk_fingerprint a)" == none ]] || fail "a kept a PSK for a non-capable peer"
-"${D[@]}" exec "$P-a" iptables -t raw -S BLAKTAIL-PQ | grep -q -- "-j DROP" || fail "no raw-table block on a"
+"${D[@]}" exec "$P-a" iptables -t mangle -S BLAKTAIL-PQ | grep -q -- "-j DROP" || fail "no mangle-table block on a"
 ping_ok a "$ip_b" && fail "traffic still flows to a required-but-unestablished peer"
 echo "ok PSK cleared, raw-table block installed, ping a -> b blocked"
 lab overview "$ORG"

@@ -609,7 +609,14 @@ fn node(n: u128, serial: Option<&str>, macs: &[&str], host: &str) -> NodeKeys {
         hostname: Some(host.into()),
         serial: serial.and_then(normalise_serial),
         macs: macs.iter().filter_map(|m| normalise_mac(m)).collect(),
+        pinned_at: None,
+        pending: false,
     }
+}
+
+fn pinned(mut keys: NodeKeys, at: i64) -> NodeKeys {
+    keys.pinned_at = Some(at);
+    keys
 }
 
 fn signal(id: &str, serial: Option<&str>, macs: &[&str], host: &str) -> StoredSignal {
@@ -698,7 +705,8 @@ fn ambiguous_matches_fail_for_every_claimant() {
         match_devices(&nodes, &signals, false)[&Uuid::from_u128(1)],
         DeviceMatch::Ambiguous { candidates: 2 }
     );
-    // A second device copies the serial: neither inherits the signal.
+    // A second device copies the serial and neither has a pin time: neither
+    // inherits the signal.
     let nodes = [
         node(1, Some("C02XK1ABCD"), &[], "laptop"),
         node(2, Some("C02XK1ABCD"), &[], "impostor"),
@@ -706,6 +714,48 @@ fn ambiguous_matches_fail_for_every_claimant() {
     let signals = [signal("a", Some("C02XK1ABCD"), &[], "laptop")];
     let result = match_devices(&nodes, &signals, false);
     assert!(result
+        .values()
+        .all(|m| *m == DeviceMatch::Ambiguous { candidates: 2 }));
+}
+
+#[test]
+fn first_device_to_pin_identifiers_keeps_a_contested_record() {
+    let signals = [signal("a", Some("C02XK1ABCD"), &[], "laptop")];
+    // The impostor copied the serial after the owner pinned it.
+    let nodes = [
+        pinned(node(1, Some("C02XK1ABCD"), &[], "laptop"), 100),
+        pinned(node(2, Some("C02XK1ABCD"), &[], "impostor"), 200),
+    ];
+    let result = match_devices(&nodes, &signals, false);
+    assert!(matches!(
+        &result[&Uuid::from_u128(1)],
+        DeviceMatch::Matched { external_id, .. } if external_id == "a"
+    ));
+    assert_eq!(result[&Uuid::from_u128(2)], DeviceMatch::Contested);
+    // A claim by MAC against a record already held by serial loses too, and
+    // a device that never pinned ranks after one that did.
+    let signals = [signal(
+        "a",
+        Some("C02XK1ABCD"),
+        &["3c:22:fb:11:22:33"],
+        "laptop",
+    )];
+    let nodes = [
+        node(2, None, &["3c:22:fb:11:22:33"], "impostor"),
+        pinned(node(1, Some("C02XK1ABCD"), &[], "laptop"), 300),
+    ];
+    let result = match_devices(&nodes, &signals, false);
+    assert!(matches!(
+        &result[&Uuid::from_u128(1)],
+        DeviceMatch::Matched { .. }
+    ));
+    assert_eq!(result[&Uuid::from_u128(2)], DeviceMatch::Contested);
+    // Equal pin times have no first reporter: both stay ambiguous.
+    let nodes = [
+        pinned(node(1, Some("C02XK1ABCD"), &[], "laptop"), 100),
+        pinned(node(2, Some("C02XK1ABCD"), &[], "impostor"), 100),
+    ];
+    assert!(match_devices(&nodes, &signals, false)
         .values()
         .all(|m| *m == DeviceMatch::Ambiguous { candidates: 2 }));
 }
@@ -771,6 +821,13 @@ fn assessment_is_closed_by_default_and_open_only_when_configured() {
         .passed
     );
     assert!(!assess(&strict, None, 1_100).passed);
+    let changed = assess(
+        &strict,
+        Some(&fact(DeviceMatch::IdentityChanged, None)),
+        1_100,
+    );
+    assert!(!changed.passed && changed.reason.contains("approves"));
+    assert!(!assess(&strict, Some(&fact(DeviceMatch::Contested, None)), 1_100).passed);
     // Stale data during an outage fails closed by default.
     let outage = fact(matched(true, 1_000, None), Some(1_200));
     let closed = assess(&strict, Some(&outage), 5_000);

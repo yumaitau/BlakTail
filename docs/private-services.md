@@ -59,12 +59,21 @@ checks, not a probe from a client device.
 ## Serving a service (target device)
 
 ```sh
-sudo blaktaild up --coord https://coord.example --serve-services
+sudo blaktaild up --coord https://coord.example --serve-services --serve-services-ports 8080
 # optional: --service-listen-port 8443 (default 443)
 ```
 
-The choice is recorded in the agent state (`serve_services`), reported as the
-`service-serving` capability, and survives `blaktaild run`.
+The choice is recorded in the agent state (`serve_services`,
+`serve_services_ports`), reported as the `service-serving` capability, and
+survives `blaktaild run`.
+
+`--serve-services-ports` is the agent-side allow-list of loopback ports a
+service may expose (comma-separated; each use replaces the list). A service the
+coordinator assigns on any other port is refused: no certificate is requested,
+the port is not probed, nothing is routed, and the health report says the port
+is not in the list. With no list, nothing is served. This keeps a compromised
+or mistaken coordinator from publishing an arbitrary local port (a database or
+admin socket bound to 127.0.0.1) on the overlay.
 `--serve-services=false` stops serving and deletes the service keys.
 
 On every control update (at most ~25 seconds apart) the agent:
@@ -81,9 +90,12 @@ On every control update (at most ~25 seconds apart) the agent:
    `--service-listen-port`), routing by SNI to `127.0.0.1:<port>`. TLS is
    terminated and bytes are proxied unchanged, so HTTP/1.1 and WebSocket
    upgrades work; ALPN offers `http/1.1` only. The upstream is always loopback.
-4. Probes each local target (TCP connect plus an HTTP `HEAD /` that must answer
-   `HTTP/`, 2-second bound) and reports `{listening, healthy, detail, serial}`
-   to `POST /v1/nodes/:node/services/health`.
+4. Probes each allowed local target (TCP connect plus an HTTP `HEAD /` that
+   must answer `HTTP/`, 2-second bound) and reports
+   `{listening, healthy, detail, serial}` to
+   `POST /v1/nodes/:node/services/health`. A target that fails the probe is not
+   routed (its route and open connections are dropped) until a later pass
+   finds it healthy again, so a non-HTTP loopback service is never proxied.
 
 `https` upstreams are not proxied yet: such a service reports unhealthy with an
 explicit detail instead of sending plaintext to a TLS port. The listener holds

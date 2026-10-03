@@ -12,7 +12,7 @@ use crate::{
     append_audit, bump_control_revision, console_session, now,
     permissions::{require, Permission},
     posture::{load_checks, MissingData},
-    ApiError, AppState, Session, Store,
+    ApiError, AppState, Role, Session, Store,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -1272,6 +1272,11 @@ pub(crate) struct NodeKeys {
     pub(crate) hostname: Option<String>,
     pub(crate) serial: Option<String>,
     pub(crate) macs: Vec<String>,
+    /// When the device first reported identifiers; the earliest claimant
+    /// keeps a contested provider record.
+    pub(crate) pinned_at: Option<i64>,
+    /// A changed report awaits admin approval.
+    pub(crate) pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1294,6 +1299,12 @@ pub(crate) enum DeviceMatch {
     /// More than one record matched, or the record also matches another
     /// device. Ambiguous matches never pass.
     Ambiguous { candidates: usize },
+    /// The device now reports identifiers other than those pinned at its
+    /// first report; it fails until an admin approves the change.
+    IdentityChanged,
+    /// Another device reported this record's identifiers first and keeps
+    /// the match.
+    Contested,
     Matched {
         external_id: String,
         matched_by: &'static str,
@@ -1306,7 +1317,9 @@ pub(crate) enum DeviceMatch {
 
 /// Matches provider records to devices of ONE organisation. Serial wins
 /// over MAC, MAC over (opt-in) hostname; a device matches only when exactly
-/// one record matches at its strongest key and no other device claims it.
+/// one record matches at its strongest key. When several devices claim one
+/// record, the one that pinned its identifiers first keeps it and the others
+/// are `Contested`; without a single earliest claimant all are ambiguous.
 pub(crate) fn match_devices(
     nodes: &[NodeKeys],
     signals: &[StoredSignal],
@@ -1355,24 +1368,30 @@ pub(crate) fn match_devices(
             (None, BTreeSet::new())
         })
         .collect();
-    let mut claims: HashMap<usize, usize> = HashMap::new();
-    for (_, set) in &candidates {
+    let mut claims: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (node_index, (_, set)) in candidates.iter().enumerate() {
         for index in set {
-            *claims.entry(*index).or_default() += 1;
+            claims.entry(*index).or_default().push(node_index);
         }
     }
     nodes
         .iter()
         .zip(candidates)
-        .map(|(node, (key, set))| {
+        .enumerate()
+        .map(|(node_index, (node, (key, set)))| {
             let result = match (key, set.len()) {
                 (_, 0) => DeviceMatch::Unmatched,
                 (Some(key), 1) => {
                     let index = *set.iter().next().expect("one candidate");
-                    let claimed = claims.get(&index).copied().unwrap_or(0);
-                    if claimed > 1 {
-                        DeviceMatch::Ambiguous {
-                            candidates: claimed,
+                    let claimants = claims.get(&index).map(Vec::as_slice).unwrap_or_default();
+                    let first = first_claimant(nodes, claimants);
+                    if claimants.len() > 1 && first != Some(node_index) {
+                        if first.is_some() {
+                            DeviceMatch::Contested
+                        } else {
+                            DeviceMatch::Ambiguous {
+                                candidates: claimants.len(),
+                            }
                         }
                     } else {
                         let signal = &signals[index];
@@ -1391,6 +1410,21 @@ pub(crate) fn match_devices(
             (node.id, result)
         })
         .collect()
+}
+
+/// The claimant with the strictly earliest pin time, if there is one. A
+/// device that never pinned identifiers ranks after every pinned one.
+fn first_claimant(nodes: &[NodeKeys], claimants: &[usize]) -> Option<usize> {
+    let mut pinned: Vec<(i64, usize)> = claimants
+        .iter()
+        .filter_map(|&index| nodes[index].pinned_at.map(|at| (at, index)))
+        .collect();
+    pinned.sort_unstable();
+    match pinned.as_slice() {
+        [(_, index)] => Some(*index),
+        [(first, index), (second, _), ..] if first < second => Some(*index),
+        _ => None,
+    }
 }
 
 /// One integration's view of one device, attached to posture facts.
@@ -1446,7 +1480,7 @@ async fn load_integration_rows(
 
 async fn load_node_keys(pool: &sqlx::AnyPool, org_id: &str) -> Result<Vec<NodeKeys>, ApiError> {
     sqlx::query(
-        "SELECT id,COALESCE(hostname,name),serial_number,mac_addresses_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT id,COALESCE(hostname,name),serial_number,mac_addresses_json,hardware_pinned_at,hardware_pending_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(org_id)
     .fetch_all(pool)
@@ -1464,6 +1498,8 @@ async fn load_node_keys(pool: &sqlx::AnyPool, org_id: &str) -> Result<Vec<NodeKe
                 .try_get::<Option<String>, _>(3)?
                 .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
                 .unwrap_or_default(),
+            pinned_at: row.try_get(4)?,
+            pending: row.try_get::<Option<String>, _>(5)?.is_some(),
         })
     })
     .collect()
@@ -1509,6 +1545,11 @@ pub(crate) async fn attach(
         return Ok(());
     }
     let nodes = load_node_keys(pool, org_id).await?;
+    let pending: BTreeSet<Uuid> = nodes
+        .iter()
+        .filter(|node| node.pending)
+        .map(|node| node.id)
+        .collect();
     let signals = load_signals(pool, org_id).await?;
     for integration in &integrations {
         let matches = match_devices(
@@ -1530,10 +1571,14 @@ pub(crate) async fn attach(
                     enabled: integration.enabled,
                     last_success_at: integration.last_success_at,
                     outage_since: integration.outage_since,
-                    matched: matches
-                        .get(&fact.id)
-                        .cloned()
-                        .unwrap_or(DeviceMatch::Unmatched),
+                    matched: if pending.contains(&fact.id) {
+                        DeviceMatch::IdentityChanged
+                    } else {
+                        matches
+                            .get(&fact.id)
+                            .cloned()
+                            .unwrap_or(DeviceMatch::Unmatched)
+                    },
                     source: PROVIDER_SOURCE,
                 },
             );
@@ -1619,6 +1664,16 @@ pub(crate) fn assess(
                 "{provider} match is ambiguous ({candidates} candidates); ambiguous matches fail"
             ))
         }
+        DeviceMatch::IdentityChanged => {
+            return fail(format!(
+                "this device reported a serial number or MAC addresses that changed since its first report or that another device already holds; {provider} signals apply once an admin approves them"
+            ))
+        }
+        DeviceMatch::Contested => {
+            return fail(format!(
+                "the {provider} record matching this device belongs to a device that reported these identifiers first"
+            ))
+        }
         DeviceMatch::Matched {
             compliant,
             status,
@@ -1693,9 +1748,66 @@ pub(crate) async fn ensure_in_org(
 // ---------------------------------------------------------------------------
 // Agent-reported hardware identifiers
 
+/// Hardware identifiers a node reported or awaits approval for.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct Hardware {
+    serial_number: Option<String>,
+    mac_addresses: Vec<String>,
+}
+
+fn hardware_session() -> Session {
+    Session {
+        user_id: "system:posture-hardware".into(),
+        role: Role::Member,
+        name: "Device hardware report".into(),
+        email: String::new(),
+    }
+}
+
+/// Active devices of the org, other than `node_id`, whose pinned
+/// identifiers share the serial or a MAC with `hardware`, and the pin time
+/// a new claimant must come after.
+async fn clashing_nodes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: &str,
+    node_id: Uuid,
+    hardware: &Hardware,
+    at: i64,
+) -> Result<(Vec<String>, i64), ApiError> {
+    let rows = sqlx::query(
+        "SELECT id,serial_number,mac_addresses_json,hardware_pinned_at FROM nodes WHERE org_id=$1 AND id<>$2 AND revoked_at IS NULL AND deleted_at IS NULL AND (serial_number IS NOT NULL OR mac_addresses_json IS NOT NULL)",
+    )
+    .bind(org_id)
+    .bind(node_id.to_string())
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut out = Vec::new();
+    let mut after = at;
+    for row in rows {
+        let serial: Option<String> = row.try_get(1)?;
+        let macs: Vec<String> = row
+            .try_get::<Option<String>, _>(2)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let same_serial = serial.is_some() && serial == hardware.serial_number;
+        if same_serial || macs.iter().any(|mac| hardware.mac_addresses.contains(mac)) {
+            out.push(row.try_get(0)?);
+            // Pins are whole seconds; a later claimant must still rank
+            // strictly after the device that holds the identifier.
+            if let Some(held) = row.try_get::<Option<i64>, _>(3)? {
+                after = after.max(held + 1);
+            }
+        }
+    }
+    Ok((out, after))
+}
+
 /// Records the serial number and MAC addresses the node reports. They are
-/// self-reported by the node token holder; a copied serial makes the match
-/// ambiguous for both devices rather than transferring a passing signal.
+/// self-reported by the node token holder, so each is pinned at its first
+/// report: a later, different value, or a first report of an identifier
+/// another device already holds, is held as pending and fails the device's
+/// integration checks until an admin approves it. Clashes are audited and
+/// the device that pinned first keeps the provider match.
 pub(crate) async fn record_hardware(
     store: &Store,
     org_id: &str,
@@ -1706,46 +1818,183 @@ pub(crate) async fn record_hardware(
     if serial.is_none() && macs.is_none() {
         return Ok(());
     }
-    let row =
-        sqlx::query("SELECT serial_number,mac_addresses_json FROM nodes WHERE id=$1 AND org_id=$2")
-            .bind(node_id.to_string())
-            .bind(org_id)
-            .fetch_optional(&store.pool)
-            .await?
-            .ok_or(ApiError::Unauthorized)?;
-    let current_serial: Option<String> = row.try_get(0)?;
-    let current_macs: Option<String> = row.try_get(1)?;
-    let next_serial = match serial {
-        Some(value) => normalise_serial(value),
-        None => current_serial.clone(),
+    let row = sqlx::query(
+        "SELECT serial_number,mac_addresses_json,hardware_pinned_at,hardware_pending_json FROM nodes WHERE id=$1 AND org_id=$2",
+    )
+    .bind(node_id.to_string())
+    .bind(org_id)
+    .fetch_optional(&store.pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    let pinned = Hardware {
+        serial_number: row.try_get(0)?,
+        mac_addresses: row
+            .try_get::<Option<String>, _>(1)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
     };
-    let next_macs = match macs {
-        Some(value) => {
-            let list: BTreeSet<String> = value
-                .split(',')
-                .filter_map(normalise_mac)
-                .take(16)
-                .collect();
-            Some(serde_json::to_string(&list).map_err(|_| ApiError::CorruptData)?)
+    let pinned_at: Option<i64> = row.try_get(2)?;
+    let pending_json: Option<String> = row.try_get(3)?;
+    let reported_serial = serial.and_then(normalise_serial);
+    let reported_macs: Option<Vec<String>> = macs.map(|value| {
+        value
+            .split(',')
+            .filter_map(normalise_mac)
+            .take(16)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    });
+    // A field never pinned takes the first non-empty report; a pinned field
+    // only changes through approval. Omitting a value claims nothing.
+    let mut next = pinned.clone();
+    let mut proposed = pinned.clone();
+    if let Some(reported) = reported_serial {
+        if pinned.serial_number.is_none() {
+            next.serial_number = Some(reported.clone());
         }
-        None => current_macs.clone(),
-    };
-    if next_serial == current_serial && next_macs == current_macs {
+        proposed.serial_number = Some(reported);
+    }
+    if let Some(reported) = reported_macs.filter(|list| !list.is_empty()) {
+        if pinned.mac_addresses.is_empty() {
+            next.mac_addresses = reported.clone();
+        }
+        proposed.mac_addresses = reported;
+    }
+    if proposed == pinned && pending_json.is_none() {
         return Ok(());
     }
     let mut tx = store.pool.begin().await?;
+    let (clashes, pin_at) = if proposed == pinned {
+        (Vec::new(), now())
+    } else {
+        clashing_nodes(&mut tx, org_id, node_id, &proposed, now()).await?
+    };
+    // An identifier another device already holds is never pinned on a
+    // report alone; the first reporter keeps it until an admin decides.
+    if !clashes.is_empty() {
+        next = pinned.clone();
+    }
+    let pending = (proposed != next).then_some(proposed);
+    let next_pending_json = pending
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| ApiError::CorruptData)?;
+    let newly_pinned = next != pinned;
+    if !newly_pinned && next_pending_json == pending_json {
+        return Ok(());
+    }
+    let next_pinned_at = if newly_pinned && pinned_at.is_none() {
+        Some(pin_at)
+    } else {
+        pinned_at
+    };
     sqlx::query(
-        "UPDATE nodes SET serial_number=$1,mac_addresses_json=$2 WHERE id=$3 AND org_id=$4",
+        "UPDATE nodes SET serial_number=$1,mac_addresses_json=$2,hardware_pinned_at=$3,hardware_pending_json=$4 WHERE id=$5 AND org_id=$6",
     )
-    .bind(&next_serial)
-    .bind(&next_macs)
+    .bind(&next.serial_number)
+    .bind(
+        (!next.mac_addresses.is_empty())
+            .then(|| serde_json::to_string(&next.mac_addresses))
+            .transpose()
+            .map_err(|_| ApiError::CorruptData)?,
+    )
+    .bind(next_pinned_at)
+    .bind(&next_pending_json)
     .bind(node_id.to_string())
     .bind(org_id)
     .execute(&mut *tx)
     .await?;
+    let org_uuid = Uuid::parse_str(org_id).map_err(|_| ApiError::CorruptData)?;
+    let session = hardware_session();
+    let target = node_id.to_string();
+    if let Some(change) = &pending {
+        if next_pending_json != pending_json {
+            append_audit(
+                &mut tx,
+                org_uuid,
+                &session,
+                "node.hardware_changed",
+                "node",
+                Some(&target),
+                &serde_json::json!({
+                    "serial_number_changed": change.serial_number != next.serial_number,
+                    "mac_addresses_changed": change.mac_addresses != next.mac_addresses,
+                }),
+            )
+            .await?;
+        }
+    }
+    if !clashes.is_empty() {
+        append_audit(
+            &mut tx,
+            org_uuid,
+            &session,
+            "node.hardware_clash",
+            "node",
+            Some(&target),
+            &serde_json::json!({"clashes_with": clashes}),
+        )
+        .await?;
+    }
     bump_control_revision(&mut tx, org_id).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Accepts a device's pending identifiers as its new pins. The approval
+/// time becomes the pin time, so the device does not outrank a device
+/// that already holds a clashing identifier.
+async fn approve_hardware(
+    State(s): State<AppState>,
+    UrlPath((org_id, node_id)): UrlPath<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let session = console_session(&s, &headers, org_id).await?;
+    require(&session, Permission::ManageSecurity)?;
+    let org = org_id.to_string();
+    let mut tx = s.store.pool.begin().await?;
+    let pending: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT hardware_pending_json FROM nodes WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL",
+    )
+    .bind(node_id.to_string())
+    .bind(&org)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let pending = pending.ok_or(ApiError::NotFound)?.ok_or_else(|| {
+        ApiError::Conflict("this device has no hardware change awaiting approval".into())
+    })?;
+    let hardware: Hardware = serde_json::from_str(&pending).map_err(|_| ApiError::CorruptData)?;
+    let (clashes, pin_at) = clashing_nodes(&mut tx, &org, node_id, &hardware, now()).await?;
+    sqlx::query(
+        "UPDATE nodes SET serial_number=$1,mac_addresses_json=$2,hardware_pinned_at=$3,hardware_pending_json=NULL WHERE id=$4 AND org_id=$5",
+    )
+    .bind(&hardware.serial_number)
+    .bind(
+        (!hardware.mac_addresses.is_empty())
+            .then(|| serde_json::to_string(&hardware.mac_addresses))
+            .transpose()
+            .map_err(|_| ApiError::CorruptData)?,
+    )
+    .bind(pin_at)
+    .bind(node_id.to_string())
+    .bind(&org)
+    .execute(&mut *tx)
+    .await?;
+    append_audit(
+        &mut tx,
+        org_id,
+        &session,
+        "node.hardware_approved",
+        "node",
+        Some(&node_id.to_string()),
+        &serde_json::json!({"clashes_with": clashes}),
+    )
+    .await?;
+    bump_control_revision(&mut tx, &org).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -2034,6 +2283,10 @@ pub(crate) fn routes() -> Router<AppState> {
             "/v1/orgs/:org_id/posture-integrations/:integration_id/sync",
             post(sync_now),
         )
+        .route(
+            "/v1/orgs/:org_id/posture-integrations/devices/:node_id/approve-hardware",
+            post(approve_hardware),
+        )
 }
 
 #[derive(Deserialize)]
@@ -2074,12 +2327,17 @@ struct IntegrationView {
     kind: &'static str,
     provider: &'static str,
     name: String,
-    config: ProviderConfig,
-    secret_fingerprint: String,
+    /// Configuration and credential metadata are for security managers
+    /// only; other roles see name, kind and status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<ProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_fingerprint: Option<String>,
     interval_secs: i64,
     enabled: bool,
     privacy_acknowledged_at: i64,
-    privacy_acknowledged_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    privacy_acknowledged_by: Option<String>,
     created_at: i64,
     updated_at: i64,
     next_sync_at: i64,
@@ -2092,6 +2350,10 @@ struct IntegrationView {
     /// BlakTail devices matched to exactly one provider record.
     matched_devices: usize,
     ambiguous_devices: usize,
+    /// Devices whose record an earlier-pinned device keeps.
+    contested_devices: usize,
+    /// Devices whose changed identifiers await admin approval.
+    identity_changes_pending: usize,
     /// BlakTail devices with no provider record.
     unmatched_devices: usize,
     /// Provider records that match no BlakTail device.
@@ -2148,6 +2410,7 @@ async fn list_integrations(
 ) -> Result<Json<IntegrationList>, ApiError> {
     let session = console_session(&s, &headers, org_id).await?;
     require(&session, Permission::ViewNetwork)?;
+    let manager = require(&session, Permission::ManageSecurity).is_ok();
     let pool = &s.store.pool;
     let org = org_id.to_string();
     let rows = sqlx::query(
@@ -2180,12 +2443,12 @@ async fn list_integrations(
             kind: kind.id(),
             provider: kind.label(),
             name: row.try_get(2)?,
-            config,
-            secret_fingerprint: row.try_get(4)?,
+            config: manager.then_some(config),
+            secret_fingerprint: manager.then(|| row.try_get(4)).transpose()?,
             interval_secs: row.try_get(5)?,
             enabled: row.try_get::<i64, _>(6)? != 0,
             privacy_acknowledged_at: row.try_get(7)?,
-            privacy_acknowledged_by: row.try_get(8)?,
+            privacy_acknowledged_by: manager.then(|| row.try_get(8)).transpose()?,
             created_at: row.try_get(9)?,
             updated_at: row.try_get(10)?,
             next_sync_at: row.try_get(11)?,
@@ -2197,6 +2460,8 @@ async fn list_integrations(
             provider_devices: row.try_get(17)?,
             matched_devices: count(|m| matches!(m, DeviceMatch::Matched { .. })),
             ambiguous_devices: count(|m| matches!(m, DeviceMatch::Ambiguous { .. })),
+            contested_devices: count(|m| matches!(m, DeviceMatch::Contested)),
+            identity_changes_pending: nodes.iter().filter(|node| node.pending).count(),
             unmatched_devices: count(|m| matches!(m, DeviceMatch::Unmatched)),
             unmatched_records: stored
                 .iter()

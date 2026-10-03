@@ -106,6 +106,16 @@ pub(crate) const CATALOGUE: &[EventKind] = &[
         "A new inventory report made a device fail a posture check that policy references.",
     ),
     kind(
+        "device.hardware_changed",
+        Severity::Warning,
+        "A device reported a serial number or MAC addresses other than those pinned at its first report; its integration checks fail until an admin approves the change.",
+    ),
+    kind(
+        "device.hardware_clash",
+        Severity::Warning,
+        "A device reported a serial number or MAC address another device already holds; the device that reported it first keeps the provider match.",
+    ),
+    kind(
         "route.approved",
         Severity::Notice,
         "The subnet routes approved for a device changed.",
@@ -162,6 +172,8 @@ fn audit_event(action: &str) -> Option<&'static str> {
         "node.routes_updated" => Some("route.approved"),
         "api_client.suspended" => Some("service_user.suspended"),
         "traffic.settings_updated" => Some("traffic.settings_changed"),
+        "node.hardware_changed" => Some("device.hardware_changed"),
+        "node.hardware_clash" => Some("device.hardware_clash"),
         _ => None,
     }
 }

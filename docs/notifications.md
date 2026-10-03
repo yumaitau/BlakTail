@@ -43,6 +43,8 @@ coordinator. The `X-BlakTail-Severity` header carries the severity.
 | `device.resumed` | info | A suspended device was resumed |
 | `credential.expiring` | warning | A device credential expires within 7 days (once per credential) |
 | `posture.failed` | warning | A new inventory report made a device fail a policy-referenced posture check |
+| `device.hardware_changed` | warning | A device reported a serial number or MAC addresses other than those pinned at its first report; its integration checks fail until an admin approves |
+| `device.hardware_clash` | warning | A device reported a serial number or MAC address another device already holds; the first reporter keeps the provider match |
 | `route.approved` | notice | The subnet routes approved for a device changed |
 | `policy.published` | notice | A new access policy revision was published |
 | `policy.rolled_back` | warning | Access policy was rolled back |
@@ -55,8 +57,8 @@ coordinator. The `X-BlakTail-Severity` header carries the severity.
 
 Notes:
 
-- `route.approved`, `service_user.suspended` and `traffic.settings_changed`
-  are raised from the matching audit action inside the same transaction;
+- `route.approved`, `service_user.suspended`, `traffic.settings_changed`,
+  `device.hardware_changed` and `device.hardware_clash` are raised from the matching audit action inside the same transaction;
   their payload is `{action, target_type, target_id, actor: {user_id, role},
   details, audit_event_id}` with details redacted as in the audit log.
 - `posture.failed` fires on a pass→fail transition caused by a device's own
@@ -144,7 +146,10 @@ acknowledgement gets 400. The URL is the credential: it is sealed at rest
 `https://hooks.slack.com/…`, kept out of audit details and delivery errors,
 and erased when the channel is disabled. Slack receives a `text` fallback
 plus Block Kit `header`/`section`/`context` blocks; Teams receives an
-Adaptive Card 1.4 `message` attachment.
+Adaptive Card 1.4 `message` attachment. Values from events (device and
+organisation names, reasons) are escaped for each format: `&`, `<`, `>` for
+Slack, and a backslash before `\ [ ] ( ) * _ ~ `` ` `` for Teams, so they
+cannot become links or formatting.
 
 **Content.** Messages carry the event type, severity, catalogue summary,
 time in the channel's time zone, event id and the event payload flattened to

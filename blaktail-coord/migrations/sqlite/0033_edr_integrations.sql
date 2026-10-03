@@ -42,3 +42,7 @@ CREATE TABLE IF NOT EXISTS posture_integration_devices (
 CREATE INDEX IF NOT EXISTS posture_integration_devices_org ON posture_integration_devices(org_id);
 ALTER TABLE nodes ADD COLUMN serial_number TEXT;
 ALTER TABLE nodes ADD COLUMN mac_addresses_json TEXT;
+-- Identifiers are pinned at first report; a later change waits in
+-- hardware_pending_json for an admin's approval.
+ALTER TABLE nodes ADD COLUMN hardware_pinned_at INTEGER;
+ALTER TABLE nodes ADD COLUMN hardware_pending_json TEXT;

@@ -158,11 +158,17 @@ the rest):
   dropped), walks at most 8 IPv6 extension headers and drops malformed
   packets. Denied packets are dropped silently rather than answered with a
   reset. Unlike Linux, a policy change also ends inbound flows the new policy
-  no longer allows. Invalid policy input installs deny-all.
+  no longer allows. Invalid policy input installs deny-all. Before the
+  filter, a decrypted packet whose inner source address is outside the
+  sending peer's allowed IPs is dropped (WireGuard's cryptokey routing on
+  receive, which boringtun's `Tunn` leaves to the caller), so one peer cannot
+  pose as another peer's address to the filter.
 - **macOS**: boringtun's device writes decrypted packets straight to the
   utun interface with no hook, so the agent compiles the grants into a `pf`
   anchor (`com.apple/blaktail`, evaluated by the stock `/etc/pf.conf`) on
-  that interface and takes a `pfctl -E` reference. `acl-filter` is reported
+  that interface and takes a `pfctl -E` reference. boringtun's device
+  already drops decrypted packets whose inner source is outside the sending
+  peer's allowed IPs, so pf sees only genuine peer source addresses. `acl-filter` is reported
   only after the agent verifies pf is enabled, the main ruleset still
   evaluates `com.apple/*` and the anchor holds every rule; otherwise the Mac
   is reported unfiltered. `blaktaild down` flushes the anchor and releases
@@ -272,11 +278,25 @@ SentinelOne, FleetDM or Huntress; [ADR 0005](adr/0005-posture-integrations.md)):
   agent-reported serial number wins, then its physical MAC addresses;
   hostname is used only if the owner opts in for that integration.
   Placeholder serials and randomised or multicast MACs never match. A device
-  matches only when exactly one provider record matches its strongest key
-  and no other device in the organisation claims the same record; anything
-  else is ambiguous and fails. Serials and MACs are self-reported by the
-  node token holder, so a copied serial makes both devices fail rather than
-  passing the signal on.
+  matches only when exactly one provider record matches its strongest key.
+- **Pinned identifiers.** Serials and MACs are self-reported by the node
+  token holder, so each is pinned at the device's first report. A later,
+  different serial or MAC set (a motherboard or network card swap, or a
+  device claiming another's identity) is held as pending: the device's
+  integration checks fail with match state `identity_changed`, the change is
+  audited (`node.hardware_changed`, event `device.hardware_changed`, values
+  not recorded), and the device page offers **Approve hardware change** to
+  holders of `manage_security` (owners); approval is audited
+  (`node.hardware_approved`) and becomes the new pin. A first report of an
+  identifier another device already pinned is never pinned on the report
+  alone: it is pending in the same way and also audited as
+  `node.hardware_clash` (event `device.hardware_clash`). When two devices
+  still claim one provider record, the device that pinned first keeps the
+  match and the other is `contested` and fails; a copier cannot lock the
+  genuine device out. Without a single earliest pin (for example two devices
+  enrolled before pinning existed), every claimant is ambiguous and fails.
+  Plugging in a new USB or dock network adapter changes the MAC set and
+  needs approval too.
 - **Evaluation**: a matched record must be passing for that provider (see
   the provider list in the console), confirmed by a successful reconcile
   within `max_age_secs` (default 3600, 60 s to 30 days), and — if set —
@@ -287,7 +307,9 @@ SentinelOne, FleetDM or Huntress; [ADR 0005](adr/0005-posture-integrations.md)):
   provider recovers. Stale data without an outage always fails.
 - The device assessment lists every integration's view of the device
   (match state, key, provider status, sync time, outage) with source
-  `provider_reported`.
+  `provider_reported`. The integration list shows its configuration and
+  credential fingerprint only to `manage_security` holders; other roles see
+  name, kind, status and match counts.
 - An integration referenced by a check cannot be deleted.
 
 No live vendor tenant was available while building this; each adapter is

@@ -91,13 +91,19 @@ async fn ports_from(router: &Router, server: &RegisterResponse, laptop: Uuid) ->
 }
 
 async fn report_serial(router: &Router, node: &RegisterResponse, serial: &str) {
+    report_query(
+        router,
+        node,
+        &format!("serial_number={serial}&mac_addresses=3c:22:fb:11:22:33,02:42:ac:11:00:02"),
+    )
+    .await;
+}
+
+async fn report_query(router: &Router, node: &RegisterResponse, query: &str) {
     let response = call(
         router,
         Method::GET,
-        &format!(
-            "/v1/nodes/{}/peers?serial_number={serial}&mac_addresses=3c:22:fb:11:22:33,02:42:ac:11:00:02",
-            node.id
-        ),
+        &format!("/v1/nodes/{}/peers?{query}", node.id),
         serde_json::Value::Null,
         Some(&node.node_token),
     )
@@ -213,8 +219,28 @@ async fn integration_signal_gates_only_its_rule_and_fails_closed_on_outage() {
     assert_eq!(view["unmatched_devices"], 1);
     assert_eq!(view["unmatched_records"], 500);
     assert_eq!(view["referenced_by"], serde_json::json!(["edr"]));
-    assert!(view["config"].get("api_base_override").is_none());
+    assert_eq!(view["name"], "fleet");
+    assert_eq!(view["kind"], "fleetdm");
+    // Configuration and credential metadata are for security managers.
+    for field in ["config", "secret_fingerprint", "privacy_acknowledged_by"] {
+        assert!(view.get(field).is_none(), "{field} shown to a member");
+    }
     assert_eq!(listing["providers"].as_array().unwrap().len(), 5);
+    let managed: serde_json::Value = body(
+        call(
+            &router,
+            Method::GET,
+            &format!("/v1/orgs/{}/posture-integrations", org.id),
+            serde_json::Value::Null,
+            Some(&owner),
+        )
+        .await,
+    )
+    .await;
+    let view = &managed["integrations"][0];
+    assert!(view["config"].is_object());
+    assert!(view["config"].get("api_base_override").is_none());
+    assert!(view["secret_fingerprint"].is_string());
 
     // The device assessment names the vendor signal and its source.
     let assessment: serde_json::Value = body(
@@ -412,7 +438,7 @@ async fn another_organisations_integration_cannot_satisfy_a_check() {
 }
 
 #[tokio::test]
-async fn copied_serial_makes_the_match_ambiguous_and_leases_are_exclusive() {
+async fn copied_serial_fails_only_the_later_claimant_and_leases_are_exclusive() {
     let store = Store::memory().await.unwrap();
     let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
     let org = create_test_org(&router, "edr-ambiguous").await;
@@ -447,14 +473,141 @@ async fn copied_serial_makes_the_match_ambiguous_and_leases_are_exclusive() {
         ports_from(&router, &server, laptop.id).await,
         vec!["8080", "9000"]
     );
-    // A second device claiming the same serial gains nothing, and the
-    // genuine device's match becomes ambiguous until an admin resolves it.
+    // A second device claiming the same serial gains nothing and cannot
+    // lock the genuine device out: the first reporter keeps the match.
     report_serial(&router, &impostor, LAPTOP_SERIAL).await;
     assert_eq!(
         ports_from(&router, &server, impostor.id).await,
         vec!["8080"]
     );
+    assert_eq!(
+        ports_from(&router, &server, laptop.id).await,
+        vec!["8080", "9000"]
+    );
+    let held: Option<String> = sqlx::query_scalar("SELECT serial_number FROM nodes WHERE id=$1")
+        .bind(impostor.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(held, None);
+    assert_eq!(
+        posture_state(&router, org.id, &owner, impostor.id).await,
+        "identity_changed"
+    );
+    let (_, audit) = raw(call(
+        &router,
+        Method::GET,
+        &format!("/v1/orgs/{}/audit", org.id),
+        serde_json::Value::Null,
+        Some(&owner),
+    )
+    .await)
+    .await;
+    assert!(audit.contains("node.hardware_clash"));
+    assert!(audit.contains(&laptop.id.to_string()));
+    assert!(!audit.contains(LAPTOP_SERIAL));
+}
+
+async fn posture_state(router: &Router, org_id: Uuid, session: &str, node: Uuid) -> String {
+    let assessment: serde_json::Value = body(
+        call(
+            router,
+            Method::GET,
+            &format!("/v1/orgs/{org_id}/nodes/{node}/posture"),
+            serde_json::Value::Null,
+            Some(session),
+        )
+        .await,
+    )
+    .await;
+    assessment["devices"][0]["integrations"][0]["match"]["state"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn approve_hardware(router: &Router, org_id: Uuid, session: &str, node: Uuid) -> StatusCode {
+    call(
+        router,
+        Method::POST,
+        &format!("/v1/orgs/{org_id}/posture-integrations/devices/{node}/approve-hardware"),
+        serde_json::Value::Null,
+        Some(session),
+    )
+    .await
+    .status()
+}
+
+#[tokio::test]
+async fn changed_hardware_fails_until_a_security_manager_approves_it() {
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "edr-pins").await;
+    let other = create_test_org(&router, "edr-pins-other").await;
+    let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let admin = signed_session(org.id, "admin-1", Role::Admin, now() + 60);
+    let other_owner = signed_session(other.id, "owner-1", Role::Owner, now() + 60);
+    let mock = Arc::new(Mock::default());
+    let base = serve(mock, fleet_router).await;
+    let created: serde_json::Value =
+        body(create_integration(&router, org.id, &owner, &base, true).await).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    sync(&router, org.id, &owner, &id).await;
+    create_check(&router, org.id, &owner, &id, serde_json::json!({})).await;
+    put_policy(&router, org.id, &owner, "edr").await;
+    let laptop = register_test_node(&router, org.id, &owner, "laptop", "laptop-key", &[]).await;
+    let server = register_test_node(&router, org.id, &owner, "server", "server-key", &[]).await;
+
+    // The first report pins the identifiers; a later serial is not taken
+    // on the device's word, even when the provider knows it.
+    report_query(&router, &laptop, "serial_number=PF3UNKNOWN").await;
+    assert_eq!(
+        posture_state(&router, org.id, &owner, laptop.id).await,
+        "unmatched"
+    );
+    report_query(&router, &laptop, &format!("serial_number={LAPTOP_SERIAL}")).await;
     assert_eq!(ports_from(&router, &server, laptop.id).await, vec!["8080"]);
+    assert_eq!(
+        posture_state(&router, org.id, &owner, laptop.id).await,
+        "identity_changed"
+    );
+
+    // Only a security manager of the device's own organisation approves.
+    assert_eq!(
+        approve_hardware(&router, org.id, &admin, laptop.id).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        approve_hardware(&router, other.id, &other_owner, laptop.id).await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(matches!(
+        approve_hardware(&router, org.id, &other_owner, laptop.id).await,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert_eq!(
+        approve_hardware(&router, org.id, &owner, laptop.id).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        approve_hardware(&router, org.id, &owner, laptop.id).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        ports_from(&router, &server, laptop.id).await,
+        vec!["8080", "9000"]
+    );
+    let (_, audit) = raw(call(
+        &router,
+        Method::GET,
+        &format!("/v1/orgs/{}/audit", org.id),
+        serde_json::Value::Null,
+        Some(&owner),
+    )
+    .await)
+    .await;
+    assert!(audit.contains("node.hardware_changed"));
+    assert!(audit.contains("node.hardware_approved"));
 }
 
 #[tokio::test]

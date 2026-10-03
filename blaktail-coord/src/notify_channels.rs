@@ -576,6 +576,19 @@ pub(crate) fn slack_payload(org_name: &str, notices: &[Notice], tz: Tz) -> serde
     serde_json::json!({"text": slack_escape(&rendered.subject), "blocks": blocks})
 }
 
+/// Adaptive Card text renders a Markdown subset; event values (device and
+/// organisation names, reasons) must not become links or formatting.
+fn teams_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '[' | ']' | '(' | ')' | '*' | '_' | '~' | '`') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Teams incoming-webhook / Workflows body carrying an Adaptive Card.
 pub(crate) fn teams_payload(org_name: &str, notices: &[Notice], tz: Tz) -> serde_json::Value {
     let rendered = render_email(org_name, notices, tz, "");
@@ -584,7 +597,7 @@ pub(crate) fn teams_payload(org_name: &str, notices: &[Notice], tz: Tz) -> serde
         "size": "Medium",
         "weight": "Bolder",
         "wrap": true,
-        "text": rendered.subject,
+        "text": teams_escape(&rendered.subject),
     })];
     for notice in notices.iter().take(MAX_DIGEST_ROWS as usize) {
         body.push(serde_json::json!({
@@ -595,9 +608,9 @@ pub(crate) fn teams_payload(org_name: &str, notices: &[Notice], tz: Tz) -> serde
         }));
         body.push(serde_json::json!({
             "type": "FactSet",
-            "facts": std::iter::once(serde_json::json!({"title": "Summary", "value": notice.summary()}))
+            "facts": std::iter::once(serde_json::json!({"title": "Summary", "value": teams_escape(notice.summary())}))
                 .chain(std::iter::once(serde_json::json!({"title": "When", "value": local_time(notice.created_at, tz)})))
-                .chain(notice.fields().into_iter().map(|(key, value)| serde_json::json!({"title": key, "value": value})))
+                .chain(notice.fields().into_iter().map(|(key, value)| serde_json::json!({"title": teams_escape(&key), "value": teams_escape(&value)})))
                 .collect::<Vec<_>>(),
         }));
     }
@@ -1550,6 +1563,40 @@ mod tests {
         assert_eq!(
             teams["attachments"][0]["content"]["body"][2]["type"],
             "FactSet"
+        );
+    }
+
+    #[test]
+    fn teams_values_cannot_inject_markdown() {
+        let notices = [notice(
+            "posture.failed",
+            serde_json::json!({"device": "[click](https://evil.example) *now* _x_ ~y~ `z` \\"}),
+        )];
+        let teams = teams_payload(
+            "[Org](https://evil.example)",
+            &notices,
+            chrono_tz::Australia::Sydney,
+        );
+        let text = teams.to_string();
+        assert!(!text.contains("[click](https"), "{text}");
+        let body = &teams["attachments"][0]["content"]["body"];
+        assert!(body[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\\[Org\\]\\(https://evil.example\\)"));
+        let device = body[2]["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|fact| {
+                fact["value"]
+                    .as_str()
+                    .filter(|value| value.contains("click"))
+            })
+            .unwrap();
+        assert_eq!(
+            device,
+            "\\[click\\]\\(https://evil.example\\) \\*now\\* \\_x\\_ \\~y\\~ \\`z\\` \\\\"
         );
     }
 

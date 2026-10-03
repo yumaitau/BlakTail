@@ -20,7 +20,9 @@ local process for access, correction, export, and deletion requests.
   hashed join/node/automation credentials, credential expiry, last-seen time,
   bounded agent OS/architecture/version/capability metadata, the device's
   hardware serial number and physical MAC addresses (used only to match
-  MDM/EDR records, below), published organisation DNS settings, and
+  MDM/EDR records, below; the first report is pinned and a changed report is
+  held for admin approval, while audit entries record only that a value
+  changed or clashed, never the value), published organisation DNS settings, and
   actor-attributed audit events. Location, process inventory, and DNS query
   names are not collected.
 - A relay keeps node identifiers and public socket addresses in memory. Registrations

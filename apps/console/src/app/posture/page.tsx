@@ -1,6 +1,6 @@
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
-import { PostureIntegrations } from "@/components/posture-integrations";
+import { ApproveHardwareButton, PostureIntegrations } from "@/components/posture-integrations";
 import { PostureManager } from "@/components/posture-manager";
 import {
   listPostureAssessments,
@@ -40,6 +40,10 @@ function signalText(fact: IntegrationFact): string {
   if (!fact.enabled) return "integration disabled";
   if (match.state === "unmatched") return "no matching provider record";
   if (match.state === "ambiguous") return `ambiguous match (${match.candidates} candidates)`;
+  if (match.state === "identity_changed") {
+    return "hardware identifiers changed or already held by another device; awaiting approval";
+  }
+  if (match.state === "contested") return "provider record held by a device that reported it first";
   const seen = match.last_seen_at ? `, provider last saw it ${when(match.last_seen_at)}` : "";
   return `${match.status} (matched by ${MATCHED_BY[match.matched_by] ?? match.matched_by}, synced ${when(match.synced_at)}${seen})`;
 }
@@ -194,6 +198,16 @@ export default async function PosturePage() {
                               {fact.outage_since ? `, outage since ${when(fact.outage_since)}` : ""}
                             </div>
                           ))}
+                          {(device.integrations ?? []).some(
+                            (fact) => fact.match.state === "identity_changed",
+                          ) ? (
+                            <ApproveHardwareButton
+                              nodeId={device.node_id}
+                              deviceName={device.display_name || device.name}
+                              canManage={canManageIntegrations}
+                              reason={permissionReason(ctx.role, "manage_security")}
+                            />
+                          ) : null}
                         </td>
                         <td>
                           {device.assessments.length === 0 ? (

@@ -158,6 +158,7 @@ fn state(listen: u16, allowed: &[&str], id: Uuid) -> NodeState {
         retiring_ips: Vec::new(),
         connector_routes: vec![],
         serve_services: true,
+        serve_services_ports: Vec::new(),
         service_listen_port: Some(listen),
         service_access: vec![ServiceAccess {
             id,
@@ -276,9 +277,20 @@ async fn listener_serves_allowed_sources_rejects_others_and_drops_on_revoke() {
     }]);
     let mut runtime = ServiceRuntime::default();
 
+    // A port the operator did not list is refused outright: no
+    // certificate, no route, no probe of the loopback port.
+    let mut node = state(listen, &["127.0.0.1"], id);
+    runtime.manage(&api, &node, dir.path()).await;
+    assert_eq!(runtime.routed(), 0);
+    assert!(api.issued.lock().unwrap().is_empty());
+    let report = api.last_report();
+    assert!(!report[0].listening && !report[0].healthy);
+    assert!(report[0].detail.contains("--serve-services-ports"));
+
     // Allow list names another overlay address only: 127.0.0.1 is unknown
     // and is dropped before TLS.
-    let mut node = state(listen, &["127.0.0.2"], id);
+    node = state(listen, &["127.0.0.2"], id);
+    node.serve_services_ports = vec![target];
     runtime.manage(&api, &node, dir.path()).await;
     assert_eq!(runtime.routed(), 1);
     assert_eq!(
@@ -307,6 +319,7 @@ async fn listener_serves_allowed_sources_rejects_others_and_drops_on_revoke() {
 
     // Allowed source, right name: proxied to the loopback target.
     node = state(listen, &["127.0.0.1"], id);
+    node.serve_services_ports = vec![target];
     runtime.manage(&api, &node, dir.path()).await;
     let (mut open, body) = fetch(listen, &api.ca_pem, FQDN).await.expect("served");
     assert!(body.starts_with("HTTP/1.1 200"), "{body}");
@@ -345,7 +358,7 @@ async fn listener_serves_allowed_sources_rejects_others_and_drops_on_revoke() {
 }
 
 #[tokio::test]
-async fn renews_when_due_and_stops_when_refused_or_unhealthy() {
+async fn renews_when_due_and_refuses_routes_when_refused_or_unhealthy() {
     // A scoped subscriber here too, so this test never caches "no interest"
     // for callsites the log-capturing test relies on.
     let _guard = tracing::subscriber::set_default(
@@ -366,12 +379,16 @@ async fn renews_when_due_and_stops_when_refused_or_unhealthy() {
     }]);
     // A 3-second certificate is past two thirds after 2 seconds.
     api.lifetime = 3;
-    let node = state(listen, &["127.0.0.1"], id);
+    let mut node = state(listen, &["127.0.0.1"], id);
+    node.serve_services_ports = vec![dead_port];
     let mut runtime = ServiceRuntime::default();
     runtime.manage(&api, &node, dir.path()).await;
     let report = api.last_report();
-    assert!(report[0].listening);
     assert!(!report[0].healthy, "nothing listens on the target port");
+    // A target that fails its HTTP probe is not routed.
+    assert!(!report[0].listening);
+    assert_eq!(runtime.routed(), 0);
+    assert!(runtime.listen_addrs().is_empty());
     assert!(report[0].detail.contains(&dead_port.to_string()));
     tokio::time::sleep(Duration::from_millis(2_100)).await;
     runtime.manage(&api, &node, dir.path()).await;
@@ -380,7 +397,7 @@ async fn renews_when_due_and_stops_when_refused_or_unhealthy() {
         2,
         "renewed at 2/3 lifetime"
     );
-    assert_eq!(api.last_report()[0].serial.as_deref(), Some("02"));
+    assert_eq!(runtime.held[&id].meta.serial, "02");
 
     // An https upstream is reported unhealthy rather than mis-proxied.
     let (healthy, detail) = probe_target(dead_port, "https", FQDN).await;
@@ -394,10 +411,12 @@ async fn renews_when_due_and_stops_when_refused_or_unhealthy() {
     assert!(!paths(dir.path(), id).0.exists());
 
     // Opting out also stops serving.
+    let live = upstream().await;
+    node.serve_services_ports = vec![live];
     *api.services.lock().unwrap() = Some(vec![AssignedService {
         id,
         fqdn: FQDN.into(),
-        port: dead_port,
+        port: live,
         protocol: "http".into(),
     }]);
     runtime.manage(&api, &node, dir.path()).await;

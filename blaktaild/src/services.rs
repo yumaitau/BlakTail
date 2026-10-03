@@ -6,6 +6,8 @@
 //! be on the coordinator-compiled allow list: unknown sources are dropped
 //! before any TLS byte, and a known source asking for a service it may not
 //! reach is dropped after reading SNI, before the handshake completes.
+//! Only loopback ports the operator lists with `--serve-services-ports` are
+//! ever served, and a route exists only while its upstream answers HTTP.
 //! Service keys are written 0600 under the state directory and never logged.
 
 use crate::{write_secret, Coordinator, Error, NodeState};
@@ -591,9 +593,24 @@ impl ServiceRuntime {
             }
         }
         let now = unix_now();
+        // The coordinator chooses the port, so the agent only exposes the
+        // loopback ports its operator listed, and only while they answer HTTP.
+        let mut probes: HashMap<Uuid, (bool, String)> = HashMap::new();
         for service in &assigned {
-            self.ensure_certificate(api, state, state_dir, service, now)
-                .await;
+            let probe = if state.serve_services_ports.contains(&service.port) {
+                self.ensure_certificate(api, state, state_dir, service, now)
+                    .await;
+                probe_target(service.port, &service.protocol, &service.fqdn).await
+            } else {
+                (
+                    false,
+                    format!(
+                        "port {} is not in this agent's --serve-services-ports list",
+                        service.port
+                    ),
+                )
+            };
+            probes.insert(service.id, probe);
         }
         let access: HashMap<Uuid, &crate::services::ServiceAccess> = state
             .service_access
@@ -605,7 +622,10 @@ impl ServiceRuntime {
             let Some(held) = self.held.get(&service.id) else {
                 continue;
             };
-            if held.meta.not_after <= now || service.protocol != "http" {
+            if held.meta.not_after <= now
+                || service.protocol != "http"
+                || !probes.get(&service.id).is_some_and(|probe| probe.0)
+            {
                 continue;
             }
             let allowed = access
@@ -647,9 +667,8 @@ impl ServiceRuntime {
                     .get(&service.fqdn.to_ascii_lowercase())
                     .map(|route| route.serial.clone())
             });
-            let (healthy, mut detail) =
-                probe_target(service.port, &service.protocol, &service.fqdn).await;
-            if routed.is_none() {
+            let (healthy, mut detail) = probes.remove(&service.id).unwrap_or_default();
+            if routed.is_none() && healthy {
                 if let Some(error) = self.last_error.get(&service.id) {
                     detail = error.clone();
                 }

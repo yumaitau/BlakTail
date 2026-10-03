@@ -43,7 +43,10 @@ decision record is [ADR 0009](adr/0009-post-quantum.md).
    agent with the lower WireGuard public key connects to the other's overlay
    address on TCP 51822 **inside** the WireGuard tunnel. On Linux the
    listener is bound to the WireGuard interface, so only traffic that a
-   WireGuard session authenticated reaches it.
+   WireGuard session authenticated reaches it. The exchange itself is also
+   authenticated by both WireGuard static keys (step 5), so a local process
+   that binds port 51822 first (the port is not privileged) cannot complete
+   it.
 4. Three messages and an acknowledgement:
    - `Init`: epoch, both WireGuard public keys, a fresh X25519 public key and
      a fresh ML-KEM-768 encapsulation key.
@@ -51,12 +54,21 @@ decision record is [ADR 0009](adr/0009-post-quantum.md).
      confirmation tag.
    - `Confirm`: the initiator's confirmation tag. The responder installs the
      key, then sends `Ack`; the initiator installs on `Ack`.
-5. Key derivation: `HKDF-SHA256(salt = SHA-256(label, version, epoch,
-   initiator WG key, responder WG key, every public value), ikm = ML-KEM
-   shared secret || X25519 shared secret)`, expanded separately into the
-   32-byte PSK and a key-confirmation key. Swapping the WireGuard keys, the
-   epoch or any public value gives a different PSK. ML-KEM-768 is the
-   RustCrypto `ml-kem` crate (FIPS 203); BlakTail does not implement a KEM.
+5. Key derivation (protocol version 2): `HKDF-SHA256(salt = SHA-256(label,
+   version, epoch, initiator WG key, responder WG key, every public value),
+   ikm = ML-KEM shared secret || X25519 shared secret || static agreement)`,
+   expanded separately into the 32-byte PSK and a key-confirmation key. The
+   static agreement is X25519(own WireGuard private key, peer's WireGuard
+   public key); both sides compute the same value and nobody without one of
+   the two WireGuard private keys can. Each side's confirmation tag (HMAC
+   under the confirmation key over the transcript) therefore proves it holds
+   its WireGuard private key: a squatter on either end fails confirmation and
+   nothing is installed. A low-order peer key is refused. Swapping the
+   WireGuard keys, the epoch or any public value gives a different PSK.
+   ML-KEM-768 is the RustCrypto `ml-kem` crate (FIPS 203); BlakTail does not
+   implement a KEM. Version 1 agents (without the static agreement) cannot
+   pair with version 2 agents; the exchange fails with `version` until both
+   are upgraded.
 6. The PSK is installed for that one peer: Linux runs `wg set <if> peer <key>
    preshared-key /dev/stdin` and writes the key on `wg`'s stdin (never argv,
    never a temporary file); macOS writes it through boringtun's UAPI socket and
@@ -80,8 +92,14 @@ account-wide badge.
 
 There is no silent downgrade. Under `require`, a pair without a current key
 is reported as above and, with blocking on, the Linux agent drops all traffic
-to and from that peer's routes except the TCP 51822 exchange (iptables `raw`
-table chain `BLAKTAIL-PQ`, IPv4 and IPv6). macOS agents report the state but
+to and from that peer's routes except the exchange (iptables `mangle` table
+chain `BLAKTAIL-PQ` on `PREROUTING` and `OUTPUT`, IPv4 and IPv6). Only these
+pass: the peer opening a connection to our port 51822, packets from the
+peer's port 51822 that conntrack sees as `ESTABLISHED` replies to a
+connection we opened, and the mirror of both outbound. A packet that merely
+carries source or destination port 51822 to some other port is dropped. The
+chain sits in `mangle` rather than `raw` because connection state is only
+known after conntrack; older agents' `raw` chains are removed on upgrade. macOS agents report the state but
 cannot block (`block_not_supported_here`); the Linux side of the pair still
 blocks.
 
@@ -108,7 +126,7 @@ blocks.
 
 | Platform | Exchange | Blocking under require |
 |---|---|---|
-| Linux (kernel WireGuard or the `boringtun` binary via `wg`) | Yes | Yes (iptables raw table) |
+| Linux (kernel WireGuard or the `boringtun` binary via `wg`) | Yes | Yes (iptables mangle table) |
 | macOS agent (boringtun UAPI) | Yes (code path; not lab-proven) | No, reported |
 | iOS, Android, Windows | No; they do not advertise `pq-psk` | — |
 | WireGuard-only devices | No | Under `require` they are blocked; add an `off` tag-pair rule to exempt them |
@@ -155,6 +173,12 @@ The driver also checks that the coordinator's per-peer view never mentions
 two-minute rotation. The lab proves Linux agent and coordinator behaviour on
 one Docker host. It does not prove the macOS path, independent networks,
 relay failover with PQ, mobile cost, or cryptographic soundness.
+
+That run predates protocol version 2 (WireGuard static-key agreement in the
+derivation) and the `mangle`/conntrack block rules; both are covered by unit
+tests (`pq::tests::exchange_without_the_wireguard_private_key_fails`,
+`pq::tests::block_rules_keep_only_the_exchange_port_and_skip_default_routes`)
+and the driver now checks the `mangle` chain, but the lab has not been re-run.
 
 ## Still open
 

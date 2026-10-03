@@ -8,6 +8,7 @@ import {
   type PostureDefinition,
 } from "@/lib/coord-policy";
 import {
+  approveDeviceHardware,
   createPostureIntegration,
   deletePostureIntegration,
   syncPostureIntegration,
@@ -239,5 +240,16 @@ export async function deleteIntegrationAction(id: string): Promise<IntegrationAc
     return { ok: true };
   } catch (error) {
     return integrationFailure(error, "Could not remove the integration.");
+  }
+}
+
+export async function approveHardwareAction(nodeId: string): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    await approveDeviceHardware(ctx, nodeId);
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return integrationFailure(error, "Could not approve the hardware change.");
   }
 }
