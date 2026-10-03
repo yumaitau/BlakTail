@@ -19,6 +19,7 @@ pub mod acl_filter;
 pub mod connector;
 pub mod dns;
 pub mod forward_filter;
+pub mod pq;
 pub mod relay_client;
 pub mod relay_select;
 pub mod share;
@@ -71,6 +72,9 @@ pub struct Peer {
     pub relay_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<PeerIngress>,
+    /// Post-quantum PSK policy for this pair; absent means off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq: Option<pq::PeerPq>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -822,6 +826,22 @@ impl Coordinator {
             .error_for_status()?;
         Ok(())
     }
+    /// Reports per-peer post-quantum state: modes, epochs, timestamps and
+    /// algorithm names only. There is no field for key material.
+    pub async fn report_pq_state(
+        &self,
+        state: &NodeState,
+        peers: &[pq::PeerReport],
+    ) -> Result<(), Error> {
+        self.client
+            .put(format!("{}/v1/nodes/{}/pq-state", self.base, state.node_id))
+            .bearer_auth(&state.node_token)
+            .json(&serde_json::json!({ "capable": pq::locally_capable(), "peers": peers }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
     pub async fn report_relay_endpoint(
         &self,
         state: &NodeState,
@@ -890,6 +910,9 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// last apply verified the sshd drop-in.
 pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
     let mut capabilities = vec!["wireguard".to_string(), "magicdns".to_string()];
+    if pq::locally_capable() {
+        capabilities.push(pq::CAPABILITY.into());
+    }
     if cfg!(target_os = "linux") {
         capabilities.push("acl-filter".into());
         capabilities.push("forward-filter".into());
@@ -1054,6 +1077,10 @@ pub trait Network {
     }
     fn apply_ingress(&mut self, _interface: &str, _peers: &[Peer]) -> Result<(), Error> {
         Ok(())
+    }
+    /// Where post-quantum PSKs are installed, if this platform supports it.
+    fn psk_device(&self, _interface: &str) -> Option<std::sync::Arc<dyn pq::PskDevice>> {
+        None
     }
     /// Installs the routing peer's forward allow-list (`None`: legacy
     /// accept of advertised routes). Only Linux routes, so others ignore it.
@@ -1637,8 +1664,14 @@ impl Network for LinuxNetwork {
         }
         Ok(())
     }
+    fn psk_device(&self, interface: &str) -> Option<std::sync::Arc<dyn pq::PskDevice>> {
+        Some(std::sync::Arc::new(pq::WgCommandDevice {
+            interface: interface.to_owned(),
+        }))
+    }
     fn down(&mut self, interface: &str) -> Result<(), Error> {
         self.disable_exit_routing(interface);
+        pq::WgCommandDevice::clear_blocks();
         Self::clear_acl_filter(interface);
         Self::clear_forward_filter(interface);
         self.router_routes.clear();
@@ -1899,6 +1932,8 @@ pub struct MacOsNetwork {
     private_hex: String,
     peers: Vec<Peer>,
     installed_routes: HashSet<String>,
+    /// Post-quantum PSKs, re-sent on every `replace_peers` push.
+    psks: std::sync::Arc<std::sync::Mutex<HashMap<String, pq::Psk>>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1910,6 +1945,7 @@ impl MacOsNetwork {
             private_hex: String::new(),
             peers: vec![],
             installed_routes: HashSet::new(),
+            psks: Default::default(),
         }
     }
 
@@ -2032,11 +2068,19 @@ impl MacOsNetwork {
             "set=1\nprivate_key={}\nreplace_peers=true\n",
             self.private_hex
         );
+        let psks = self
+            .psks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         for peer in &self.peers {
             request.push_str(&format!(
                 "public_key={}\nreplace_allowed_ips=true\npersistent_keepalive_interval=25\n",
                 peer.wg_public_key
             ));
+            if let Some(psk) = psks.get(peer.wg_public_key.trim()) {
+                request.push_str(&format!("preshared_key={}\n", psk.to_hex().as_str()));
+            }
             if let Some(endpoint) = &peer.endpoint {
                 request.push_str(&format!("endpoint={endpoint}\n"));
             }
@@ -2045,6 +2089,7 @@ impl MacOsNetwork {
             }
         }
         request.push('\n');
+        let request = zeroize::Zeroizing::new(request);
         self.uapi(&request)?;
         let name = self.utun_name()?.to_owned();
         let additions: Vec<_> = desired
@@ -2150,6 +2195,13 @@ impl Network for MacOsNetwork {
         self.peers.clear();
         self.installed_routes.clear();
         Ok(())
+    }
+    fn psk_device(&self, _interface: &str) -> Option<std::sync::Arc<dyn pq::PskDevice>> {
+        let name = self.name.as_ref()?;
+        Some(std::sync::Arc::new(pq::UapiDevice {
+            socket: PathBuf::from(format!("/var/run/wireguard/{name}.sock")),
+            keys: self.psks.clone(),
+        }))
     }
     fn set_peer_endpoint(
         &mut self,
@@ -2525,6 +2577,7 @@ mod tests {
             dns_name: format!("{key}.tail.blaktail"),
             tags: vec![],
             relay_endpoint: None,
+            pq: None,
             ingress: None,
         }
     }
@@ -2846,6 +2899,7 @@ mod tests {
                 dns_name: "kept.blaktail".into(),
                 tags: vec![],
                 relay_endpoint: None,
+                pq: None,
                 ingress: None,
             },
             Peer {
@@ -2857,6 +2911,7 @@ mod tests {
                 dns_name: "gone.blaktail".into(),
                 tags: vec![],
                 relay_endpoint: None,
+                pq: None,
                 ingress: None,
             },
         ];
@@ -2872,6 +2927,7 @@ mod tests {
                 dns_name: "added.blaktail".into(),
                 tags: vec![],
                 relay_endpoint: None,
+                pq: None,
                 ingress: None,
             }],
             removed: vec![gone],

@@ -18,6 +18,7 @@ mod org_dns;
 mod peer_lifecycle;
 mod permissions;
 mod policy_explain;
+mod post_quantum;
 mod posture;
 mod posture_integrations;
 mod private_services;
@@ -1550,6 +1551,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(audit_log::routes())
         .merge(traffic::routes())
         .merge(notifications::routes())
+        .merge(post_quantum::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -3199,6 +3201,9 @@ struct Peer {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ingress: Option<PeerIngress>,
+    /// Post-quantum PSK policy for this pair; absent while the org has it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pq: Option<post_quantum::PeerPq>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3446,6 +3451,7 @@ async fn list_peers(
                     relay_endpoint: row.try_get(9)?,
                     kind: String::new(),
                     ingress: None,
+                    pq: None,
                 },
                 subject,
                 approved,
@@ -3548,6 +3554,7 @@ async fn list_peers(
             relay_endpoint: None,
             kind: wg_only::KIND.into(),
             ingress: Some(acl.peer_ingress_for(&destination, &source, ssh_users_enforced)),
+            pq: None,
         });
     }
     let mut assigned_ips: Vec<String> = serde_json::from_str(&source_addresses).unwrap_or_default();
@@ -3560,6 +3567,13 @@ async fn list_peers(
         settings.agent_view(&org, org_dns_revision, &device_tags)
     });
     posture::record_deadline(&s.store.pool, &org, posture.next_deadline(&acl)).await?;
+    post_quantum::annotate_peers(
+        &s.store.pool,
+        &org,
+        &serde_json::from_str::<Vec<DeviceTag>>(&source_tags).unwrap_or_default(),
+        &mut peers,
+    )
+    .await?;
     let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
     let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
     Ok(Json(PeersResponse {
