@@ -880,14 +880,26 @@ impl Coordinator {
         state.credential_expires_at = renewed.credential_expires_at;
         Ok(())
     }
-    pub async fn revoke(&self, state: &NodeState) -> Result<(), Error> {
-        self.client
+    /// Revokes this node. `Ok(false)` means the coordinator no longer
+    /// accepts the credential (already revoked, deleted or expired), so
+    /// local teardown can still proceed.
+    pub async fn revoke(&self, state: &NodeState) -> Result<bool, Error> {
+        let response = self
+            .client
             .delete(format!("{}/v1/nodes/{}", self.base, state.node_id))
             .bearer_auth(&state.node_token)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
+            .await?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+                | reqwest::StatusCode::NOT_FOUND
+                | reqwest::StatusCode::GONE
+        ) {
+            return Ok(false);
+        }
+        response.error_for_status()?;
+        Ok(true)
     }
     /// Reports per-peer post-quantum state: modes, epochs, timestamps and
     /// algorithm names only. There is no field for key material.
@@ -3069,6 +3081,43 @@ mod tests {
         assert!(reported(&state)
             .split(',')
             .any(|c| c == PUBLIC_INGRESS_CAPABILITY));
+    }
+
+    /// Answers one HTTP request with `status` and returns the server address.
+    fn one_response(status: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn revoke_reports_a_credential_the_coordinator_no_longer_accepts() {
+        let state: NodeState = serde_json::from_value(serde_json::json!({
+            "node_id": Uuid::nil(), "node_token": "secret", "coord": "http://127.0.0.1",
+            "interface": "blaktail0", "assigned_ip": "100.64.0.1/32",
+            "dns_name": "self.12345678.blaktail", "credential_expires_at": 1,
+            "advertised_routes": [], "peers": []
+        }))
+        .unwrap();
+        for (status, expected) in [
+            ("204 No Content", Some(true)),
+            ("401 Unauthorized", Some(false)),
+            ("404 Not Found", Some(false)),
+            ("500 Internal Server Error", None),
+        ] {
+            let coordinator = Coordinator::new(&one_response(status)).unwrap();
+            assert_eq!(coordinator.revoke(&state).await.ok(), expected, "{status}");
+        }
     }
 
     #[test]

@@ -124,12 +124,23 @@ case "$format" in
       "Installed blaktaild. Enrol once with 'sudo blaktaild up --coord https://… --exit-after-join', then bootstrap the LaunchDaemon."
     ;;
   deb)
-    dpkg -i "$work/$asset"
+    # apt resolves the package's Depends (wireguard-tools, iptables, ...);
+    # bare dpkg -i leaves it unconfigured on a host without them.
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$work/$asset"
+    else
+      dpkg -i "$work/$asset"
+    fi
     printf '%s\n' \
       "Installed blaktaild. Enrol once with 'sudo blaktaild up --coord https://… --exit-after-join', then run 'sudo systemctl enable --now blaktaild'."
     ;;
   rpm)
-    rpm -Uvh "$work/$asset"
+    if command -v dnf >/dev/null 2>&1; then
+      dnf install -y "$work/$asset"
+    else
+      rpm -Uvh "$work/$asset"
+    fi
     printf '%s\n' \
       "Installed blaktaild. Enrol once with 'sudo blaktaild up --coord https://… --exit-after-join', then run 'sudo systemctl enable --now blaktaild'."
     ;;

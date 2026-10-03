@@ -1165,7 +1165,23 @@ fn configure_resolv_conf(
     domain: &str,
     extra_search: &[String],
 ) -> Result<(), Error> {
-    let path = Path::new("/etc/resolv.conf");
+    configure_resolv_conf_at(
+        Path::new("/etc/resolv.conf"),
+        state_dir,
+        dns_ip,
+        domain,
+        extra_search,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_resolv_conf_at(
+    path: &Path,
+    state_dir: &Path,
+    dns_ip: IpAddr,
+    domain: &str,
+    extra_search: &[String],
+) -> Result<(), Error> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(Error::Message(
             "resolvectl and resolvconf failed; refusing to replace symlinked /etc/resolv.conf"
@@ -1185,13 +1201,21 @@ fn configure_resolv_conf(
             "managed /etc/resolv.conf exists but its BlakTail backup is missing".into(),
         ));
     }
-    if !backup.exists() {
+    let created_backup = !backup.exists();
+    if created_backup {
         fs::copy(path, &backup)?;
     }
     let original = fs::read_to_string(&backup)?;
     let content = managed_resolv_conf(&original, dns_ip, domain, extra_search);
     let mode = fs::metadata(path)?.permissions().mode() & 0o777;
-    write_atomic(path, content.as_bytes(), mode)
+    let written = write_atomic(path, content.as_bytes(), mode);
+    // A backup without a managed file would make every later attempt (and
+    // `down`) report that the file "changed after BlakTail configured it".
+    // Seen with a bind-mounted /etc/resolv.conf, where rename fails (EBUSY).
+    if written.is_err() && created_backup {
+        let _ = fs::remove_file(&backup);
+    }
+    written
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1270,7 +1294,10 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
-    fs::rename(temporary, path)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -2047,5 +2074,39 @@ mod tests {
         let records = records_from_state(&state, "12345678.blaktail");
         let mx = answer(&query("apps.example", 15), &records).unwrap();
         assert_eq!(mx[3] & 0x0f, 3);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn failed_resolv_conf_write_leaves_no_backup_or_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("blaktail-resolv-{}", std::process::id()));
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let resolv = dir.join("resolv.conf");
+        fs::write(&resolv, "nameserver 192.0.2.53\n").unwrap();
+        let ip: IpAddr = "100.100.100.100".parse().unwrap();
+        // Occupy the temporary name so the write fails after the backup copy.
+        let blocker = dir.join("resolv.conf.blaktail.tmp");
+        fs::create_dir_all(blocker.join("x")).unwrap();
+        assert!(configure_resolv_conf_at(&resolv, &state_dir, ip, "a.blaktail", &[]).is_err());
+        assert!(!resolv_backup(&state_dir).exists());
+        assert_eq!(
+            fs::read_to_string(&resolv).unwrap(),
+            "nameserver 192.0.2.53\n"
+        );
+        // Once the obstacle is gone the next attempt manages the file.
+        fs::remove_dir_all(&blocker).unwrap();
+        configure_resolv_conf_at(&resolv, &state_dir, ip, "a.blaktail", &[]).unwrap();
+        assert!(fs::read_to_string(&resolv)
+            .unwrap()
+            .starts_with(MANAGED_MARKER));
+        assert!(resolv_backup(&state_dir).exists());
+
+        // A rename that fails (target is a non-empty directory) removes the temporary.
+        let target = dir.join("busy");
+        fs::create_dir_all(target.join("x")).unwrap();
+        assert!(write_atomic(&target, b"x", 0o644).is_err());
+        assert!(!dir.join("busy.blaktail.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

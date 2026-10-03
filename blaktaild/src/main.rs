@@ -1729,10 +1729,17 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 &[],
                 state.router_previous_ipv4_forward,
             )?;
-            coordinator.revoke(&state).await?;
+            let revoked = coordinator.revoke(&state).await?;
             network.down(&state.interface)?;
             fs::remove_file(state_dir.join("state.json"))?;
-            println!("node revoked and {} removed", state.interface);
+            if revoked {
+                println!("node revoked and {} removed", state.interface);
+            } else {
+                println!(
+                    "coordinator no longer accepts this node's credential (already revoked or expired); {} removed locally, check the console that the device is revoked",
+                    state.interface
+                );
+            }
         }
     }
     Ok(())
