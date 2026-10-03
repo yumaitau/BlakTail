@@ -22,6 +22,7 @@ pub mod forward_filter;
 pub mod pq;
 pub mod relay_client;
 pub mod relay_select;
+pub mod remote;
 pub mod share;
 pub mod sshd;
 pub use dns::{
@@ -289,6 +290,9 @@ pub struct NodeState {
     /// Host routes currently forwarded for app-connector resources.
     #[serde(default)]
     pub connector_routes: Vec<String>,
+    /// Browser remote access and remote jobs (draft 13).
+    #[serde(default)]
+    pub remote: remote::RemoteState,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -456,6 +460,8 @@ struct PeersResponse {
     shares: Vec<crate::PublishedShare>,
     #[serde(default)]
     forward_filter: Option<forward_filter::ForwardFilter>,
+    #[serde(default)]
+    remote_access: Option<remote::RemoteAccessView>,
 }
 
 #[derive(Serialize)]
@@ -646,6 +652,7 @@ impl Coordinator {
             app_connector: false,
             agent_gateway: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -733,6 +740,7 @@ impl Coordinator {
         apply_org_dns_snapshot(state, body.dns);
         state.published_shares = body.shares;
         forward_filter::adopt(&mut state.forward_filter, body.forward_filter);
+        state.remote.view = body.remote_access;
         Ok(peers)
     }
 
@@ -932,6 +940,7 @@ fn inventory_query(state: &NodeState) -> [(&'static str, String); 5] {
     if cfg!(target_os = "linux") && state.app_connector {
         capabilities.push(connector::CAPABILITY.into());
     }
+    capabilities.extend(state.remote.capabilities());
     if state.agent_gateway {
         capabilities.push("agent-gateway".into());
     }
@@ -2324,7 +2333,13 @@ pub fn apply_peer_map(
     let installed = installable_wireguard_peers(&state.peers, &desired);
     let changes = peer_diff(&state.peers, &installed);
     network.apply(&state.interface, &changes)?;
-    state.ssh_users_enforced = apply_peer_filter(network, dir, &state.interface, &installed)?;
+    (state.ssh_users_enforced, state.remote.ssh_ca_active) = apply_peer_filter(
+        network,
+        dir,
+        &state.interface,
+        &installed,
+        state.remote.view.as_ref(),
+    )?;
     network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
     state.peers = installed;
     write_state(dir, state)?;
@@ -2339,23 +2354,39 @@ fn apply_peer_filter(
     dir: &Path,
     interface: &str,
     peers: &[Peer],
-) -> Result<bool, Error> {
+    remote: Option<&remote::RemoteAccessView>,
+) -> Result<(bool, bool), Error> {
     write_secret(
         &dir.join("sshd_blaktail.conf"),
         acl_filter::sshd_policy_config(peers).as_bytes(),
     )?;
-    let enforced = match sshd::configured_dropin() {
-        Some(path) => match sshd::sync(&path, peers, &mut sshd::SystemRunner, sshd::PID_FILE) {
-            Ok(()) => true,
+    let ca_path = sshd::configured_user_ca();
+    let ca = match (&ca_path, remote) {
+        (Some(path), Some(view)) if !view.user_ca.is_empty() => Some(sshd::RemoteCa {
+            path,
+            public_key: &view.user_ca,
+            gateways: &view.gateway_addresses,
+        }),
+        _ => None,
+    };
+    let (enforced, ca_active) = match sshd::configured_dropin() {
+        Some(path) => match sshd::sync(
+            &path,
+            peers,
+            ca.as_ref(),
+            &mut sshd::SystemRunner,
+            sshd::PID_FILE,
+        ) {
+            Ok(ca_active) => (true, ca_active),
             Err(error) => {
                 tracing::warn!(%error, "sshd user policy not active; SSH stays closed to user-limited sources");
-                false
+                (false, false)
             }
         },
-        None => false,
+        None => (false, false),
     };
     network.apply_ingress(interface, &acl_filter::fail_closed_ssh(peers, enforced))?;
-    Ok(enforced)
+    Ok((enforced, ca_active))
 }
 
 /// Reinstalls the persisted peer set after a platform backend recreates its
@@ -2373,7 +2404,13 @@ pub fn restore_peers(
         .map(PeerChange::Upsert)
         .collect();
     network.apply(&state.interface, &changes)?;
-    apply_peer_filter(network, dir, &state.interface, &state.peers)?;
+    apply_peer_filter(
+        network,
+        dir,
+        &state.interface,
+        &state.peers,
+        state.remote.view.as_ref(),
+    )?;
     network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
     Ok(changes.len())
 }
@@ -2781,6 +2818,7 @@ mod tests {
             app_connector: false,
             agent_gateway: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2857,6 +2895,7 @@ mod tests {
             app_connector: false,
             agent_gateway: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));
@@ -2952,6 +2991,7 @@ mod tests {
             revision: Some(9),
             shares: vec![],
             forward_filter: None,
+            remote_access: None,
         };
         let merged = Coordinator::apply_control_peers(&current, &body);
         assert_eq!(

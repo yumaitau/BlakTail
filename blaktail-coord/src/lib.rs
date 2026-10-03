@@ -23,6 +23,7 @@ mod post_quantum;
 mod posture;
 mod posture_integrations;
 mod private_services;
+mod remote_access;
 mod resources;
 mod service_users;
 mod shares;
@@ -1554,6 +1555,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(notifications::routes())
         .merge(post_quantum::routes())
         .merge(agent_gateway::routes())
+        .merge(remote_access::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
@@ -3256,6 +3258,9 @@ struct PeersResponse {
     /// may forward from the overlay when it routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forward_filter: Option<forwarding::ForwardFilter>,
+    /// Organisation SSH CA, gateway addresses and job signing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_access: Option<remote_access::AgentView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3594,6 +3599,7 @@ async fn list_peers(
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
         forward_filter,
+        remote_access: Some(remote_access::agent_view(&s, &org, node_id).await?),
     }))
 }
 
@@ -6138,6 +6144,7 @@ mod tests {
     mod operations;
     mod policy_posture;
     mod posture_integrations;
+    mod remote_access;
 
     #[test]
     fn relay_capability_matches_relay_protocol() {

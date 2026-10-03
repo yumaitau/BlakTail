@@ -136,6 +136,13 @@ export default async function DeviceDetailPage({
           description={`Technical name ${node.name}. Times use this browser's clock; online and stale are decided by coordinator time.`}
         />
 
+        {lifecycle === "active" ? (
+          <p className="row">
+            <Link href={`/devices/${node.id}/terminal?organisation=${ctx.organisationId}`}>Open browser terminal (SSH)</Link>
+            <Link href={`/devices/${node.id}/desktop?organisation=${ctx.organisationId}`}>Open remote desktop (RDP)</Link>
+          </p>
+        ) : null}
+
         {lifecycle !== "active" ? (
           <p className={lifecycle === "suspended" ? "error" : "muted"} role="status">
             {lifecycle === "suspended"

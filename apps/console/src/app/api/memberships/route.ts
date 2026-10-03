@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { emitMembershipUpdated } from "@/lib/coord";
+import { revokeSessionsForMembership } from "@/lib/coord-remote";
 import { changeMembership, OidcError } from "@/lib/oidc";
 import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { isOrgRole, permissionReason } from "@/lib/roles";
@@ -42,6 +43,7 @@ export async function PATCH(request: Request) {
       status: next.status,
       previous_role: next.previousRole,
     });
+    await revokeSessionsForMembership(ctx, body.membershipId, next);
     return NextResponse.json({ ok: true });
   } catch (error) {
     const status =

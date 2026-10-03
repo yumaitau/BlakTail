@@ -43,6 +43,11 @@ pub(crate) enum Permission {
     ManageAgentGateway,
     /// Read agent network configuration and model usage (never prompt content).
     ViewAgentUsage,
+    /// Start browser SSH/RDP sessions and request allowlisted remote jobs.
+    UseRemoteSessions,
+    /// Define remote job templates and approve runs. Owner-only: a job runs
+    /// on devices without anyone at the keyboard.
+    ManageRemoteJobs,
 }
 
 impl Role {
@@ -52,7 +57,7 @@ impl Role {
             Role::Owner => true,
             Role::Admin => !matches!(
                 permission,
-                ManageSecurity | ManageApiClients | ViewOperations
+                ManageSecurity | ManageApiClients | ViewOperations | ManageRemoteJobs
             ),
             Role::NetworkAdmin => matches!(
                 permission,
@@ -64,6 +69,7 @@ impl Role {
                     | ManageDns
                     | ManageServices
                     | ViewAudit
+                    | UseRemoteSessions
             ),
             Role::Auditor => matches!(
                 permission,
@@ -95,7 +101,7 @@ pub(crate) mod tests {
         Role::Member,
     ];
 
-    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 15] = [
+    pub(crate) const ALL_PERMISSIONS: [(Permission, &str); 17] = [
         (Permission::ViewNetwork, "view_network"),
         (Permission::ManagePeers, "manage_peers"),
         (Permission::ManageJoinKeys, "manage_join_keys"),
@@ -111,6 +117,8 @@ pub(crate) mod tests {
         (Permission::ViewOperations, "view_operations"),
         (Permission::ManageAgentGateway, "manage_agent_gateway"),
         (Permission::ViewAgentUsage, "view_agent_usage"),
+        (Permission::UseRemoteSessions, "use_remote_sessions"),
+        (Permission::ManageRemoteJobs, "manage_remote_jobs"),
     ];
 
     #[test]

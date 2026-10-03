@@ -1299,6 +1299,7 @@ mod tests {
             app_connector: false,
             agent_gateway: false,
             connector_routes: Vec::new(),
+            remote: Default::default(),
         }
     }
 

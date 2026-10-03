@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { revokeSessionsForMembership } from "@/lib/coord-remote";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import {
@@ -685,6 +686,7 @@ export async function changeMembershipAction(
       status: next.status,
       previous_role: next.previousRole,
     });
+    await revokeSessionsForMembership(ctx, membershipId, next);
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {

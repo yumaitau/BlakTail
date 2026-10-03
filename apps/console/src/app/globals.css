@@ -1454,3 +1454,18 @@ button.quiet-danger:hover:not(:disabled),
   background: currentColor;
   opacity: 0.6;
 }
+
+/* Browser remote access (draft 13) */
+.remote-terminal,
+.remote-desktop {
+  min-height: 420px;
+  border-radius: 8px;
+  background: #0b0b0b;
+  padding: 8px;
+  overflow: hidden;
+}
+.remote-desktop:focus-visible,
+.remote-terminal:focus-within {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}

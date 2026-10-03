@@ -52,6 +52,14 @@ authorisation.
   auditors see summaries)
 - `/dns` — organisation DNS workspace: effective settings, nameserver groups,
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
+- `/devices/{nodeId}/terminal` and `/devices/{nodeId}/desktop` — browser SSH
+  (xterm.js) and RDP (Guacamole) through the onshore gateway, for owner, admin
+  and network admin, with an access reason and a recent sign-in
+  ([remote-access.md](remote-access.md))
+- `/remote-access` — gateway settings (owner), pinned SSH host keys with an
+  accept step for changed keys, and recent sessions with revoke
+- `/remote-jobs` — owner-defined argv job templates, run requests, owner
+  approval, cancel, and capped output
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
 - `/agents` — agent network (AI model gateway): offshore policy (owner),

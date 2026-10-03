@@ -15,7 +15,9 @@
     "manage_security",
     "view_operations",
     "manage_agent_gateway",
-    "view_agent_usage"
+    "view_agent_usage",
+    "use_remote_sessions",
+    "manage_remote_jobs"
   ],
   "roles": {
     "owner": [
@@ -33,7 +35,9 @@
       "manage_security",
       "view_operations",
       "manage_agent_gateway",
-      "view_agent_usage"
+      "view_agent_usage",
+      "use_remote_sessions",
+      "manage_remote_jobs"
     ],
     "admin": [
       "view_network",
@@ -47,7 +51,8 @@
       "export_audit",
       "manage_integrations",
       "manage_agent_gateway",
-      "view_agent_usage"
+      "view_agent_usage",
+      "use_remote_sessions"
     ],
     "network_admin": [
       "view_network",
@@ -57,7 +62,8 @@
       "manage_policy",
       "manage_dns",
       "manage_services",
-      "view_audit"
+      "view_audit",
+      "use_remote_sessions"
     ],
     "auditor": ["view_network", "view_audit", "export_audit", "view_operations", "view_agent_usage"],
     "member": ["view_network", "view_audit"]

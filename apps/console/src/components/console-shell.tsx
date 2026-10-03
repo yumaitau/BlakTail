@@ -37,6 +37,13 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
   { label: "Services", links: [{ href: "/services", label: "Private services" }] },
   { label: "Agents", links: [{ href: "/agents", label: "Agent network" }] },
   {
+    label: "Remote",
+    links: [
+      { href: "/remote-access", label: "Remote access" },
+      { href: "/remote-jobs", label: "Remote jobs" },
+    ],
+  },
+  {
     label: "Events",
     links: [
       { href: "/audit", label: "Audit log" },

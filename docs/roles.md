@@ -25,6 +25,11 @@ tested against it, so the two cannot drift silently.
 | Webhooks and integrations | ✓ | ✓ | | | |
 | Automation credentials (service users) | ✓ | | | | |
 | People, roles, SSO, SCIM, sign-in policy and domains | ✓ | | | | |
+| Browser SSH/RDP sessions; request remote jobs | ✓ | ✓ | ✓ | | |
+| Define remote job templates; approve runs | ✓ | | | | |
+
+Browser sessions also need a sign-in within the last 5 minutes and pass the
+organisation's MFA rule; see [remote-access.md](remote-access.md).
 
 Everyone in an organisation can approve enrolment of their own untagged device.
 Owner, admin and member access is exactly what it was before network admin and

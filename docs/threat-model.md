@@ -66,6 +66,35 @@ Treat a leaked unused key as: revoke that key (or every unused key for the org),
 
 The relay does not decrypt WireGuard payloads and must not log them. It still sees UDP 5-tuples, 16-byte node ids, packet sizes, and timing. A person with shell on the relay host can watch who talks to whom. Registration requires a coordinator-minted, expiring HMAC capability; treat the relay as trusted org kit on an Australian network, not as an anonymity service.
 
+### Remote-access gateway or console session abuse
+
+Browser SSH/RDP and remote jobs ([remote-access.md](remote-access.md)) add an
+always-on onshore gateway. What each compromise buys:
+
+- **Stolen console cookie.** Cannot open a terminal without a sign-in in the
+  last 5 minutes and the organisation's MFA rule; every session needs a
+  reason and is audited. Members and auditors cannot open sessions at all.
+- **Stolen ticket.** Single use, 60 seconds, redeemable only with the
+  configured gateway's node credential.
+- **Compromised gateway host.** It holds a node credential and in-memory
+  session keys. It can reach only what policy lets the gateway node reach,
+  only as OS users SSH rules name, and only while a person has an
+  unexpired session it redeemed: each certificate names one user, is limited
+  to the gateway's overlay address and expires at the session's end (at most
+  30 minutes). It cannot mint certificates (the CA key stays in the
+  coordinator, sealed with the coordinator secret) and cannot see RDP
+  passwords except those typed during its compromise. Suspend or revoke the
+  gateway node to stop it.
+- **Database write without the coordinator secret.** Cannot sign a runnable
+  job (the job key is derived from the coordinator secret) and cannot read
+  the CA key. It can change a pinned host key, but that alone does not
+  redirect a session: the device's overlay address routes only to the peer
+  holding its WireGuard key.
+- **Compromised coordinator.** Can issue certificates and sign jobs for any
+  opted-in device of that organisation. Opt-in on the device (sshd drop-in,
+  `BLAKTAIL_SSH_USER_CA`, `--allow-remote-jobs`) is the boundary; leave it
+  off where that risk is unacceptable.
+
 ### Offshore SaaS mistake
 
 Typical ways to break the onshore rule without dropping a key in Slack:
