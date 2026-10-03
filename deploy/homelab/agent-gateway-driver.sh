@@ -74,7 +74,7 @@ prove() {
   echo "   SSE chunks: $(grep -c '^data:' /tmp/body), ends with [DONE]: $(grep -q '^data: \[DONE\]' /tmp/body && echo yes || echo no), usage chunk: $(grep '"usage"' /tmp/body | sed 's/^data: //' | jq -c .usage)"
   expect 403 "$(chat false gpt-offshore)" "offshore provider refused by default"
   echo "   error: $(jq -c .error /tmp/body)"
-  code="$(curl -sS -o /tmp/body -w '%{http_code}' -X POST "$GW/v1/chat/completions" -H 'authorization: Bearer btak_wrong' -H 'content-type: application/json' -d "{\"model\":\"$MODEL\",\"messages\":[]}")"
+  code="$(curl -sS -o /tmp/body -w '%{http_code}' -X POST "$GW/v1/chat/completions" -H 'authorization: Bearer btak_wrong' -H 'content-type: application/json' -d "{\"model\":\"$MODEL\",\"messages\":[]}")"  # gitleaks:allow (deliberately invalid key)
   expect 401 "$code" "unknown agent key refused"
   expect 200 "$(chat false "$MODEL")" "third request inside quota"
   expect 429 "$(chat false "$MODEL")" "fourth request over the daily quota of 3"

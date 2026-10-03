@@ -13,7 +13,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use std::{
     convert::Infallible,
     net::SocketAddr,
@@ -161,11 +161,8 @@ async fn lab_with(tune: impl Fn(&mut RouteConfig), oidc: Option<Arc<Oidc>>) -> L
     let mut roots = rustls::RootCertStore::empty();
     for name in [APP, OTHER] {
         let pem = write_cert(certs_dir.path(), &[name]);
-        let der = rustls_pemfile::certs(&mut pem.as_bytes())
-            .next()
-            .unwrap()
-            .unwrap();
-        roots.add(CertificateDer::from(der.to_vec())).unwrap();
+        let der = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
+        roots.add(der).unwrap();
     }
     let routes = Arc::new(RouteTable::new(
         TargetPolicy::new(&["127.0.0.0/8".into()]).unwrap(),
@@ -457,7 +454,7 @@ async fn open_websocket(lab: &Lab) -> Tls {
     let mut stream = connect(lab, Some(APP)).await.unwrap();
     stream
         .write_all(
-            format!("GET /ws HTTP/1.1\r\nHost: {APP}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes(),
+            format!("GET /ws HTTP/1.1\r\nHost: {APP}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes(), // gitleaks:allow (RFC 6455 sample nonce)
         )
         .await
         .unwrap();

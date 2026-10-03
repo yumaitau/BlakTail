@@ -331,9 +331,11 @@ async fn listener_serves_allowed_sources_rejects_others_and_drops_on_revoke() {
     );
 
     // SNI for a name this node does not serve is refused.
-    assert!(fetch(listen, &api.ca_pem, "other.svc.12345678.blaktail")
-        .await
-        .is_none());
+    assert!(
+        fetch(listen, &api.ca_pem, "other.svc.12345678.blaktail") // gitleaks:allow
+            .await
+            .is_none()
+    );
 
     // Revoke (disable/delete/suspend all remove it from the list): the
     // route, the open connection and the listener go in one pass.

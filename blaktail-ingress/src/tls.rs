@@ -6,7 +6,10 @@
 
 use crate::routes::RouteTable;
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{
+        pem::{Error as PemError, PemObject},
+        CertificateDer, PrivateKeyDer,
+    },
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
@@ -174,20 +177,18 @@ fn warn_if_key_exposed(path: &Path) {
 /// Loads and checks a certificate chain and key: the leaf must name `fqdn`
 /// and be within its validity period.
 pub fn load_pair(cert: &Path, key: &Path, fqdn: &str) -> Result<(Arc<CertifiedKey>, i64), String> {
-    let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(
-        std::fs::File::open(cert).map_err(|e| format!("cannot read certificate: {e}"))?,
-    ))
-    .collect::<Result<_, _>>()
-    .map_err(|e| format!("certificate file is not PEM: {e}"))?;
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .map_err(|e| format!("cannot read certificate: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("certificate file is not PEM: {e}"))?;
     let leaf = chain
         .first()
         .ok_or_else(|| "certificate file has no certificate".to_owned())?;
-    let private: PrivateKeyDer<'static> =
-        rustls_pemfile::private_key(&mut std::io::BufReader::new(
-            std::fs::File::open(key).map_err(|e| format!("cannot read private key: {e}"))?,
-        ))
-        .map_err(|e| format!("private key file is not PEM: {e}"))?
-        .ok_or_else(|| "private key file has no key".to_owned())?;
+    let private = PrivateKeyDer::from_pem_file(key).map_err(|e| match e {
+        PemError::NoItemsFound => "private key file has no key".to_owned(),
+        PemError::Io(e) => format!("cannot read private key: {e}"),
+        e => format!("private key file is not PEM: {e}"),
+    })?;
     let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref())
         .map_err(|_| "certificate is not valid X.509".to_owned())?;
     let not_after = parsed.validity().not_after.timestamp();
