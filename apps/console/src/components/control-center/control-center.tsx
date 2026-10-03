@@ -225,9 +225,19 @@ function ControlCenterInner({
   useEffect(() => {
     // On a phone, keep labels legible and let people pan rather than shrinking everything.
     const narrow = window.matchMedia("(max-width: 800px)").matches;
-    const frame = requestAnimationFrame(() =>
-      flow.fitView({ padding: 0.15, maxZoom: 1.1, minZoom: narrow ? 0.55 : 0.2, duration: reduced ? 0 : 250 }),
-    );
+    const frame = requestAnimationFrame(() => {
+      if (!narrow) {
+        void flow.fitView({ padding: 0.15, maxZoom: 1.1, minZoom: 0.2, duration: reduced ? 0 : 250 });
+        return;
+      }
+      // At legible zoom the graph is wider than a phone: start from the
+      // left-hand source column (the selected device or group) and pan right.
+      void flow.fitView({ padding: 0.15, maxZoom: 1.1, minZoom: 0.55, duration: 0 }).then(() => {
+        const bounds = flow.getNodesBounds(flow.getNodes());
+        const viewport = flow.getViewport();
+        flow.setViewport({ ...viewport, x: 16 - bounds.x * viewport.zoom });
+      });
+    });
     return () => cancelAnimationFrame(frame);
   }, [graph, flow, reduced, listView]);
 
