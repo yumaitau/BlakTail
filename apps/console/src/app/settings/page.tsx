@@ -6,10 +6,15 @@ import { InvitationManager } from "@/components/invitation-manager";
 import { MembershipManager } from "@/components/membership-manager";
 import { OidcProviderManager } from "@/components/oidc-provider-manager";
 import { ScimManager } from "@/components/scim-manager";
+import { DirectoryRoleMapping } from "@/components/directory-role-mapping";
+import { getDirectorySettings, listGroupMappings } from "@/lib/directory-mapping";
+import { DEFAULT_DIRECTORY_SETTINGS } from "@/lib/directory-mapping-core";
 import { PageHeader } from "@/components/page-header";
 import { WebhookManager } from "@/components/webhook-manager";
+import { NotificationChannels } from "@/components/notification-channels";
 import { listApiClients, listWebhooks } from "@/lib/coord";
 import { listEventCatalogue } from "@/lib/coord-events";
+import { getNotificationCapabilities } from "@/lib/coord-notifications";
 import { listPendingInvitations } from "@/lib/invitations";
 import { listIdentitySettings } from "@/lib/identity-links";
 import { listIdentityProviders, listMemberships } from "@/lib/oidc";
@@ -37,6 +42,9 @@ export default async function SettingsPage() {
     signInPolicy,
     domains,
     assurance,
+    notificationCapabilities,
+    directorySettings,
+    groupMappings,
   ] = await Promise.all([
     listPendingInvitations(ctx),
     listIdentitySettings(ctx),
@@ -52,7 +60,14 @@ export default async function SettingsPage() {
     getSignInPolicy(ctx.organisationId),
     canSecurity ? listDomains(ctx.organisationId) : Promise.resolve([]),
     identityAssurance(ctx.userId),
+    canIntegrations ? getNotificationCapabilities(ctx).catch(() => null) : Promise.resolve(null),
+    canSecurity
+      ? getDirectorySettings(ctx.organisationId)
+      : Promise.resolve(DEFAULT_DIRECTORY_SETTINGS),
+    canSecurity ? listGroupMappings(ctx.organisationId) : Promise.resolve([]),
   ]);
+  const plainWebhooks = webhooks.filter((destination) => (destination.kind ?? "webhook") === "webhook");
+  const channels = webhooks.filter((destination) => (destination.kind ?? "webhook") !== "webhook");
 
   return (
     <ConsoleShell ctx={ctx} current="/settings">
@@ -70,6 +85,7 @@ export default async function SettingsPage() {
           {canSecurity ? <a href="#scim">Directory</a> : null}
           {canSecurity ? <a href="#members">Members</a> : null}
           <a href="#dns">DNS</a>
+          {canIntegrations ? <a href="#notifications">Notifications</a> : null}
           {canIntegrations ? <a href="#webhooks">Webhooks</a> : null}
           {canApiClients ? <a href="#automation">Automation</a> : null}
           {canSecurity ? <a href="#invitations">Invitations</a> : null}
@@ -135,8 +151,13 @@ export default async function SettingsPage() {
         {canSecurity ? (
           <div id="sso" className="stack">
             <OidcProviderManager providers={providers} />
-            <div id="scim">
+            <div id="scim" className="stack">
               <ScimManager />
+              <DirectoryRoleMapping
+                settings={directorySettings}
+                mappings={groupMappings}
+                organisationName={ctx.organisationName}
+              />
             </div>
           </div>
         ) : null}
@@ -162,8 +183,20 @@ export default async function SettingsPage() {
           </div>
         </div>
         {canIntegrations ? (
+          <div id="notifications">
+            <NotificationChannels
+              channels={channels}
+              catalogue={catalogue}
+              capabilities={notificationCapabilities}
+              canAcknowledgeResidency={canSecurity}
+              organisationName={ctx.organisationName}
+              roleLabel={roleLabel(ctx.role)}
+            />
+          </div>
+        ) : null}
+        {canIntegrations ? (
           <div id="webhooks">
-            <WebhookManager destinations={webhooks} catalogue={catalogue} />
+            <WebhookManager destinations={plainWebhooks} catalogue={catalogue} />
           </div>
         ) : null}
         {canApiClients ? (

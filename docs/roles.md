@@ -128,8 +128,9 @@ resolver with a 5-second timeout; nothing is re-checked automatically.
 
 ## Not yet built
 
-- SCIM or IdP group to role mapping with a drift preview. SCIM still only
-  activates and deactivates memberships; roles are set in the console.
+- Automatic role sync. Directory group mappings
+  ([identity.md](identity.md#directory-groups-and-roles)) change roles only
+  when an owner applies a previewed drift.
 - Session inactivity timeout and revoking other sessions on role change. A
   demoted person's next request uses the new role because roles are resolved
   live, but their session stays signed in.

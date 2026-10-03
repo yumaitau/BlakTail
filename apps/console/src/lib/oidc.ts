@@ -450,6 +450,14 @@ export async function completeOidcLogin(input: {
         "This identity has no active membership in the organisation.",
       );
     }
+    // Kept for directory group mapping previews; roles change only when an
+    // owner applies a previewed mapping.
+    await transaction`
+      UPDATE membership
+      SET idp_groups_json = CAST(${JSON.stringify(groupsFromClaims(claims).slice(0, 200))} AS jsonb),
+        idp_groups_seen_at = now()
+      WHERE id = ${member.id}
+    `;
     return { userId };
   });
   await writeConsoleAudit({
@@ -612,7 +620,10 @@ export async function changeMembership(input: {
       return { error: refusal, previous, next } as const;
     }
     await transaction`
-      UPDATE membership SET role = ${next.role}, status = ${next.status}
+      UPDATE membership SET role = ${next.role}, status = ${next.status},
+        role_source = CASE WHEN role = ${next.role} THEN role_source ELSE 'manual' END,
+        deprovision_at = CASE WHEN ${next.status} = 'active' THEN NULL ELSE deprovision_at END,
+        tombstoned_at = CASE WHEN ${next.status} = 'active' THEN NULL ELSE tombstoned_at END
       WHERE id = ${input.membershipId} AND organisation_id = ${input.organisationId}
     `;
     return { previous, next } as const;

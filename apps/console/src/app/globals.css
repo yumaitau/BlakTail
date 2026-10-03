@@ -1454,3 +1454,11 @@ button.quiet-danger:hover:not(:disabled),
   background: currentColor;
   opacity: 0.6;
 }
+
+/* Offshore residency acknowledgement (notification channels) */
+.callout.warn {
+  border-left: 3px solid var(--warning);
+  padding: 0.75rem 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
