@@ -34,6 +34,7 @@ const groups: { label: string; links: { href: string; label: string }[] }[] = [
   },
   { label: "DNS", links: [{ href: "/dns", label: "DNS" }] },
   { label: "Services", links: [{ href: "/services", label: "Private services" }] },
+  { label: "Agents", links: [{ href: "/agents", label: "Agent network" }] },
   {
     label: "Events",
     links: [

@@ -1439,3 +1439,18 @@ button.quiet-danger:hover:not(:disabled),
   gap: 0.75rem;
   align-items: end;
 }
+
+/* Agent network usage chart */
+.agent-bar-row {
+  display: grid;
+  grid-template-columns: 7rem 1fr 6rem;
+  align-items: center;
+  gap: 0.75rem;
+}
+.agent-bar {
+  display: block;
+  height: 0.75rem;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.6;
+}

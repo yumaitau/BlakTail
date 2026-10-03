@@ -13,7 +13,9 @@
     "manage_integrations",
     "manage_api_clients",
     "manage_security",
-    "view_operations"
+    "view_operations",
+    "manage_agent_gateway",
+    "view_agent_usage"
   ],
   "roles": {
     "owner": [
@@ -29,7 +31,9 @@
       "manage_integrations",
       "manage_api_clients",
       "manage_security",
-      "view_operations"
+      "view_operations",
+      "manage_agent_gateway",
+      "view_agent_usage"
     ],
     "admin": [
       "view_network",
@@ -41,7 +45,9 @@
       "manage_services",
       "view_audit",
       "export_audit",
-      "manage_integrations"
+      "manage_integrations",
+      "manage_agent_gateway",
+      "view_agent_usage"
     ],
     "network_admin": [
       "view_network",
@@ -53,7 +59,7 @@
       "manage_services",
       "view_audit"
     ],
-    "auditor": ["view_network", "view_audit", "export_audit", "view_operations"],
+    "auditor": ["view_network", "view_audit", "export_audit", "view_operations", "view_agent_usage"],
     "member": ["view_network", "view_audit"]
   }
 }

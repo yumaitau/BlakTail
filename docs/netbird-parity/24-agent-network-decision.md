@@ -20,6 +20,10 @@ Written decision with owner, user evidence, architecture, sovereignty review and
 
 ## Status (2 October 2026)
 
-**Done:** decision record drafted at [`docs/adr/0008-agent-network.md`](../adr/0008-agent-network.md) with gates, constraints and a recommendation: reject an AI gateway inside BlakTail; document running a self-hosted model as a private service governed by existing policy.
-**Proven by tests:** not applicable — decision only; no code or navigation added.
-**Still needs live/field proof or a decision:** product-owner sign-off on the ADR (status stays *proposed* until then).
+**Decision:** owner-approved 3 October 2026; [ADR 0008](../adr/0008-agent-network.md) is Accepted and its sovereignty/ICIP concerns are hard requirements.
+
+**Done:** new crate `blaktail-agentgw` (OpenAI-compatible `/v1/chat/completions` with SSE passthrough, `/v1/models`, overlay-only bind, redaction, usage reporting, secrets wrapped and never logged); coordinator module `blaktail-coord/src/agent_gateway.rs` (providers with declared location and sealed credentials, per-agent hashed keys with optional device binding, per-key policies, atomic daily quotas, offshore forbidden by default, metadata/full logging with owner + ICIP acknowledgement + ≤30-day retention, usage ingest with node-token auth and the `agent-gateway` capability, audit of every mutation and of stored-prompt reads); migration slot 31; permissions `manage_agent_gateway` (owner, admin) and `view_agent_usage` (owner, admin, auditor); `blaktaild up --agent-gateway`; console `/agents` in its own "Agents" nav group; docs in `docs/agent-gateway.md`; lab script `deploy/homelab/prove-agent-gateway.sh`.
+
+**Proven by tests:** 13 coordinator tests (key auth/revocation, quotas incl. 20 concurrent vs quota 5, offshore enforcement, model allowlist, request size, node binding, credential never returned/stored in clear/audited, full-logging gates and purge, single-use usage ingest, cross-org isolation, member/network-admin/auditor rejection, URL validation) and 9 gateway tests (unit + end-to-end with a real in-memory coordinator and a local axum mock upstream: byte-exact SSE passthrough, metering, redaction, bad key/quota never reach upstream, captured logs free of secrets). Live container lab with a real Ollama: see `docs/agent-gateway.md`.
+
+**Still needs live/field proof or a decision:** a run over a real WireGuard overlay (the lab used a private Docker network with `--allow-private-listen`); a hosted offshore provider with an owner's explicit approval; Anthropic Messages translation, tool/MCP allowlists and billing are not built; coordinator-secret rotation would need a re-seal; a named organisation's written user need and ICIP consent process remain the owner's to record.

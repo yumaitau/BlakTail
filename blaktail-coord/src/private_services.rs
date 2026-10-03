@@ -1076,7 +1076,7 @@ fn seal_cipher(master: &[u8]) -> Result<ChaCha20Poly1305, ApiError> {
     ChaCha20Poly1305::new_from_slice(&key).map_err(|_| ApiError::CorruptData)
 }
 
-fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
+pub(crate) fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ciphertext = seal_cipher(master)?
@@ -1087,7 +1087,7 @@ fn seal_key(master: &[u8], pem: &str) -> Result<String, ApiError> {
     Ok(format!("{SEALED_PREFIX}{}", STANDARD.encode(packed)))
 }
 
-fn open_key(master: &[u8], sealed: &str) -> Result<String, ApiError> {
+pub(crate) fn open_key(master: &[u8], sealed: &str) -> Result<String, ApiError> {
     let raw = STANDARD
         .decode(
             sealed

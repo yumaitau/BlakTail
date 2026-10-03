@@ -1,5 +1,6 @@
 mod address_pool;
 mod admin;
+mod agent_gateway;
 mod app_connectors;
 mod audit_log;
 mod automation;
@@ -355,7 +356,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 33,
         name: "posture integrations",
         postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0033_edr_integrations.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0033_edr_integrations.sql"
+        )),
     },
     Migration {
         version: 34,
@@ -367,7 +370,9 @@ const MIGRATIONS: &[Migration] = &[
         version: 35,
         name: "private service serving",
         postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0035_service_serving.sql")),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0035_service_serving.sql"
+        )),
     },
     Migration {
         version: 36,
@@ -1543,6 +1548,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(audit_log::routes())
         .merge(traffic::routes())
         .merge(notifications::routes())
+        .merge(agent_gateway::routes())
         .route("/oauth/token", post(admin::oauth_token))
         .route("/v1/nodes/register", post(register_node))
         .route("/v1/nodes/:node_id/reauth", post(reauth_node))
