@@ -227,9 +227,10 @@ ok gateway log (7 lines) holds no agent key, node token or provider credential
 ```
 
 An undesignated or released gateway gets `403` from the coordinator, which
-the gateway reports to callers as `503 gateway_unavailable` ("cannot reach the
-coordinator"): it fails closed, but the message does not say the device is
-not designated. The re-run first failed with `502 upstream_unreachable`
+the gateway reports to callers as `503 gateway_unavailable` with the message
+"this gateway is not authorised by the BlakTail coordinator (not designated as
+an AI gateway, or its credential was revoked)"; an unreachable coordinator
+keeps the "cannot reach the coordinator" message. Both fail closed. The re-run first failed with `502 upstream_unreachable`
 because the lab named Ollama by its Docker container name; the connect-time
 check correctly refuses a non-`.internal` hostname that resolves to a private
 address, so the lab now uses `ollama.internal`.
