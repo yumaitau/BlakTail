@@ -67,6 +67,9 @@ pub(crate) struct PostureDefinition {
     /// What a check does when the data it needs is missing or stale.
     #[serde(default)]
     pub(crate) on_missing_data: MissingData,
+    /// Signal from one of this organisation's MDM/EDR integrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) integration: Option<crate::posture_integrations::IntegrationRequirement>,
 }
 
 impl PostureDefinition {
@@ -81,8 +84,12 @@ impl PostureDefinition {
             && self.min_os_versions.is_empty()
             && self.max_credential_age_secs.is_none()
             && !self.require_approved_peer
+            && self.integration.is_none()
         {
             return bad("posture check must set at least one requirement");
+        }
+        if let Some(requirement) = &self.integration {
+            requirement.validate()?;
         }
         if let Some(version) = &self.min_agent_version {
             if parse_version(version).is_none() {
@@ -153,6 +160,8 @@ pub(crate) struct NodeFacts {
     pub(crate) credential_issued_at: Option<i64>,
     pub(crate) credential_expires_at: i64,
     pub(crate) inventory_reported_at: Option<i64>,
+    /// This organisation's integration signals, keyed by integration id.
+    pub(crate) integrations: BTreeMap<String, crate::posture_integrations::IntegrationFact>,
 }
 
 impl NodeFacts {
@@ -167,7 +176,8 @@ impl NodeFacts {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Reason {
     pub(crate) text: String,
-    /// `agent_reported` (not attested) or `coordinator_observed`.
+    /// `agent_reported` (not attested), `coordinator_observed` or
+    /// `provider_reported` (an MDM/EDR integration).
     pub(crate) source: &'static str,
 }
 
@@ -225,6 +235,27 @@ pub(crate) fn evaluate(
                 source: COORD,
             });
             lapse(facts.issued_at() + max);
+        }
+    }
+    if let Some(requirement) = &def.integration {
+        let outcome = crate::posture_integrations::assess(
+            requirement,
+            facts
+                .integrations
+                .get(&requirement.integration_id.to_string()),
+            now,
+        );
+        let reason = Reason {
+            text: outcome.reason,
+            source: crate::posture_integrations::PROVIDER_SOURCE,
+        };
+        if outcome.passed {
+            passes.push(reason);
+            if let Some(at) = outcome.lapse {
+                lapse(at);
+            }
+        } else {
+            failures.push(reason);
         }
     }
     let stale = def.max_report_age_secs.and_then(|max| {
@@ -417,7 +448,8 @@ pub(crate) async fn load_facts(
     .bind(node_id.map(|id| id.to_string()).unwrap_or_default())
     .fetch_all(pool)
     .await?;
-    rows.into_iter()
+    let mut facts = rows
+        .into_iter()
         .map(|row| {
             Ok(NodeFacts {
                 id: Uuid::parse_str(&row.try_get::<String, _>(0)?)
@@ -439,9 +471,12 @@ pub(crate) async fn load_facts(
                 credential_issued_at: row.try_get(11)?,
                 credential_expires_at: row.try_get(12)?,
                 inventory_reported_at: row.try_get(13)?,
+                integrations: BTreeMap::new(),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    crate::posture_integrations::attach(pool, org_id, &mut facts).await?;
+    Ok(facts)
 }
 
 impl PostureContext {
@@ -812,6 +847,10 @@ pub(crate) async fn create_check_as(
     }
     input.definition.validate()?;
     let mut tx = s.store.pool.begin().await?;
+    if let Some(requirement) = &input.definition.integration {
+        crate::posture_integrations::ensure_in_org(&mut tx, org_id, requirement.integration_id)
+            .await?;
+    }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posture_checks WHERE org_id=$1")
         .bind(org_id.to_string())
         .fetch_one(&mut *tx)
@@ -870,6 +909,10 @@ pub(crate) async fn update_check_as(
     require(session, Permission::ManagePolicy)?;
     input.definition.validate()?;
     let mut tx = s.store.pool.begin().await?;
+    if let Some(requirement) = &input.definition.integration {
+        crate::posture_integrations::ensure_in_org(&mut tx, org_id, requirement.integration_id)
+            .await?;
+    }
     let row = sqlx::query(
         "SELECT name,version,definition_json FROM posture_checks WHERE id=$1 AND org_id=$2",
     )
@@ -985,6 +1028,8 @@ struct DeviceAssessment {
     credential_issued_at: i64,
     enforcement: Enforcement,
     assessments: Vec<AssessmentView>,
+    /// Vendor signals for this device and where they came from.
+    integrations: Vec<crate::posture_integrations::IntegrationFact>,
 }
 
 #[derive(Serialize)]
@@ -1018,6 +1063,7 @@ fn device_assessment(
         inventory_reported_at: facts.reported_at(),
         credential_issued_at: facts.issued_at(),
         enforcement: enforcement_profile(facts.os.as_deref(), &facts.capabilities),
+        integrations: facts.integrations.values().cloned().collect(),
         assessments: ctx
             .assess(facts)
             .into_iter()
@@ -1088,6 +1134,7 @@ mod tests {
             credential_issued_at: Some(5_000),
             credential_expires_at: 100_000,
             inventory_reported_at: Some(9_000),
+            integrations: BTreeMap::new(),
         }
     }
 

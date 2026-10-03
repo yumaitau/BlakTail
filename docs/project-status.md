@@ -66,7 +66,11 @@ See [console.md](console.md).
 - Dual-stack overlay addresses (CGNAT IPv4 plus an organisation ULA `/64`)
 - Device inventory: last-seen/online, OS, agent version, search
 - Versioned posture checks that gate policy rules on self-reported agent/OS
-  version and coordinator-observed credential state (not attestation)
+  version and coordinator-observed credential state (not attestation), plus
+  optional MDM/EDR signals from Intune, CrowdStrike Falcon, SentinelOne,
+  FleetDM or Huntress (polling, matched by serial/MAC inside the
+  organisation, fail-closed on outage by default; mock-tested only, no live
+  vendor tenant)
 - Explain access, and SSH rules enforced at Linux destinations (per-user
   limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials

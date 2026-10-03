@@ -900,16 +900,91 @@ pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
     capabilities
 }
 
-fn inventory_query(state: &NodeState) -> [(&'static str, String); 3] {
+fn inventory_query(state: &NodeState) -> [(&'static str, String); 5] {
     let mut capabilities = agent_capabilities(state.ssh_users_enforced);
     if cfg!(target_os = "linux") && state.app_connector {
         capabilities.push(connector::CAPABILITY.into());
     }
+    let (serial, macs) = hardware_ids();
     [
         ("capabilities", capabilities.join(",")),
         ("agent_version", env!("CARGO_PKG_VERSION").to_string()),
         ("os_version", os_version()),
+        ("serial_number", serial.clone()),
+        ("mac_addresses", macs.join(",")),
     ]
+}
+
+/// Hardware serial number and physical MAC addresses, read once per
+/// process. The coordinator matches them against an organisation's MDM/EDR
+/// inventory; like the rest of the inventory they are self-reported.
+fn hardware_ids() -> &'static (String, Vec<String>) {
+    static IDS: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| (serial_number(), physical_macs()))
+}
+
+fn serial_number() -> String {
+    if cfg!(target_os = "linux") {
+        // Readable by root only; the agent runs as root.
+        return fs::read_to_string("/sys/class/dmi/id/product_serial")
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+    }
+    if cfg!(target_os = "macos") {
+        return Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| ioreg_serial(&String::from_utf8_lossy(&output.stdout)))
+            .unwrap_or_default();
+    }
+    String::new()
+}
+
+/// `"IOPlatformSerialNumber" = "C02XK1ABCD"` from `ioreg` output.
+fn ioreg_serial(text: &str) -> Option<String> {
+    text.lines()
+        .find(|line| line.contains("\"IOPlatformSerialNumber\""))
+        .and_then(|line| line.split('"').nth(3))
+        .map(str::to_string)
+}
+
+fn physical_macs() -> Vec<String> {
+    let mut macs = Vec::new();
+    if cfg!(target_os = "linux") {
+        // Interfaces backed by a device are physical; veth, bridges and
+        // the WireGuard interface have no `device` link.
+        if let Ok(entries) = fs::read_dir("/sys/class/net") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.join("device").exists() {
+                    if let Ok(mac) = fs::read_to_string(path.join("address")) {
+                        macs.push(mac.trim().to_string());
+                    }
+                }
+            }
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Some(output) = Command::new("networksetup")
+            .arg("-listallhardwareports")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+        {
+            macs.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("Ethernet Address:"))
+                    .map(|mac| mac.trim().to_string()),
+            );
+        }
+    }
+    macs.retain(|mac| mac.len() == 17 && mac != "00:00:00:00:00:00");
+    macs.sort();
+    macs.dedup();
+    macs.truncate(16);
+    macs
 }
 
 /// Self-reported OS release: `VERSION_ID` on Linux, the product version on
@@ -2380,6 +2455,13 @@ fn apply_org_dns_snapshot(state: &mut NodeState, incoming: Option<OrgDnsSnapshot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ioreg_serial_is_parsed_from_platform_expert_output() {
+        let output = "+-o J314sAP  <class IOPlatformExpertDevice>\n    {\n      \"IOPlatformUUID\" = \"ABCD\"\n      \"IOPlatformSerialNumber\" = \"C02XK1ABCD\"\n    }\n";
+        assert_eq!(ioreg_serial(output).as_deref(), Some("C02XK1ABCD"));
+        assert_eq!(ioreg_serial("no serial here"), None);
+    }
 
     #[derive(Default)]
     struct RecordingNetwork {

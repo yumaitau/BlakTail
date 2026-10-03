@@ -377,7 +377,7 @@ pub(crate) fn validate_destination_url(raw: &str, allow_private: bool) -> Result
     Ok(url)
 }
 
-async fn revalidate_resolved_ips(url: &Url) -> Result<Option<SocketAddr>, ApiError> {
+pub(crate) async fn revalidate_resolved_ips(url: &Url) -> Result<Option<SocketAddr>, ApiError> {
     let host = url
         .host_str()
         .ok_or_else(|| ApiError::BadRequest("webhook URL must include a host".into()))?;

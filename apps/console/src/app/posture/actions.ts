@@ -7,6 +7,15 @@ import {
   updatePostureCheck,
   type PostureDefinition,
 } from "@/lib/coord-policy";
+import {
+  createPostureIntegration,
+  deletePostureIntegration,
+  syncPostureIntegration,
+  updatePostureIntegration,
+  type ProviderConfig,
+  type ProviderKind,
+  type SyncReport,
+} from "@/lib/coord-posture-integrations";
 import { can } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
@@ -57,6 +66,20 @@ function definitionFrom(formData: FormData): PostureDefinition {
   if (report !== undefined) definition.max_report_age_secs = report;
   if (formData.get("require_approved_peer") === "on") definition.require_approved_peer = true;
   definition.on_missing_data = formData.get("on_missing_data") === "pass" ? "pass" : "fail";
+  const integration = String(formData.get("integration_id") ?? "").trim();
+  if (integration) {
+    const minutes = Number(String(formData.get("integration_max_age_minutes") ?? "60").trim() || "60");
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      throw new Error("Provider data freshness must be at least 1 minute.");
+    }
+    definition.integration = {
+      integration_id: integration,
+      max_age_secs: Math.round(minutes * 60),
+      on_outage: formData.get("integration_on_outage") === "pass" ? "pass" : "fail",
+    };
+    const seen = hoursToSeconds(formData.get("integration_last_seen_hours"), "Provider last seen");
+    if (seen !== undefined) definition.integration.max_last_seen_secs = seen;
+  }
   return definition;
 }
 
@@ -111,5 +134,110 @@ export async function deletePostureCheckAction(id: string): Promise<PostureActio
     return { ok: true };
   } catch (error) {
     return failure(error, "Could not delete the posture check.");
+  }
+}
+
+const PROVIDER_KINDS: ProviderKind[] = ["intune", "crowdstrike", "sentinelone", "fleetdm", "huntress"];
+const CONFIG_FIELDS = ["tenant_id", "client_id", "region", "console_url", "server_url", "api_key"] as const;
+
+export type IntegrationActionResult =
+  | { ok: true; report?: SyncReport }
+  | { ok: false; error: string };
+
+/** Provider credentials are owner-only, mirroring the coordinator. */
+async function securityContext() {
+  const ctx = await requireConsoleContext();
+  if (!can(ctx.role, "manage_security")) {
+    throw new Error("Only organisation owners can manage device-health integrations.");
+  }
+  return ctx;
+}
+
+function integrationFailure(error: unknown, fallback: string): IntegrationActionResult {
+  return { ok: false, error: error instanceof Error ? error.message : fallback };
+}
+
+export async function createIntegrationAction(formData: FormData): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    const kind = String(formData.get("kind") ?? "") as ProviderKind;
+    if (!PROVIDER_KINDS.includes(kind)) return { ok: false, error: "Choose a provider." };
+    if (formData.get("privacy_acknowledged") !== "on") {
+      return { ok: false, error: "Read and acknowledge the data notice before connecting." };
+    }
+    const config: ProviderConfig = {};
+    for (const field of CONFIG_FIELDS) {
+      const value = String(formData.get(field) ?? "").trim();
+      if (value) config[field] = value;
+    }
+    if (formData.get("match_hostname") === "on") config.match_hostname = true;
+    const minutes = Number(String(formData.get("interval_minutes") ?? "15").trim() || "15");
+    if (!Number.isFinite(minutes) || minutes < 5 || minutes > 1440) {
+      return { ok: false, error: "Sync interval must be 5-1440 minutes." };
+    }
+    const { id } = await createPostureIntegration(ctx, {
+      kind,
+      name: String(formData.get("name") ?? "").trim(),
+      config,
+      secret: String(formData.get("secret") ?? ""),
+      interval_secs: Math.round(minutes * 60),
+      privacy_acknowledged: true,
+    });
+    const report = await syncPostureIntegration(ctx, id);
+    revalidatePath("/posture");
+    return { ok: true, report };
+  } catch (error) {
+    return integrationFailure(error, "Could not connect the provider.");
+  }
+}
+
+export async function syncIntegrationAction(id: string): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    const report = await syncPostureIntegration(ctx, id);
+    revalidatePath("/posture");
+    return { ok: true, report };
+  } catch (error) {
+    return integrationFailure(error, "Could not test the connection.");
+  }
+}
+
+export async function setIntegrationEnabledAction(
+  id: string,
+  enabled: boolean,
+): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    await updatePostureIntegration(ctx, id, { enabled });
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return integrationFailure(error, "Could not update the integration.");
+  }
+}
+
+export async function rotateIntegrationSecretAction(formData: FormData): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    const id = String(formData.get("id") ?? "");
+    const secret = String(formData.get("secret") ?? "");
+    if (!id || !secret) return { ok: false, error: "Enter the new secret." };
+    await updatePostureIntegration(ctx, id, { secret });
+    const report = await syncPostureIntegration(ctx, id);
+    revalidatePath("/posture");
+    return { ok: true, report };
+  } catch (error) {
+    return integrationFailure(error, "Could not replace the secret.");
+  }
+}
+
+export async function deleteIntegrationAction(id: string): Promise<IntegrationActionResult> {
+  try {
+    const ctx = await securityContext();
+    await deletePostureIntegration(ctx, id);
+    revalidatePath("/posture");
+    return { ok: true };
+  } catch (error) {
+    return integrationFailure(error, "Could not remove the integration.");
   }
 }
