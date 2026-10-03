@@ -11,8 +11,9 @@ use crate::{
     permissions::{require, Permission},
     policy_explain::{device_flow, device_subject},
     posture::{enforcement_profile, PostureContext},
-    resources::{self, NetworksOverview},
-    Acl, ApiError, AppState, DeviceTag, Role, Subject, NODE_ONLINE_SECS,
+    resources::{self, NetworksOverview, ResourceAccess, ResourceKind, ResourceProtocol},
+    subject_in_group, Acl, AclProtocol, Action, ApiError, AppState, DeviceTag, Role, Subject,
+    NODE_ONLINE_SECS,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -79,6 +80,51 @@ pub(crate) struct ResourceView {
     pub(crate) selected_routing_peer: Option<Uuid>,
     pub(crate) routing_peers: Vec<RoutingPeerView>,
     pub(crate) receiving: usize,
+    /// `cidr` or `dns`.
+    pub(crate) kind: ResourceKind,
+    /// Ports and protocols the resource admits; empty means all.
+    pub(crate) ports: Vec<String>,
+    pub(crate) protocols: Vec<ResourceProtocol>,
+    /// `enforced` when the selected routing peer filters forwarded ports.
+    pub(crate) port_enforcement: String,
+    /// Which roles, device tags or policy groups receive it.
+    pub(crate) access: ResourceAccess,
+}
+
+/// A policy selector as written; the graph draws one node per item.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct SelectorView {
+    pub(crate) roles: Vec<Role>,
+    pub(crate) tags: Vec<DeviceTag>,
+    pub(crate) groups: Vec<String>,
+    /// Destination only: named policy hosts behind subnet routes.
+    #[serde(default)]
+    pub(crate) hosts: Vec<String>,
+}
+
+/// One access rule of the published policy. Rules carry no names, so the
+/// console labels them by position (`index` is zero-based).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RuleView {
+    pub(crate) index: usize,
+    /// `allow` or `deny`.
+    pub(crate) action: String,
+    pub(crate) src: SelectorView,
+    pub(crate) dst: SelectorView,
+    /// Empty means every protocol.
+    pub(crate) protocols: Vec<AclProtocol>,
+    /// Empty means every port.
+    pub(crate) ports: Vec<String>,
+    pub(crate) posture: Vec<String>,
+}
+
+/// A named policy group and which of this organisation's active devices it
+/// matches today. Member identities are not exposed, only their count.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct GroupView {
+    pub(crate) name: String,
+    pub(crate) members: usize,
+    pub(crate) devices: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -113,6 +159,11 @@ pub(crate) struct Edge {
     pub(crate) path: String,
     pub(crate) explanation: String,
     pub(crate) edit: EditTarget,
+    /// Device edges: indices of the policy rules whose selectors match this
+    /// pair (allow and deny), from the same evaluator. Empty when only the
+    /// same-tag default admits it, and for route and resource edges.
+    #[serde(default)]
+    pub(crate) rules: Vec<usize>,
 }
 
 impl Edge {
@@ -152,6 +203,10 @@ pub(crate) struct Topology {
     pub(crate) resources: Vec<ResourceView>,
     pub(crate) routes: Vec<RouteView>,
     pub(crate) edges: Vec<Edge>,
+    #[serde(default)]
+    pub(crate) rules: Vec<RuleView>,
+    #[serde(default)]
+    pub(crate) groups: Vec<GroupView>,
     pub(crate) truncated: bool,
     pub(crate) notes: Vec<String>,
 }
@@ -327,6 +382,7 @@ pub(crate) fn edges(inputs: &Inputs, acl: &Acl, networks: &NetworksOverview) -> 
                         surface: "policy".into(),
                         id: None,
                     },
+                    rules: flow.rules.clone(),
                 });
             }
             // Approved device routes ride on the router's peer entry.
@@ -364,6 +420,7 @@ pub(crate) fn edges(inputs: &Inputs, acl: &Acl, networks: &NetworksOverview) -> 
                         surface: "device".into(),
                         id: Some(target.id),
                     },
+                    rules: Vec::new(),
                 });
             }
         }
@@ -413,6 +470,7 @@ pub(crate) fn edges(inputs: &Inputs, acl: &Acl, networks: &NetworksOverview) -> 
                     surface: "network_resource".into(),
                     id: Some(detail.resource.id),
                 },
+                rules: Vec::new(),
             });
         }
     }
@@ -451,6 +509,64 @@ pub(crate) fn resource_views(networks: &NetworksOverview) -> Vec<ResourceView> {
                 .iter()
                 .filter(|client| client.receives)
                 .count(),
+            kind: detail.resource.kind,
+            ports: detail.resource.ports.clone(),
+            protocols: detail.resource.protocols.clone(),
+            port_enforcement: detail.resource.port_enforcement.clone(),
+            access: detail.resource.access.clone(),
+        })
+        .collect()
+}
+
+/// The published rules as written, labelled by position.
+pub(crate) fn rule_views(acl: &Acl) -> Vec<RuleView> {
+    acl.rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| RuleView {
+            index,
+            action: match rule.action {
+                Action::Allow => "allow",
+                Action::Deny => "deny",
+            }
+            .into(),
+            src: SelectorView {
+                roles: rule.src_roles.clone(),
+                tags: rule.src_tags.clone(),
+                groups: rule.src_groups.clone(),
+                hosts: Vec::new(),
+            },
+            dst: SelectorView {
+                roles: rule.dst_roles.clone(),
+                tags: rule.dst_tags.clone(),
+                groups: rule.dst_groups.clone(),
+                hosts: rule.dst_hosts.clone(),
+            },
+            protocols: rule.protocols.clone(),
+            ports: rule.dst_ports.clone(),
+            posture: rule.posture.clone(),
+        })
+        .collect()
+}
+
+/// Policy groups with a member count and the devices whose owner they name.
+pub(crate) fn group_views(inputs: &Inputs, acl: &Acl) -> Vec<GroupView> {
+    let subjects = subjects(inputs);
+    acl.groups
+        .iter()
+        .map(|(name, members)| GroupView {
+            name: name.clone(),
+            members: members.iter().filter(|m| !m.trim().is_empty()).count(),
+            devices: inputs
+                .nodes
+                .iter()
+                .filter(|node| {
+                    subjects
+                        .get(&node.id)
+                        .is_some_and(|subject| subject_in_group(subject, members))
+                })
+                .map(|node| node.id)
+                .collect(),
         })
         .collect()
 }
@@ -469,6 +585,8 @@ pub(crate) async fn build(state: &AppState, org_id: Uuid) -> Result<Topology, Ap
         .await?
         .ok_or(ApiError::NotFound)?;
     let (edges, truncated) = edges(&inputs, &acl, &networks);
+    let rules = rule_views(&acl);
+    let groups = group_views(&inputs, &acl);
     let routes = inputs
         .nodes
         .iter()
@@ -507,6 +625,8 @@ pub(crate) async fn build(state: &AppState, org_id: Uuid) -> Result<Topology, Ap
         resources: resource_views(&networks),
         routes,
         edges,
+        rules,
+        groups,
         truncated,
         notes,
     })

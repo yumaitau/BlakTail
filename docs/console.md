@@ -40,12 +40,31 @@ authorisation.
   pair's negotiated state as each agent reports it ("Classical", "Hybrid PQ
   (ML-KEM-768 + X25519), rotated Ns ago", "Required but not established").
   There is no account-wide badge. See [post-quantum.md](post-quantum.md)
-- `/topology` — who can reach what in the selected organisation: devices
-  (online, stale, suspended, expired, agent-reported transport with its
-  timestamp or "not measured"), network resources and routing peers, approved
-  routes, and every effective path with a text explanation and a link to the
-  page that owns it. Searchable and filterable; an optional static graph
-  groups devices by tag. See [Topology and change drafts](#topology-and-change-drafts).
+- `/control-center` — the landing page after sign-in and the first sidebar
+  item. An interactive graph (pan, zoom, dotted canvas) of the topology read
+  model with three tabs: **Devices** (one device → the policy rules that admit
+  its paths, as `Rule N` pills with a protocol:port badge such as `TCP:443` or
+  `All` → the tags, groups, roles, routes and networks they reach, with device
+  and resource counts), **Groups** (a tag, group or role → rules naming it as
+  source → destinations; resource access too) and **Networks** (who can reach
+  each network, labelled with services; click a network or use the picker to
+  drill into access → resource, with a routing-peer pill). Resources have no
+  network container in BlakTail, so the graph treats resources sharing the
+  same routing peers as one network, named after those peers. Line styles:
+  green dashed (animated unless reduced motion) allowed and enforced on the
+  destination; grey dotted allowed but ports not proven enforced (or subnet
+  routes, which are not port-filtered); red dashed denied; faint dotted written
+  in policy but no device currently uses it. A rule-level edge is only drawn
+  as allowed when the coordinator compiled at least one matching device path.
+  Every node opens a side panel with details, its paths in words and a link to
+  its edit page. **List view** is the text equivalent; the URL keeps the tab
+  and selection.
+- `/topology` — the full text view: who can reach what in the selected
+  organisation, devices (online, stale, suspended, expired, agent-reported
+  transport with its timestamp or "not measured"), network resources and
+  routing peers, approved routes, and every effective path with a text
+  explanation and a link to the page that owns it. Searchable and filterable.
+  See [Topology and change drafts](#topology-and-change-drafts).
 - `/changes` — server-side change drafts: stage access policy, network
   resource and DNS changes together, preview the diff and reachability change,
   and publish them atomically (owner, admin and network admin; members and
@@ -99,7 +118,13 @@ resource paths from the network-resource distribution. Suspended and expired
 devices have no paths. Path type combines the two endpoints' own transport
 summaries; it is not a per-pair measurement, reports older than ten minutes
 show as not measured, and nothing is sent to external analytics. Pairwise
-evaluation stops at 400 active devices and says so.
+evaluation stops at 400 active devices and says so. Each device edge also
+lists the indices of the policy rules whose selectors match that pair
+(`rules`), and the response carries the published rules as written (`rules`:
+action, source and destination selectors, protocols, ports, posture) and each
+policy group's member count and matching devices (`groups`; member identities
+are not exposed). Resources include their kind, ports, protocols, port
+enforcement and access selectors.
 
 A change draft (`/v1/orgs/{org}/changes`) is bound to one organisation,
 versioned, and expires after seven days. It stores proposed documents for any
@@ -178,7 +203,7 @@ This is a product invariant: a person's login identity and an organisation's
 network account are different records. One Better Auth user can hold memberships
 in many organisation workspaces, and membership in a second network never requires
 logging out of the first. The
-sidebar workspace selector persists an active workspace in an HTTP-only cookie;
+organisation switcher in the top bar persists an active workspace in an HTTP-only cookie;
 the cookie is only a preference, and every request rechecks the selected ID against
 the signed-in user's live memberships. Invalid or removed workspace selections
 cannot fall through to a write in another organisation.

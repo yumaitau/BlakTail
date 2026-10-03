@@ -10,7 +10,7 @@ import { TwoFactorChallenge } from "./two-factor-challenge";
 import { Wordmark } from "./wordmark";
 
 export function SignInForm({
-  nextPath = "/devices",
+  nextPath = "/control-center",
   errorMessage,
   organisationId,
 }: {

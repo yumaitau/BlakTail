@@ -154,6 +154,9 @@ pub(crate) struct DeviceFlow {
     pub(crate) policy_allows: bool,
     pub(crate) admitted: bool,
     basis: &'static str,
+    /// Indices into `acl.rules` whose selectors (and, when given, port and
+    /// protocol) match this pair, allow and deny alike, in policy order.
+    pub(crate) rules: Vec<usize>,
 }
 
 impl DeviceFlow {
@@ -206,8 +209,10 @@ pub(crate) fn device_flow(
         destination_map_includes_source: acl.allows(destination, source),
     };
     let (mut flow_allow, mut flow_deny) = (false, false);
-    for rule in &acl.rules {
+    let mut rules = Vec::new();
+    for (index, rule) in acl.rules.iter().enumerate() {
         if acl.rule_matches(rule, source, destination, port, protocol, None) {
+            rules.push(index);
             match rule.action {
                 Action::Allow => flow_allow = true,
                 Action::Deny => flow_deny = true,
@@ -234,6 +239,7 @@ pub(crate) fn device_flow(
         policy_allows,
         admitted,
         basis,
+        rules,
     }
 }
 

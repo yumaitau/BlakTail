@@ -33,7 +33,30 @@ export type TopologyEdge = {
   path: "direct" | "relay" | "mixed" | "unknown" | "peer_offline";
   explanation: string;
   edit: { surface: "policy" | "network_resource" | "device"; id: string | null };
+  /** Device edges: zero-based indices of the policy rules matching this pair. */
+  rules: number[];
 };
+
+export type TopologySelector = {
+  roles: OrgRole[];
+  tags: DeviceTag[];
+  groups: string[];
+  hosts: string[];
+};
+
+export type TopologyProtocol = "tcp" | "udp" | "icmp";
+
+export type TopologyRule = {
+  index: number;
+  action: "allow" | "deny";
+  src: TopologySelector;
+  dst: TopologySelector;
+  protocols: TopologyProtocol[];
+  ports: string[];
+  posture: string[];
+};
+
+export type TopologyGroup = { name: string; members: number; devices: string[] };
 
 export type TopologyResource = {
   id: string;
@@ -44,6 +67,11 @@ export type TopologyResource = {
   selected_routing_peer: string | null;
   routing_peers: { node_id: string; name: string | null; state: string }[];
   receiving: number;
+  kind: "cidr" | "dns";
+  ports: string[];
+  protocols: TopologyProtocol[];
+  port_enforcement: string;
+  access: { roles: OrgRole[]; tags: DeviceTag[]; groups: string[] };
 };
 
 export type Topology = {
@@ -55,6 +83,8 @@ export type Topology = {
   resources: TopologyResource[];
   routes: { node_id: string; cidr: string; kind: "subnet" | "exit" }[];
   edges: TopologyEdge[];
+  rules: TopologyRule[];
+  groups: TopologyGroup[];
   truncated: boolean;
   notes: string[];
 };

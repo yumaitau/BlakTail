@@ -1615,6 +1615,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_names_the_rules_behind_each_device_edge() {
+        let router = app(
+            Store::memory().await.unwrap(),
+            "ap-southeast-2".into(),
+            SECRET,
+        );
+        let org = create_org(&router, "Alpha").await;
+        let owner = Who::person(org.id, "owner-a", "owner");
+        let member = Who::person(org.id, "member-a", "member");
+        let laptop = register(&router, &owner, "laptop").await;
+        let server = register(&router, &owner, "server").await;
+        let response = call(
+            &router,
+            Method::PUT,
+            &format!("/v1/orgs/{}/acl", org.id),
+            serde_json::json!({
+                "version": 1,
+                "defaults": "deny",
+                "groups": {"ops": ["owner-a", "someone-else"]},
+                "rules": [
+                    {"action": "allow", "src_groups": ["ops"], "dst_roles": ["owner"], "protocols": ["tcp"], "dst_ports": ["443"]},
+                    {"action": "deny", "src_roles": ["member"], "dst_roles": ["owner"]},
+                    {"action": "allow", "src_groups": ["ops"], "dst_roles": ["owner"], "protocols": ["udp"], "dst_ports": ["53"]}
+                ]
+            }),
+            &owner,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let view = topology_of(&router, &member).await;
+        assert_eq!(view.rules.len(), 3);
+        assert_eq!(view.rules[0].action, "allow");
+        assert_eq!(view.rules[0].ports, vec!["443".to_string()]);
+        assert_eq!(view.rules[1].action, "deny");
+        assert_eq!(view.rules[2].dst.roles, vec![crate::Role::Owner]);
+        let edge = view
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.kind == "device"
+                    && edge.source_node_id == laptop.id
+                    && edge.target_node_id == Some(server.id)
+            })
+            .expect("ops may reach the server on TCP 443 and UDP 53");
+        // Only the rules whose selectors match this pair, never the member deny.
+        assert_eq!(edge.rules, vec![0, 2]);
+        assert_eq!(edge.basis, "rule");
+        let ops = view
+            .groups
+            .iter()
+            .find(|group| group.name == "ops")
+            .unwrap();
+        assert_eq!(ops.members, 2, "member identities are counted, not listed");
+        assert!(ops.devices.contains(&laptop.id) && ops.devices.contains(&server.id));
+
+        // With no matching rule, a same-tag default edge carries no rules.
+        let response = call(
+            &router,
+            Method::PUT,
+            &format!("/v1/orgs/{}/acl", org.id),
+            serde_json::json!({"version": 1, "defaults": "same_tag", "rules": []}),
+            &owner,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let view = topology_of(&router, &member).await;
+        assert!(view.rules.is_empty() && view.groups.is_empty());
+        assert!(view
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == "device")
+            .all(|edge| edge.rules.is_empty() && edge.basis == "default_same_tag"));
+    }
+
+    #[tokio::test]
     async fn topology_reflects_publish_and_revoke_and_never_leaks_other_orgs() {
         let router = app(
             Store::memory().await.unwrap(),

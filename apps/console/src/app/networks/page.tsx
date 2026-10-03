@@ -127,7 +127,7 @@ export default async function NetworksPage() {
           ) : null}
         </div>
 
-        <div className="panel stack">
+        <div className="panel stack" id="routes">
           <div>
             <h2>Advertised routes on devices</h2>
             <p className="muted">

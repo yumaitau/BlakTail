@@ -181,7 +181,7 @@ export async function startOidcLogin(organisationId: string, redirectTo: string)
     providerId: provider.id,
     codeVerifier: verifier,
     nonce,
-    redirectTo: redirectTo.startsWith("/") ? redirectTo : "/devices",
+    redirectTo: redirectTo.startsWith("/") ? redirectTo : "/control-center",
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
   });
   const url = new URL(metadata.authorization_endpoint);

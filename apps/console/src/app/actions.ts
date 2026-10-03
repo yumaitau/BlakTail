@@ -594,6 +594,7 @@ export async function revokeInvitationAction(
 }
 
 const consolePaths = new Set([
+  "/control-center",
   "/devices",
   "/join-keys",
   "/acls",

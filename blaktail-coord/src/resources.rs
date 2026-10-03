@@ -83,11 +83,11 @@ pub(crate) enum ResourceKind {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResourceAccess {
     #[serde(default)]
-    roles: Vec<Role>,
+    pub(crate) roles: Vec<Role>,
     #[serde(default)]
-    tags: Vec<DeviceTag>,
+    pub(crate) tags: Vec<DeviceTag>,
     #[serde(default)]
-    groups: Vec<String>,
+    pub(crate) groups: Vec<String>,
 }
 
 impl ResourceAccess {
@@ -155,7 +155,7 @@ pub(crate) struct NetworkResource {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     description: String,
-    kind: ResourceKind,
+    pub(crate) kind: ResourceKind,
     pub(crate) cidr: Option<String>,
     pub(crate) dns_target: Option<String>,
     /// `ipv4` or `ipv6` for CIDR resources.
@@ -163,13 +163,13 @@ pub(crate) struct NetworkResource {
     /// DNS targets only: resolved, blocked or not_resolved, from the
     /// selected app connector's leases.
     dns_resolution: Option<String>,
-    ports: Vec<String>,
-    protocols: Vec<ResourceProtocol>,
+    pub(crate) ports: Vec<String>,
+    pub(crate) protocols: Vec<ResourceProtocol>,
     /// `enforced` when the selected routing peer reports `forward-filter`
     /// and so forwards only these ports; otherwise `not_enforced`.
-    port_enforcement: String,
+    pub(crate) port_enforcement: String,
     routing_peers: Vec<RoutingPeer>,
-    access: ResourceAccess,
+    pub(crate) access: ResourceAccess,
     pub(crate) enabled: bool,
     allow_nested_overlap: bool,
     public_route_confirmed_by: Option<String>,

@@ -14,6 +14,12 @@ page.fill({ selector: "input[name='password']", value: "$LP_CONSOLE_PASSWORD" })
 page.click({
   selector: "[data-testid='sign-in-submit'], .sign-in-card form button[type='submit']",
 });
+// Sign-in lands on the Control Center; Devices is one nav step away.
+page.waitForScript(
+  "document.querySelector('h1') && document.querySelector('h1').textContent === 'Control Center'",
+  { timeout: 20000 },
+);
+page.click({ selector: "[data-testid='nav-devices']" });
 page.waitForScript(
   "document.querySelector('h1') && document.querySelector('h1').textContent === 'Devices'",
   { timeout: 20000 },
@@ -25,6 +31,8 @@ const devices = page.extract({
   nav: [{ selector: "nav[aria-label='Console'] a", fields: { label: "" } }],
 });
 
+// Policies sits in the collapsible Access group.
+page.click({ selector: "button[aria-controls='side-group-access']" });
 page.click({
   selector: "[data-testid='nav-acls'], nav[aria-label='Console'] a[href='/acls']",
 });
