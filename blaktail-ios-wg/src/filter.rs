@@ -10,6 +10,7 @@
 //! fragment was not seen is dropped instead of reassembled, and a policy change
 //! also ends inbound-initiated flows the new policy no longer allows.
 
+use crate::flow_events::{self, FlowEvent};
 use crate::{BlakTailTunnel, RESULT_DONE, RESULT_ERR};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -25,6 +26,9 @@ pub const MAX_STATES: usize = 16_384;
 /// in `overflow` and dropped.
 pub const MAX_TRAFFIC_KEYS: usize = 1_024;
 const MAX_FRAGMENTS: usize = 256;
+/// Distinct dropped connections remembered between event uploads; repeats
+/// of one (a SYN retry) add to its counters, more are counted as overflow.
+pub const MAX_PENDING_DROPS: usize = 512;
 /// IPv6 extension headers walked before a packet is treated as malformed.
 pub const MAX_EXT_HEADERS: usize = 8;
 /// Ports at or above this (the dynamic range) are counted as one class.
@@ -269,16 +273,33 @@ impl Policy {
 
     /// Verdict for a new inbound flow, plus the peer it is attributed to.
     fn decide(&self, source: IpAddr, proto: u8, port: u16) -> (bool, Option<Arc<str>>) {
+        let (allow, peer, _) = self.decide_with_hint(source, proto, port);
+        (allow, peer)
+    }
+
+    /// `decide` plus which part of the filter decided, as an event hint:
+    /// `acl:deny-rule` (an explicit deny for this source) or `acl:default`.
+    fn decide_with_hint(
+        &self,
+        source: IpAddr,
+        proto: u8,
+        port: u16,
+    ) -> (bool, Option<Arc<str>>, &'static str) {
         if let Some(entries) = self.sources.get(&source) {
             for entry in entries {
                 for rule in &entry.rules {
                     if rule.matches(proto, port) {
-                        return (!self.enforce || rule.accept, entry.peer.clone());
+                        let allow = !self.enforce || rule.accept;
+                        return (
+                            allow,
+                            entry.peer.clone(),
+                            if allow { "acl:allow" } else { "acl:deny-rule" },
+                        );
                     }
                 }
             }
         }
-        (!self.enforce, self.peer_for(source))
+        (!self.enforce, self.peer_for(source), "acl:default")
     }
 
     fn peer_for(&self, address: IpAddr) -> Option<Arc<str>> {
@@ -567,6 +588,28 @@ struct State {
     replied: bool,
     expires: u64,
     generation: u64,
+    /// Per-flow event bookkeeping, present only for flows that started
+    /// while traffic events were on.
+    flow: Option<FlowStats>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FlowStats {
+    id: u64,
+    last_seen: u64,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    rx_packets: u64,
+    tx_packets: u64,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct DropKey {
+    source: IpAddr,
+    destination: IpAddr,
+    proto: u8,
+    source_port: u16,
+    destination_port: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -638,8 +681,20 @@ pub struct Filter {
     overflow: u64,
     last_purge: u64,
     epoch: Instant,
+    /// Unix time of `epoch`, so event times need no clock read per packet.
+    epoch_unix: i64,
+    /// Per-flow events while traffic diagnostics are on.
+    events: Option<flow_events::Buffer>,
+    drops: HashMap<DropKey, FlowEvent>,
+    /// Dropped connections not remembered because `drops` was full.
+    pub drop_overflow: u64,
+    next_flow: u64,
+    /// Distinguishes flow ids across tunnel restarts.
+    instance: u32,
     /// Unix time the current traffic bucket started.
     pub bucket_started: i64,
+    /// Unix time the current event window started.
+    pub events_since: i64,
 }
 
 impl Default for Filter {
@@ -660,8 +715,152 @@ impl Filter {
             overflow: 0,
             last_purge: 0,
             epoch: Instant::now(),
+            epoch_unix: unix_seconds(),
+            events: None,
+            drops: HashMap::new(),
+            drop_overflow: 0,
+            next_flow: 0,
+            instance: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.subsec_nanos() ^ (elapsed.as_secs() as u32))
+                .unwrap_or(0))
+                ^ std::process::id(),
             bucket_started: 0,
+            events_since: 0,
         }
+    }
+
+    fn unix(&self, now: u64) -> i64 {
+        self.epoch_unix + now as i64
+    }
+
+    fn flow_id(&self, id: u64) -> String {
+        format!("u{:08x}-{id:x}", self.instance)
+    }
+
+    /// Start or end event for a tracked flow.
+    fn flow_event(
+        &self,
+        key: &FlowKey,
+        state: &State,
+        kind: flow_events::Kind,
+        at: i64,
+    ) -> Option<FlowEvent> {
+        let stats = state.flow.as_ref()?;
+        let local = (key.local, key.local_port);
+        let remote = (key.remote, key.remote_port);
+        let (direction, source, destination) = match state.initiator {
+            Direction::Inbound => (flow_events::Direction::Inbound, remote, local),
+            Direction::Outbound => (flow_events::Direction::Outbound, local, remote),
+        };
+        let mut event = flow_events::event(
+            self.flow_id(stats.id),
+            kind,
+            at,
+            direction,
+            key.proto,
+            source,
+            destination,
+            None,
+        );
+        event.peer_id = state.peer.as_deref().map(str::to_owned);
+        if kind == flow_events::Kind::End {
+            event.rx_bytes = stats.rx_bytes;
+            event.tx_bytes = stats.tx_bytes;
+            event.rx_packets = stats.rx_packets;
+            event.tx_packets = stats.tx_packets;
+        }
+        Some(event)
+    }
+
+    fn emit(&mut self, event: Option<FlowEvent>) {
+        if let (Some(buffer), Some(event)) = (self.events.as_mut(), event) {
+            buffer.push(event);
+        }
+    }
+
+    /// Emits the end event of a flow that is going away.
+    fn ended(&mut self, key: &FlowKey, state: &State) {
+        if self.events.is_none() {
+            return;
+        }
+        let at = self.unix(state.flow.as_ref().map_or(0, |stats| stats.last_seen));
+        let event = self.flow_event(key, state, flow_events::Kind::End, at);
+        self.emit(event);
+    }
+
+    /// Records a dropped inbound packet as a drop event, merging repeats.
+    fn dropped(&mut self, packet: &Packet, peer: Option<&Arc<str>>, hint: &'static str, now: u64) {
+        if self.events.is_none() {
+            return;
+        }
+        let (source_port, destination_port, icmp) = match packet.l4 {
+            L4::Ports {
+                source,
+                destination,
+                ..
+            } => (source, destination, None),
+            L4::Icmp { kind, .. } => (0, 0, Some(kind)),
+            L4::Other => (0, 0, None),
+        };
+        let key = DropKey {
+            source: packet.source,
+            destination: packet.destination,
+            proto: packet.proto,
+            source_port,
+            destination_port,
+        };
+        if let Some(event) = self.drops.get_mut(&key) {
+            event.rx_bytes = event.rx_bytes.saturating_add(packet.len as u64);
+            event.rx_packets = event.rx_packets.saturating_add(1);
+            return;
+        }
+        if self.drops.len() >= MAX_PENDING_DROPS {
+            self.drop_overflow += 1;
+            return;
+        }
+        self.next_flow += 1;
+        let mut event = flow_events::event(
+            self.flow_id(self.next_flow),
+            flow_events::Kind::Drop,
+            self.unix(now),
+            flow_events::Direction::Inbound,
+            packet.proto,
+            (packet.source, source_port),
+            (packet.destination, destination_port),
+            icmp.map(|kind| (kind, 0)),
+        );
+        event.peer_id = peer.map(|peer| peer.to_string());
+        event.rule_hint = Some(hint);
+        event.rx_bytes = packet.len as u64;
+        event.rx_packets = 1;
+        self.drops.insert(key, event);
+    }
+
+    /// Takes the events since the last call (at most one upload batch).
+    pub fn take_events(&mut self) -> Vec<FlowEvent> {
+        let Some(buffer) = self.events.as_mut() else {
+            return Vec::new();
+        };
+        for (_, event) in self.drops.drain() {
+            buffer.push(event);
+        }
+        buffer.take(flow_events::MAX_BATCH)
+    }
+
+    /// Puts taken events back (an upload that could not be written).
+    pub fn restore_events(&mut self, events: Vec<FlowEvent>) {
+        if let Some(buffer) = self.events.as_mut() {
+            let rest = buffer.take(usize::MAX);
+            for event in events.into_iter().chain(rest) {
+                buffer.push(event);
+            }
+        }
+    }
+
+    /// Events waiting for upload, without taking them.
+    pub fn pending_events(&self) -> usize {
+        self.events.as_ref().map_or(0, |buffer| buffer.len()) + self.drops.len()
     }
 
     fn now(&self) -> u64 {
@@ -673,10 +872,18 @@ impl Filter {
     pub fn set_policy(&mut self, policy: Policy) {
         self.policy = policy;
         let policy = &self.policy;
+        let mut ended = Vec::new();
         self.states.retain(|key, state| {
-            state.initiator == Direction::Outbound
-                || policy.decide(key.remote, key.proto, state.service_port).0
+            let keep = state.initiator == Direction::Outbound
+                || policy.decide(key.remote, key.proto, state.service_port).0;
+            if !keep && state.flow.is_some() {
+                ended.push((*key, state.clone()));
+            }
+            keep
         });
+        for (key, state) in ended {
+            self.ended(&key, &state);
+        }
         self.fragments.clear();
     }
 
@@ -690,9 +897,17 @@ impl Filter {
         if !enabled {
             self.traffic = None;
             self.overflow = 0;
+            self.events = None;
+            self.drops.clear();
+            self.drop_overflow = 0;
+            for state in self.states.values_mut() {
+                state.flow = None;
+            }
         } else if self.traffic.is_none() {
             self.traffic = Some(HashMap::new());
+            self.events = Some(flow_events::Buffer::default());
             self.bucket_started = unix_seconds();
+            self.events_since = self.bucket_started;
         }
     }
 
@@ -786,7 +1001,12 @@ impl Filter {
             L4::Ports { destination, .. } => destination,
             _ => 0,
         };
-        let (allow, peer) = self.policy.decide(packet.source, packet.proto, port);
+        let (allow, peer, hint) = self
+            .policy
+            .decide_with_hint(packet.source, packet.proto, port);
+        if !allow {
+            self.dropped(&packet, peer.as_ref(), hint, now);
+        }
         if allow {
             if let Some(key) = key {
                 self.insert(
@@ -798,6 +1018,7 @@ impl Filter {
                         replied: false,
                         expires: now + initial_timeout(packet.proto),
                         generation: 0,
+                        flow: None,
                     },
                     now,
                 );
@@ -861,6 +1082,7 @@ impl Filter {
                     replied: false,
                     expires: now + initial_timeout(packet.proto),
                     generation: 0,
+                    flow: None,
                 },
                 now,
             );
@@ -883,8 +1105,20 @@ impl Filter {
             return false;
         };
         if state.expires <= now {
-            self.states.remove(key);
+            if let Some(state) = self.states.remove(key) {
+                self.ended(key, &state);
+            }
             return false;
+        }
+        if let Some(stats) = state.flow.as_mut() {
+            stats.last_seen = now;
+            if via == Direction::Inbound {
+                stats.rx_bytes = stats.rx_bytes.saturating_add(packet.len as u64);
+                stats.rx_packets = stats.rx_packets.saturating_add(1);
+            } else {
+                stats.tx_bytes = stats.tx_bytes.saturating_add(packet.len as u64);
+                stats.tx_packets = stats.tx_packets.saturating_add(1);
+            }
         }
         if via != state.initiator {
             state.replied = true;
@@ -986,11 +1220,23 @@ impl Filter {
                 .get(&oldest)
                 .is_some_and(|state| state.generation == generation)
             {
-                self.states.remove(&oldest);
+                if let Some(state) = self.states.remove(&oldest) {
+                    self.ended(&oldest, &state);
+                }
             }
         }
         self.generation += 1;
         state.generation = self.generation;
+        if self.events.is_some() {
+            self.next_flow += 1;
+            state.flow = Some(FlowStats {
+                id: self.next_flow,
+                last_seen: now,
+                ..FlowStats::default()
+            });
+            let event = self.flow_event(&key, &state, flow_events::Kind::Start, self.unix(now));
+            self.emit(event);
+        }
         self.order.push_back((key, self.generation));
         self.states.insert(key, state);
         if self.order.len() > MAX_STATES * 2 {
@@ -1011,7 +1257,17 @@ impl Filter {
 
     fn purge(&mut self, now: u64) {
         self.last_purge = now;
-        self.states.retain(|_, state| state.expires > now);
+        let mut ended = Vec::new();
+        self.states.retain(|key, state| {
+            let keep = state.expires > now;
+            if !keep && state.flow.is_some() {
+                ended.push((*key, state.clone()));
+            }
+            keep
+        });
+        for (key, state) in ended {
+            self.ended(&key, &state);
+        }
         self.fragments.retain(|_, entry| entry.expires > now);
         if self.order.len() > self.states.len() * 2 + 64 {
             let states = &self.states;
@@ -1257,6 +1513,86 @@ pub unsafe extern "C" fn blaktail_tunnel_take_flow_upload(
         RESULT_DONE
     }))
     .unwrap_or(RESULT_ERR)
+}
+
+/// Writes the coordinator event upload body (`{"org_id":...,"events":[...]}`)
+/// for the flow events since the last successful call: connection starts,
+/// ends and drops seen by the filter, sampled per flow with the
+/// coordinator's draw, at most one batch. Peers reached through the relay
+/// are marked `relay`. When `dst_cap` is too small, sets `dst_len` to the
+/// size needed, keeps the events and returns -1. With counting off, writes
+/// an empty batch.
+///
+/// # Safety
+/// `tunnel` must be live; the strings NUL-terminated; `dst`/`dst_len` valid
+/// for `dst_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_take_flow_events(
+    tunnel: *mut BlakTailTunnel,
+    org_id: *const std::os::raw::c_char,
+    device_id: *const std::os::raw::c_char,
+    sampling_rate: f64,
+    dst: *mut u8,
+    dst_cap: usize,
+    dst_len: *mut usize,
+) -> i32 {
+    if tunnel.is_null()
+        || org_id.is_null()
+        || device_id.is_null()
+        || dst.is_null()
+        || dst_len.is_null()
+    {
+        return RESULT_ERR;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let text = |value| std::ffi::CStr::from_ptr(value).to_str().ok();
+        let (Some(org_id), Some(device_id)) = (text(org_id), text(device_id)) else {
+            return RESULT_ERR;
+        };
+        let Ok(mut inner) = (*tunnel).inner.lock() else {
+            return RESULT_ERR;
+        };
+        let end = unix_seconds();
+        let relay = crate::relay::flow_transport(&inner);
+        let start = inner.filter.events_since;
+        let events = inner.filter.take_events();
+        let upload = flow_events::build(
+            &flow_events::Window {
+                org_id,
+                device_id,
+                start,
+                end,
+                sampling_rate,
+                relayed_peers: &relay.relayed_peers,
+            },
+            events.clone(),
+        );
+        let Ok(json) = serde_json::to_vec(&upload) else {
+            return RESULT_ERR;
+        };
+        *dst_len = json.len();
+        if json.len() > dst_cap {
+            inner.filter.restore_events(events);
+            return RESULT_ERR;
+        }
+        slice::from_raw_parts_mut(dst, json.len()).copy_from_slice(&json);
+        inner.filter.events_since = end;
+        RESULT_DONE
+    }))
+    .unwrap_or(RESULT_ERR)
+}
+
+/// Takes the flow events of a tunnel from `blaktail_tunnel_create`, for
+/// in-process hosts (the Windows agent), with the event window start.
+///
+/// # Safety
+/// `tunnel` must be live.
+pub unsafe fn take_events(tunnel: *mut BlakTailTunnel) -> Option<(i64, Vec<FlowEvent>)> {
+    let mut inner = tunnel.as_ref()?.inner.lock().ok()?;
+    let since = inner.filter.events_since;
+    let events = inner.filter.take_events();
+    inner.filter.events_since = unix_seconds();
+    Some((since, events))
 }
 
 fn unix_seconds() -> i64 {

@@ -2764,3 +2764,482 @@ details > summary {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- Traffic events (/traffic) ---------------------------------------- */
+.traffic-header {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.traffic-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 2rem;
+  margin: 0;
+}
+
+.traffic-stats div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.traffic-stats dt {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.traffic-stats dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.traffic-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.traffic-search,
+.traffic-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.traffic-search {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.traffic-search > svg,
+.traffic-field > svg {
+  position: absolute;
+  left: 0.7rem;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.traffic-search input,
+.traffic-field svg + select {
+  padding-left: 2.1rem;
+}
+
+.traffic-field {
+  flex: 0 1 auto;
+}
+
+.traffic-field select {
+  min-width: 10rem;
+}
+
+.traffic-toolbar .button,
+.traffic-toolbar summary.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  text-decoration: none;
+}
+
+.traffic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.traffic-popover {
+  position: relative;
+}
+
+.traffic-popover > summary {
+  list-style: none;
+}
+
+@media (min-width: 801px) {
+  .traffic-popover .traffic-popover-body {
+    left: auto;
+    right: 0;
+  }
+}
+
+.traffic-popover > summary::-webkit-details-marker {
+  display: none;
+}
+
+.traffic-popover-body {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  width: min(22rem, calc(100vw - 2rem));
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.traffic-popover-body fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.traffic-popover-body legend {
+  font-size: 0.95rem;
+  margin-bottom: 0.35rem;
+}
+
+.traffic-table {
+  min-width: 60rem;
+}
+
+.traffic-table th {
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.traffic-table td {
+  padding: 0.85rem 0.6rem;
+}
+
+.traffic-time time {
+  display: grid;
+  gap: 0.1rem;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.traffic-event {
+  width: 26%;
+  min-width: 15rem;
+  max-width: 24rem;
+}
+
+.traffic-hint {
+  display: inline-block;
+}
+
+.traffic-table td.traffic-time,
+.traffic-table td:last-child {
+  width: 1%;
+}
+
+.traffic-details > summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.6rem;
+  align-items: start;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 6px;
+}
+
+.traffic-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.traffic-summary {
+  display: grid;
+  gap: 0.2rem;
+  line-height: 1.4;
+}
+
+.traffic-summary .badge {
+  justify-self: start;
+}
+
+.traffic-status {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.traffic-sentence strong,
+.traffic-timeline strong {
+  color: var(--foreground);
+  font-weight: 650;
+}
+
+.traffic-sentence span,
+.traffic-timeline p span {
+  color: var(--muted-foreground);
+}
+
+.traffic-chevron {
+  margin-top: 0.15rem;
+  color: var(--muted-foreground);
+  transition: transform var(--motion);
+}
+
+.traffic-details[open] .traffic-chevron {
+  transform: rotate(180deg);
+}
+
+.traffic-dot {
+  display: inline-block;
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-top: 0.4rem;
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.traffic-dot.blocked {
+  background: var(--destructive);
+}
+
+.traffic-dot.closed {
+  background: var(--muted-foreground);
+}
+
+.traffic-timeline {
+  list-style: none;
+  margin: 0.85rem 0 0.25rem 0.22rem;
+  padding: 0;
+  display: grid;
+}
+
+.traffic-step {
+  position: relative;
+  padding: 0 0 0.9rem 1.25rem;
+  border-left: 2px solid rgba(137, 150, 90, 0.55);
+}
+
+.traffic-step.blocked {
+  border-left-color: rgba(200, 90, 75, 0.6);
+}
+
+.traffic-step::before {
+  content: "";
+  position: absolute;
+  left: -0.4rem;
+  top: 0.2rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.traffic-step.blocked::before {
+  background: var(--destructive);
+}
+
+.traffic-step.meta {
+  border-left-color: transparent;
+  padding-bottom: 0;
+}
+
+.traffic-step.meta::before {
+  display: none;
+}
+
+.traffic-step time {
+  font-size: 12px;
+}
+
+.traffic-step p {
+  margin: 0.15rem 0 0;
+}
+
+.traffic-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.4rem 1rem;
+  margin: 0;
+  font-size: 12px;
+}
+
+.traffic-facts dt {
+  color: var(--muted-foreground);
+}
+
+.traffic-facts dd {
+  margin: 0;
+}
+
+.traffic-endpoint {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  min-width: 0;
+}
+
+.traffic-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 8px;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  color: var(--secondary-foreground);
+}
+
+.traffic-endpoint-text {
+  display: grid;
+  min-width: 0;
+}
+
+.traffic-name {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+a.traffic-name:hover {
+  color: var(--primary-hover);
+}
+
+.traffic-address {
+  font-size: 12px;
+  word-break: normal;
+  white-space: nowrap;
+}
+
+.traffic-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.traffic-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--secondary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.traffic-bytes {
+  display: grid;
+  gap: 0.15rem;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.traffic-bytes span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.traffic-rx {
+  color: var(--info);
+}
+
+.traffic-tx {
+  color: var(--primary);
+}
+
+.traffic-router {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  white-space: nowrap;
+}
+
+.traffic-router .traffic-dot {
+  margin-top: 0;
+}
+
+.traffic-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+@media (max-width: 800px) {
+  .traffic-table {
+    min-width: 0;
+  }
+
+  .traffic-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .traffic-table,
+  .traffic-table tbody,
+  .traffic-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .traffic-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.6rem 0.75rem;
+    padding: 0.9rem 0.25rem;
+    border-bottom: 1px solid var(--border-strong);
+  }
+
+  .traffic-table td {
+    padding: 0;
+    border-bottom: 0;
+    min-width: 0;
+  }
+
+  .traffic-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  .traffic-table td.traffic-event,
+  .traffic-table td.traffic-time {
+    grid-column: 1 / -1;
+  }
+
+  .traffic-table td.traffic-event {
+    max-width: none;
+  }
+
+  .traffic-name {
+    max-width: 9rem;
+  }
+
+  .traffic-search,
+  .traffic-field,
+  .traffic-field select {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .traffic-action-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .traffic-chevron {
+    transition: none;
+  }
+}
+/* ---- end traffic events ------------------------------------------------ */

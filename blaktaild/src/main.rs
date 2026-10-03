@@ -469,6 +469,7 @@ async fn sync_loop(
     let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
     let mut serving = ServiceRuntime::default();
     let mut traffic = blaktaild::traffic::Reporter::default();
+    let mut flow_window = blaktaild::traffic::EventWindow::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -500,6 +501,7 @@ async fn sync_loop(
             .collect();
         manage_traffic(
             &mut traffic,
+            &mut flow_window,
             coordinator,
             network,
             state,
@@ -580,8 +582,10 @@ async fn sync_loop(
 
 /// Opt-in traffic reporting: starts and stops counting with the peer map's
 /// `traffic` setting and uploads one aggregate bucket about once a minute.
+#[allow(clippy::too_many_arguments)]
 async fn manage_traffic(
     reporter: &mut blaktaild::traffic::Reporter,
+    flow_window: &mut blaktaild::traffic::EventWindow,
     coordinator: &Coordinator,
     network: &mut dyn Network,
     state: &mut blaktaild::NodeState,
@@ -591,15 +595,18 @@ async fn manage_traffic(
 ) {
     use blaktaild::flow_report;
     let interface = state.interface.clone();
-    match reporter.step(state.traffic.as_ref(), blaktaild_now() as i64) {
+    let now = blaktaild_now() as i64;
+    match reporter.step(state.traffic.as_ref(), now) {
         blaktaild::traffic::Step::Idle => {}
         blaktaild::traffic::Step::Start => {
-            info!("traffic diagnostics on: counting aggregate flows");
+            info!("traffic diagnostics on: counting aggregate flows and recording flow events");
             network.set_traffic(&interface, true);
+            flow_window.start(now);
         }
         blaktaild::traffic::Step::Stop => {
-            info!("traffic diagnostics off: counters discarded");
+            info!("traffic diagnostics off: counters and flow events discarded");
             network.set_traffic(&interface, false);
+            flow_window.stop();
         }
         blaktaild::traffic::Step::Report { start, end } => {
             let Some(settings) =
@@ -614,6 +621,15 @@ async fn manage_traffic(
                     return;
                 }
             };
+            if network.aggregated_flow_events() {
+                flow_window.hold(blaktaild::flow_events::aggregated(
+                    &counts,
+                    &peer_addresses(&state.peers),
+                    &own_addresses(state),
+                    start,
+                    end,
+                ));
+            }
             let device = state.node_id.to_string();
             let upload = flow_report::build(
                 &flow_report::Bucket {
@@ -638,10 +654,101 @@ async fn manage_traffic(
                     reporter.halt();
                     state.traffic = None;
                     network.set_traffic(&interface, false);
+                    flow_window.stop();
+                    return;
                 }
                 Err(error) => warn!(%error, "could not upload traffic records"),
             }
         }
+    }
+    upload_flow_events(
+        reporter,
+        flow_window,
+        coordinator,
+        network,
+        state,
+        relayed,
+        now,
+    )
+    .await;
+}
+
+fn peer_addresses(
+    peers: &[blaktaild::Peer],
+) -> std::collections::BTreeMap<String, Vec<std::net::IpAddr>> {
+    peers
+        .iter()
+        .map(|peer| {
+            let hosts = blaktaild::acl_filter::overlay_host_addrs(&peer.allowed_ips)
+                .iter()
+                .filter_map(|address| address.parse().ok())
+                .collect();
+            (peer.id.to_string(), hosts)
+        })
+        .collect()
+}
+
+fn own_addresses(state: &blaktaild::NodeState) -> Vec<std::net::IpAddr> {
+    state
+        .interface_addresses()
+        .iter()
+        .filter_map(|address| address.split('/').next()?.parse().ok())
+        .collect()
+}
+
+/// Uploads the per-flow events of the window that just closed (about every
+/// 30 seconds). Events are dropped, not retried, when an upload fails: the
+/// buffers stay bounded.
+async fn upload_flow_events(
+    reporter: &mut blaktaild::traffic::Reporter,
+    flow_window: &mut blaktaild::traffic::EventWindow,
+    coordinator: &Coordinator,
+    network: &mut dyn Network,
+    state: &mut blaktaild::NodeState,
+    relayed: &[String],
+    now: i64,
+) {
+    use blaktaild::flow_events;
+    let Some(settings) = blaktaild::traffic::Settings::active(state.traffic.as_ref()).cloned()
+    else {
+        return;
+    };
+    let Some((since, mut events)) = flow_window.due(now) else {
+        return;
+    };
+    let interface = state.interface.clone();
+    let peers: Vec<(String, Vec<String>)> = state
+        .peers
+        .iter()
+        .map(|peer| (peer.id.to_string(), peer.allowed_ips.clone()))
+        .collect();
+    let scope = blaktaild::flow_capture::Scope::new(&state.interface_addresses(), &peers, relayed);
+    events.extend(network.flow_events(&interface, &scope));
+    let device = state.node_id.to_string();
+    let upload = flow_events::build(
+        &flow_events::Window {
+            org_id: &settings.org_id,
+            device_id: &device,
+            start: since,
+            end: now,
+            sampling_rate: settings.sampling_rate,
+            relayed_peers: relayed,
+        },
+        events,
+    );
+    if upload.events.is_empty() {
+        return;
+    }
+    match coordinator.upload_flow_events(state, &upload).await {
+        Ok(true) => {}
+        Ok(false) => {
+            info!("coordinator reports traffic diagnostics are off; stopping flow events");
+            reporter.halt();
+            state.traffic = None;
+            network.set_traffic(&interface, false);
+            flow_window.stop();
+        }
+        Err(error) => warn!(%error, events = upload.events.len(), "could not upload flow events"),
     }
 }
 

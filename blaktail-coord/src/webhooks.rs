@@ -210,6 +210,9 @@ pub(crate) async fn delivery_loop(state: AppState) {
             if let Err(error) = crate::traffic::purge_expired(&state.store).await {
                 warn!(%error, "traffic retention purge failed");
             }
+            if let Err(error) = crate::flow_events::purge_expired(&state.store).await {
+                warn!(%error, "traffic event retention purge failed");
+            }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

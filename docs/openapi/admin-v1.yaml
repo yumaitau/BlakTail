@@ -434,6 +434,69 @@ paths:
       responses:
         "200": { description: "Envelope of {intact, chained_events, unchained_events, first_seq, last_seq, head_seq, problems, note}" }
         "403": { description: Missing audit:read }
+  /api/v1/traffic/events:
+    get:
+      summary: List opt-in per-flow traffic events, newest first
+      description: |
+        Only populated while an owner has traffic diagnostics on. Each event
+        is one device's view of a connection start, end or drop: overlay
+        addresses and ports, protocol (ICMP type and code), resolved source
+        and destination identity (device, network resource, approved route
+        or unknown), routing peer, the policy rule the coordinator evaluated,
+        byte and packet counters and connection type. Never payloads, URLs,
+        DNS names or HTTP data. Pass `next_cursor` back as `cursor`.
+        Requires `audit:read`.
+      parameters:
+        - $ref: "#/components/parameters/Organisation"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string, description: "event_at:id cursor" }
+        - in: query
+          name: from
+          schema: { type: integer, description: "Unix seconds; default 24 hours ago" }
+        - in: query
+          name: to
+          schema: { type: integer, description: Unix seconds }
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 100, description: "Names, addresses, rule labels; a number also matches ports" }
+        - in: query
+          name: source
+          schema: { type: string, description: Source device or resource id }
+        - in: query
+          name: destination
+          schema: { type: string, description: Destination device id, resource id or route prefix }
+        - in: query
+          name: user
+          schema: { type: string, description: User who owns the source or destination device }
+        - in: query
+          name: reporter
+          schema: { type: string, format: uuid }
+        - in: query
+          name: ip
+          schema: { type: string }
+        - in: query
+          name: port
+          schema: { type: integer, minimum: 0, maximum: 65535 }
+        - in: query
+          name: protocol
+          schema: { type: string, enum: [tcp, udp, icmp, icmpv6, other] }
+        - in: query
+          name: direction
+          schema: { type: string, enum: [inbound, outbound] }
+        - in: query
+          name: event_type
+          schema: { type: string, enum: [start, end, drop] }
+        - in: query
+          name: connection_type
+          schema: { type: string, enum: [p2p, routed, relay] }
+      responses:
+        "200": { description: "Envelope of events with next_cursor" }
+        "400": { description: Invalid cursor or filter }
+        "403": { description: Missing audit:read }
   /api/v1/events/catalogue:
     get:
       summary: List the webhook event types with severity and meaning

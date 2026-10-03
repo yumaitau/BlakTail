@@ -1,6 +1,7 @@
 #[cfg(feature = "jni")]
 mod android;
 pub mod filter;
+pub mod flow_events;
 pub mod flow_report;
 mod relay;
 

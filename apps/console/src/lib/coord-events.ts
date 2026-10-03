@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { AuditFilters } from "./audit-view";
+import type { FlowsPage } from "./traffic-view";
 import { coordFetch, readError, type AuditEvent } from "./coord";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
@@ -87,6 +88,28 @@ export function getTrafficSummary(ctx: ConsoleContext, hours: number): Promise<T
   return json(ctx, `/traffic/summary?hours=${hours}`, { method: "GET" });
 }
 
+/** Per-flow traffic events, one group per reporter and connection. */
+export function listTrafficFlows(ctx: ConsoleContext, query: URLSearchParams): Promise<FlowsPage> {
+  return json(ctx, `/traffic/flows?${query.toString()}`, { method: "GET" });
+}
+
+/** Coordinator CSV export; the coordinator checks export_audit and audits it. */
+export async function exportTrafficEvents(
+  ctx: ConsoleContext,
+  query: URLSearchParams,
+): Promise<Response> {
+  const denied = permissionReason(ctx.role, "export_audit");
+  if (denied) throw new Error(denied);
+  const params = new URLSearchParams(query);
+  params.set("format", "csv");
+  const res = await coordFetch(
+    `/v1/orgs/${ctx.coordOrgId}/traffic/events/export?${params.toString()}`,
+    { method: "GET", ctx },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  return res;
+}
+
 export function putTrafficSettings(
   ctx: ConsoleContext,
   input: { enabled: boolean; sampling_rate: number; retention_days: number },
@@ -96,7 +119,9 @@ export function putTrafficSettings(
   return json(ctx, "/traffic/settings", { method: "PUT", body: JSON.stringify(input) });
 }
 
-export function deleteTrafficRecords(ctx: ConsoleContext): Promise<{ deleted: number }> {
+export function deleteTrafficRecords(
+  ctx: ConsoleContext,
+): Promise<{ deleted: number; deleted_events?: number }> {
   const denied = permissionReason(ctx.role, "manage_security");
   if (denied) throw new Error(denied);
   return json(ctx, "/traffic/records", { method: "DELETE" });

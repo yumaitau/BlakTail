@@ -79,6 +79,21 @@ int blaktail_tunnel_take_flow_upload(
     size_t *dst_len
 );
 
+/* Writes the coordinator flow-event upload body
+ * ({"org_id":...,"window_start":...,"window_end":...,"events":[...]}) for
+ * the connection starts, ends and drops since the last successful call,
+ * sampled per flow, at most 1,000 events. If dst_cap is too small, sets
+ * dst_len to the size needed, keeps the events and returns -1. */
+int blaktail_tunnel_take_flow_events(
+    BlakTailTunnel *tunnel,
+    const char *org_id,
+    const char *device_id,
+    double sampling_rate,
+    uint8_t *dst,
+    size_t dst_cap,
+    size_t *dst_len
+);
+
 /*
  * Relay fallback (Australian BlakTail relay over UDP, or the WSS fallback).
  * The platform owns the sockets; these calls decide what goes where.

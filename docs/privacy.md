@@ -92,15 +92,34 @@ and backups follow deployment policy (the disposable AWS harness uses one-day
 CloudWatch retention; the legacy reference root uses 30 days).
 
 Traffic diagnostics are off by default. If an owner turns them on, devices
-upload aggregate counters per minute bucket (bytes, packets, the peer
-device's id, which side started the flow, protocol, service class and port,
-transport, allow/deny) — never payloads, URLs, DNS questions, host names or
-IP addresses — kept for 1–30 days as the owner chooses and deletable at any
-time from `/traffic`. Linux, macOS, Windows and iOS agents report; Android
-does not. Turning collection off stops agents within seconds and discards
-their unsent counters. A Linux lab on 3 October 2026 checked that stored rows
-contained no IP address and that nothing was stored before opt-in or after
-opt-out. See [audit-and-traffic.md](audit-and-traffic.md).
+upload two kinds of record, kept for 1–30 days as the owner chooses and
+deletable at any time from `/traffic`:
+
+- aggregate counters per minute bucket (bytes, packets, the peer device's
+  id, which side started the flow, protocol, service class and port,
+  transport, allow/deny), with no IP address; and
+- **per-flow events**: one record per connection start, end or drop, with
+  the overlay source and destination **IP addresses and ports** (for routed
+  or exit traffic, the private or public destination address the device
+  reached), protocol and ICMP type, direction, byte and packet counts, the
+  devices, network resources or routes and device owners the coordinator
+  resolved those addresses to, the routing peer and the matched policy
+  rule.
+
+Neither ever contains payloads, URLs, DNS queries or names, TLS SNI or HTTP
+data. Per-flow events show who connected to what and when, so they are
+personal information about device users; turn collection on only with a
+stated purpose and short retention. Any role with `view_audit` can read them
+and roles with `export_audit` can export them (audited). Linux, Windows and
+iOS agents report per-flow events; macOS reports per-rule aggregated events
+(no source port); Android reports nothing. Linux uses conntrack and an
+NFLOG copy of each rejected packet's headers (first 128 bytes) only while
+collection is on. Turning collection off stops agents within seconds and
+discards their unsent counters and events. Lab runs on 3 October 2026
+checked that nothing was stored before opt-in or after opt-out, that
+aggregate rows held no IP address and that per-flow events held only
+overlay and routed-destination addresses (no underlay address). See
+[audit-and-traffic.md](audit-and-traffic.md).
 
 Operators must choose and publish retention periods, test deletion across live
 databases and backups, and preserve audit data only as long as their security and

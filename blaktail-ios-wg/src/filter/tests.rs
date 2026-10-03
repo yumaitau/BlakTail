@@ -475,6 +475,97 @@ fn traffic_counters_aggregate_by_peer_direction_and_service() {
 }
 
 #[test]
+fn flow_events_report_start_end_and_drop_with_ports_and_counters() {
+    let peers = [peer(
+        "peer-a",
+        &["100.64.0.2/32"],
+        Some(Ingress {
+            tcp: vec!["22".into()],
+            deny_tcp: vec!["3389".into()],
+            icmp: true,
+            ..Ingress::default()
+        }),
+    )];
+    let mut filter = filter_with(&peers);
+    // Off: nothing is recorded.
+    assert!(filter.inbound(&ipv4(PEER, LOCAL, TCP, &tcp(40_000, 22, 0x02)), 1));
+    assert!(filter.take_events().is_empty());
+    filter.set_traffic(true);
+    let base = filter.epoch_unix;
+
+    // Inbound SSH: start at first packet; counters follow both directions.
+    assert!(filter.inbound(&ipv4(PEER, LOCAL, TCP, &tcp(40_002, 22, 0x02)), 2));
+    filter.outbound(&ipv4(LOCAL, PEER, TCP, &tcp(22, 40_002, 0x12)), 2);
+    assert!(filter.inbound(&ipv4(PEER, LOCAL, TCP, &tcp(40_002, 22, 0x10)), 3));
+    // Explicitly denied and default-denied attempts; a SYN retry merges.
+    let rdp = ipv4(PEER, LOCAL, TCP, &tcp(40_003, 3389, 0x02));
+    assert!(!filter.inbound(&rdp, 4));
+    assert!(!filter.inbound(&rdp, 5));
+    assert!(!filter.inbound(&ipv4(PEER, LOCAL, UDP, &udp(40_004, 53)), 5));
+    // Outbound ping.
+    filter.outbound(&ipv4(LOCAL, PEER, ICMP, &icmp_msg(8, 9, &[])), 6);
+    let events = filter.take_events();
+    let ssh: Vec<_> = events.iter().filter(|e| e.dst_port == 22).collect();
+    assert_eq!(ssh.len(), 1);
+    let start = ssh[0];
+    assert_eq!(start.kind, flow_events::Kind::Start);
+    assert_eq!(start.direction, flow_events::Direction::Inbound);
+    assert_eq!((start.src_ip.as_str(), start.src_port), (PEER, 40_002));
+    assert_eq!((start.dst_ip.as_str(), start.dst_port), (LOCAL, 22));
+    assert_eq!(start.peer_id.as_deref(), Some("peer-a"));
+    assert_eq!(start.at, base + 2);
+    let drops: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == flow_events::Kind::Drop)
+        .collect();
+    assert_eq!(drops.len(), 2);
+    let rdp_drop = drops.iter().find(|e| e.dst_port == 3389).unwrap();
+    assert_eq!(rdp_drop.rx_packets, 2);
+    assert_eq!(rdp_drop.rule_hint, Some("acl:deny-rule"));
+    let dns_drop = drops.iter().find(|e| e.protocol == "udp").unwrap();
+    assert_eq!(dns_drop.rule_hint, Some("acl:default"));
+    let ping = events.iter().find(|e| e.protocol == "icmp").unwrap();
+    assert_eq!(ping.direction, flow_events::Direction::Outbound);
+    assert_eq!(
+        (ping.icmp_type, ping.src_port, ping.dst_port),
+        (Some(8), 0, 0)
+    );
+    assert!(filter.take_events().is_empty(), "taken");
+
+    // Expiry ends the flow with its totals, timed at the last packet.
+    filter.purge(3 + TCP_ESTABLISHED_SECS + 1);
+    let ends = filter.take_events();
+    let end = ends.iter().find(|e| e.dst_port == 22).unwrap();
+    assert_eq!(end.kind, flow_events::Kind::End);
+    assert_eq!(end.flow_id, start.flow_id);
+    assert_eq!((end.rx_packets, end.tx_packets), (2, 1));
+    assert_eq!((end.rx_bytes, end.tx_bytes), (80, 40));
+    assert_eq!(end.at, base + 3);
+    assert!(ends
+        .iter()
+        .any(|e| e.protocol == "icmp" && e.kind == flow_events::Kind::End));
+
+    // Off: events are discarded at once and nothing more is recorded.
+    assert!(!filter.inbound(&rdp, 5_000));
+    assert_eq!(filter.pending_events(), 1);
+    filter.set_traffic(false);
+    assert_eq!(filter.pending_events(), 0);
+    assert!(!filter.inbound(&rdp, 5_001));
+    assert!(filter.take_events().is_empty());
+}
+
+#[test]
+fn pending_drops_are_bounded() {
+    let mut filter = deny_all();
+    filter.set_traffic(true);
+    for port in 0..(MAX_PENDING_DROPS as u16 + 20) {
+        filter.inbound(&ipv4(PEER, LOCAL, TCP, &tcp(10_000 + port, 22, 0x02)), 1);
+    }
+    assert_eq!(filter.drop_overflow, 20);
+    assert_eq!(filter.take_events().len(), MAX_PENDING_DROPS);
+}
+
+#[test]
 fn traffic_keys_are_bounded() {
     let mut filter = deny_all();
     filter.set_traffic(true);
@@ -698,6 +789,41 @@ fn tunnel_drops_denied_packets_between_decrypt_and_tunnel_write() {
     assert!(records
         .iter()
         .any(|r| r["direction"] == "outbound" && r["proto"] == "udp" && r["port"] == 7000));
+    // Per-flow events: the SSH start and the RDP drop, with ports.
+    let take_events = |buffer: &mut [u8], length: &mut usize| unsafe {
+        blaktail_tunnel_take_flow_events(
+            bob,
+            org.as_ptr(),
+            device.as_ptr(),
+            1.0,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            length,
+        )
+    };
+    let mut needed = 0usize;
+    assert_eq!(take_events(&mut small, &mut needed), RESULT_ERR);
+    let mut events_buffer = vec![0u8; needed];
+    assert_eq!(take_events(&mut events_buffer, &mut written), RESULT_DONE);
+    let upload: serde_json::Value = serde_json::from_slice(&events_buffer[..written]).unwrap();
+    assert_eq!(upload["org_id"], "org-1");
+    let events = upload["events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["type"] == "start"
+        && e["dst_port"] == 22
+        && e["src_port"] == 40_000
+        && e["src_ip"] == LOCAL
+        && e["peer_id"] == "alice"));
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "drop" && e["dst_port"] == 3389 && e["rule_hint"] == "acl:default"));
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "start" && e["direction"] == "outbound" && e["dst_port"] == 7000));
+    let mut empty = vec![0u8; 256];
+    assert_eq!(take_events(&mut empty, &mut written), RESULT_DONE);
+    let upload: serde_json::Value = serde_json::from_slice(&empty[..written]).unwrap();
+    assert!(upload["events"].as_array().unwrap().is_empty());
+
     // Taken: the next batch is empty.
     let mut buffer = vec![0u8; 256];
     assert_eq!(take(&mut buffer, &mut written), RESULT_DONE);

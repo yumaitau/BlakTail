@@ -476,7 +476,7 @@ export function AclEditor({
         ) : (
           <ol className="acl-rule-list">
             {policy.rules.map((rule, index) => (
-              <li key={index} className="acl-rule">
+              <li key={index} id={`rule-${index + 1}`} className="acl-rule">
                 <div className="acl-rule-head">
                   <label>
                     Action

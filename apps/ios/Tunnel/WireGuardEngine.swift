@@ -110,6 +110,31 @@ final class WireGuardEngine {
         return nil
     }
 
+    /// Per-flow event upload body for the window since the last call, or nil.
+    func takeFlowEvents(organisationID: String, deviceID: String, samplingRate: Double) -> Data? {
+        var capacity = 256 * 1024
+        for _ in 0..<2 {
+            var output = [UInt8](repeating: 0, count: capacity)
+            var length = 0
+            let status = organisationID.withCString { org in
+                deviceID.withCString { device in
+                    output.withUnsafeMutableBufferPointer { buffer in
+                        blaktail_tunnel_take_flow_events(
+                            tunnel, org, device, samplingRate,
+                            buffer.baseAddress!, capacity, &length
+                        )
+                    }
+                }
+            }
+            if status == Int32(BLAKTAIL_WG_DONE) {
+                return Data(output.prefix(length))
+            }
+            guard length > capacity else { return nil }
+            capacity = length
+        }
+        return nil
+    }
+
     func encapsulate(_ packet: Data) -> WireGuardOutput {
         invoke { dst, dstLen, peer in
             packet.withUnsafeBytes { bytes in

@@ -146,6 +146,7 @@ Priority: optional
 Architecture: $deb_arch
 Maintainer: BlakTail maintainers <noreply@users.noreply.github.com>
 Depends: iproute2, wireguard-tools, iptables, procps
+Recommends: conntrack
 Homepage: https://github.com/jusso-dev/BlakTail
 Description: Self-hosted BlakTail WireGuard node agent
  BlakTail joins Linux nodes to an organisation-controlled WireGuard tailnet.
@@ -183,6 +184,7 @@ Requires: iproute
 Requires: wireguard-tools
 Requires: iptables
 Requires: procps-ng
+Recommends: conntrack-tools
 Source0: blaktaild
 Source1: blaktaild.service
 Source2: README.md

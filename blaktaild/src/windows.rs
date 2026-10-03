@@ -274,6 +274,18 @@ impl Network for WindowsNetwork {
         }
     }
 
+    fn flow_events(
+        &mut self,
+        _interface: &str,
+        _scope: &crate::flow_capture::Scope,
+    ) -> Vec<crate::flow_events::FlowEvent> {
+        self.raw()
+            .ok()
+            .and_then(|raw| unsafe { blaktail_ios_wg::filter::take_events(raw.cast()) })
+            .map(|(_, events)| events)
+            .unwrap_or_default()
+    }
+
     fn traffic_counts(
         &mut self,
         _interface: &str,
