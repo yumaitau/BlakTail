@@ -23,6 +23,9 @@ pub struct RouteConfig {
     pub auth_mode: String,
     #[serde(default)]
     pub allowed_email_domains: Vec<String>,
+    /// Client networks allowed to use the route; empty means any.
+    #[serde(default)]
+    pub allowed_source_cidrs: Vec<String>,
     pub rate_limit_per_minute: i64,
     pub max_body_bytes: i64,
     pub max_connections: i64,
@@ -107,13 +110,14 @@ pub fn cidr_contains(network: IpAddr, prefix: u8, ip: IpAddr) -> bool {
 pub struct LiveRoute {
     pub config: RouteConfig,
     pub target: SocketAddr,
+    sources: Vec<(IpAddr, u8)>,
     pub limiter: Mutex<RateLimiter>,
     pub connections: Arc<Semaphore>,
     revoked: watch::Sender<bool>,
 }
 
 impl LiveRoute {
-    fn new(config: RouteConfig, target: SocketAddr) -> Self {
+    fn new(config: RouteConfig, target: SocketAddr, sources: Vec<(IpAddr, u8)>) -> Self {
         let rate = u32::try_from(config.rate_limit_per_minute.clamp(1, 60_000)).unwrap_or(600);
         let connections = usize::try_from(config.max_connections.clamp(1, 4096)).unwrap_or(256);
         Self {
@@ -122,7 +126,18 @@ impl LiveRoute {
             revoked: watch::channel(false).0,
             config,
             target,
+            sources,
         }
+    }
+
+    /// Whether `client` may use this route (IPv4-mapped IPv6 counts as IPv4).
+    pub fn source_allowed(&self, client: IpAddr) -> bool {
+        let client = client.to_canonical();
+        self.sources.is_empty()
+            || self
+                .sources
+                .iter()
+                .any(|(network, prefix)| cidr_contains(*network, *prefix, client))
     }
 
     pub fn max_body(&self) -> u64 {
@@ -187,11 +202,23 @@ impl RouteTable {
                     continue;
                 }
             };
+            let Some(sources) = route
+                .allowed_source_cidrs
+                .iter()
+                .map(|cidr| parse_cidr(cidr))
+                .collect::<Option<Vec<_>>>()
+            else {
+                outcome.refused.push((
+                    route.id,
+                    "route has an invalid allowed client network".into(),
+                ));
+                continue;
+            };
             let live = match inner.routes.get(&fqdn) {
                 Some(existing) if existing.config == *route && existing.target == target => {
                     existing.clone()
                 }
-                _ => Arc::new(LiveRoute::new(route.clone(), target)),
+                _ => Arc::new(LiveRoute::new(route.clone(), target, sources)),
             };
             outcome.served.push(fqdn.clone());
             next.insert(fqdn, live);
@@ -275,6 +302,7 @@ pub(crate) fn test_route(fqdn: &str, target: SocketAddr) -> RouteConfig {
         tls_mode: "operator_files".into(),
         auth_mode: "none".into(),
         allowed_email_domains: Vec::new(),
+        allowed_source_cidrs: Vec::new(),
         rate_limit_per_minute: 6000,
         max_body_bytes: 1024,
         max_connections: 64,
@@ -324,6 +352,21 @@ mod tests {
         assert!(table.get("a.example.org.au").is_none());
         table.apply(&config(vec![]));
         assert!(*revoked.borrow());
+    }
+
+    #[test]
+    fn source_networks_gate_clients_and_bad_ones_refuse_the_route() {
+        let table = RouteTable::new(TargetPolicy::default());
+        let mut limited = test_route("a.example.org.au", "100.64.0.9:80".parse().unwrap());
+        limited.allowed_source_cidrs = vec!["203.0.113.0/24".into()];
+        let mut broken = test_route("b.example.org.au", "100.64.0.9:80".parse().unwrap());
+        broken.allowed_source_cidrs = vec!["nonsense".into()];
+        let outcome = table.apply(&config(vec![limited, broken]));
+        assert_eq!(outcome.served, vec!["a.example.org.au"]);
+        let route = table.get("a.example.org.au").unwrap();
+        assert!(route.source_allowed("203.0.113.5".parse().unwrap()));
+        assert!(route.source_allowed("::ffff:203.0.113.5".parse().unwrap()));
+        assert!(!route.source_allowed("198.51.100.5".parse().unwrap()));
     }
 
     #[test]

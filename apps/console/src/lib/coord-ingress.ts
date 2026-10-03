@@ -46,6 +46,7 @@ export type PublicRoute = {
   tls_mode: TlsMode;
   auth_mode: AuthMode;
   allowed_email_domains: string[];
+  allowed_source_cidrs: string[];
   limits: RouteLimits;
   enabled: boolean;
   emergency_disabled_at: number | null;
@@ -82,6 +83,7 @@ export type RouteInput = {
   tls_mode: TlsMode;
   auth_mode: AuthMode;
   allowed_email_domains: string[];
+  allowed_source_cidrs: string[];
 } & RouteLimits;
 
 export type RouteUpdate = {

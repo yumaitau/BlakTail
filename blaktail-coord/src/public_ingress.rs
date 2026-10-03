@@ -155,6 +155,46 @@ fn canonical_domains(domains: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Canonical `address/prefix` strings (host bits cleared), IPv4 or IPv6.
+fn canonical_cidrs(cidrs: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for cidr in cidrs {
+        let cidr = cidr.trim();
+        if cidr.is_empty() {
+            continue;
+        }
+        let (address, prefix) = cidr.split_once('/').unwrap_or((cidr, ""));
+        let invalid = || format!("{cidr:?} is not a network such as 203.0.113.0/24");
+        let address: std::net::IpAddr = address.parse().map_err(|_| invalid())?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        let prefix: u32 = if prefix.is_empty() {
+            max
+        } else {
+            prefix.parse().map_err(|_| invalid())?
+        };
+        if prefix > max {
+            return Err(invalid());
+        }
+        let network = match address {
+            std::net::IpAddr::V4(v4) => {
+                let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+                std::net::IpAddr::from(std::net::Ipv4Addr::from(u32::from(v4) & mask))
+            }
+            std::net::IpAddr::V6(v6) => {
+                let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+                std::net::IpAddr::from(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+            }
+        };
+        out.push(format!("{network}/{prefix}"));
+    }
+    out.sort();
+    out.dedup();
+    if out.len() > 64 {
+        return Err("at most 64 allowed client networks".into());
+    }
+    Ok(out)
+}
+
 fn in_range(name: &str, value: i64, (low, high): (i64, i64)) -> Result<i64, String> {
     if (low..=high).contains(&value) {
         Ok(value)
@@ -220,6 +260,9 @@ struct RouteInput {
     auth_mode: String,
     #[serde(default)]
     allowed_email_domains: Vec<String>,
+    /// Client networks allowed to use the route; empty means any.
+    #[serde(default)]
+    allowed_source_cidrs: Vec<String>,
     #[serde(default = "default_rate")]
     rate_limit_per_minute: i64,
     #[serde(default = "default_body")]
@@ -244,6 +287,8 @@ struct RoutePatch {
     auth_mode: Option<String>,
     #[serde(default)]
     allowed_email_domains: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_source_cidrs: Option<Vec<String>>,
     #[serde(default)]
     rate_limit_per_minute: Option<i64>,
     #[serde(default)]
@@ -283,6 +328,7 @@ struct StoredRoute {
     tls_mode: String,
     auth_mode: String,
     allowed_email_domains: Vec<String>,
+    allowed_source_cidrs: Vec<String>,
     rate_limit_per_minute: i64,
     max_body_bytes: i64,
     max_connections: i64,
@@ -298,7 +344,7 @@ struct StoredRoute {
 
 macro_rules! route_select {
     ($tail:literal) => {
-        concat!("SELECT id,fqdn,target_service_id,target_node_id,target_port,tls_mode,auth_mode,allowed_email_domains_json,rate_limit_per_minute,max_body_bytes,max_connections,log_retention_days,enabled,emergency_disabled_at,emergency_disabled_by,emergency_reason,revision,created_at,updated_at FROM public_routes ", $tail)
+        concat!("SELECT id,fqdn,target_service_id,target_node_id,target_port,tls_mode,auth_mode,allowed_email_domains_json,rate_limit_per_minute,max_body_bytes,max_connections,log_retention_days,enabled,emergency_disabled_at,emergency_disabled_by,emergency_reason,revision,created_at,updated_at,allowed_source_cidrs_json FROM public_routes ", $tail)
     };
 }
 
@@ -325,6 +371,8 @@ fn parse_route(row: &sqlx::any::AnyRow) -> Result<StoredRoute, ApiError> {
         revision: row.try_get(16)?,
         created_at: row.try_get(17)?,
         updated_at: row.try_get(18)?,
+        allowed_source_cidrs: serde_json::from_str(&row.try_get::<String, _>(19)?)
+            .map_err(|_| ApiError::CorruptData)?,
     })
 }
 
@@ -540,6 +588,7 @@ pub(crate) struct RouteView {
     tls_mode: String,
     auth_mode: String,
     allowed_email_domains: Vec<String>,
+    allowed_source_cidrs: Vec<String>,
     limits: Limits,
     pub(crate) enabled: bool,
     pub(crate) emergency_disabled_at: Option<i64>,
@@ -727,6 +776,7 @@ async fn build_workspace(s: &AppState, org_id: Uuid) -> Result<Workspace, ApiErr
                 tls_mode: route.tls_mode,
                 auth_mode: route.auth_mode,
                 allowed_email_domains: route.allowed_email_domains,
+                allowed_source_cidrs: route.allowed_source_cidrs,
                 limits: Limits {
                     rate_limit_per_minute: route.rate_limit_per_minute,
                     max_body_bytes: route.max_body_bytes,
@@ -955,6 +1005,7 @@ async fn create_route(
     let auth_mode = input.auth_mode.trim().to_owned();
     check_modes(&tls_mode, &auth_mode)?;
     let domains = canonical_domains(&input.allowed_email_domains).map_err(ApiError::BadRequest)?;
+    let sources = canonical_cidrs(&input.allowed_source_cidrs).map_err(ApiError::BadRequest)?;
     let limits = Limits {
         rate_limit_per_minute: input.rate_limit_per_minute,
         max_body_bytes: input.max_body_bytes,
@@ -988,7 +1039,7 @@ async fn create_route(
     let id = Uuid::new_v4();
     let created_at = now();
     sqlx::query(
-        "INSERT INTO public_routes(id,org_id,fqdn,target_service_id,target_node_id,target_port,tls_mode,auth_mode,allowed_email_domains_json,rate_limit_per_minute,max_body_bytes,max_connections,log_retention_days,enabled,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,1,$14,$14)",
+        "INSERT INTO public_routes(id,org_id,fqdn,target_service_id,target_node_id,target_port,tls_mode,auth_mode,allowed_email_domains_json,rate_limit_per_minute,max_body_bytes,max_connections,log_retention_days,enabled,revision,created_at,updated_at,allowed_source_cidrs_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,1,$14,$14,$15)",
     )
     .bind(id.to_string())
     .bind(&org)
@@ -1004,6 +1055,7 @@ async fn create_route(
     .bind(limits.max_connections)
     .bind(limits.log_retention_days)
     .bind(created_at)
+    .bind(serde_json::to_string(&sources).map_err(|_| ApiError::CorruptData)?)
     .execute(&mut *tx)
     .await
     .map_err(crate::conflict("a public route for that hostname already exists"))?;
@@ -1022,6 +1074,7 @@ async fn create_route(
             "tls_mode": tls_mode,
             "auth_mode": auth_mode,
             "allowed_email_domains": domains,
+            "allowed_source_cidrs": sources,
             "limits": limits,
         }),
     )
@@ -1074,6 +1127,10 @@ async fn update_route(
         Some(domains) => canonical_domains(domains).map_err(ApiError::BadRequest)?,
         None => current.allowed_email_domains.clone(),
     };
+    let sources = match &input.allowed_source_cidrs {
+        Some(cidrs) => canonical_cidrs(cidrs).map_err(ApiError::BadRequest)?,
+        None => current.allowed_source_cidrs.clone(),
+    };
     let limits = Limits {
         rate_limit_per_minute: input
             .rate_limit_per_minute
@@ -1087,7 +1144,9 @@ async fn update_route(
     check_limits(&limits)?;
     // Turning a route on (including clearing an emergency disable) or
     // dropping its identity gate widens exposure: repeat the hostname.
-    let widens = (enabled && !was_live) || (current.auth_mode == "oidc" && auth_mode == "none");
+    let widens = (enabled && !was_live)
+        || (current.auth_mode == "oidc" && auth_mode == "none")
+        || (!current.allowed_source_cidrs.is_empty() && sources.is_empty());
     if widens
         && input
             .confirm_fqdn
@@ -1108,7 +1167,7 @@ async fn update_route(
     }
     let clear_emergency = enabled && current.emergency_disabled_at.is_some();
     let changed = sqlx::query(
-        "UPDATE public_routes SET enabled=$1,tls_mode=$2,auth_mode=$3,allowed_email_domains_json=$4,rate_limit_per_minute=$5,max_body_bytes=$6,max_connections=$7,log_retention_days=$8,emergency_disabled_at=CASE WHEN $9=1 THEN NULL ELSE emergency_disabled_at END,emergency_disabled_by=CASE WHEN $9=1 THEN NULL ELSE emergency_disabled_by END,emergency_reason=CASE WHEN $9=1 THEN NULL ELSE emergency_reason END,revision=revision+1,updated_at=$10 WHERE id=$11 AND org_id=$12 AND revision=$13",
+        "UPDATE public_routes SET enabled=$1,tls_mode=$2,auth_mode=$3,allowed_email_domains_json=$4,rate_limit_per_minute=$5,max_body_bytes=$6,max_connections=$7,log_retention_days=$8,emergency_disabled_at=CASE WHEN $9=1 THEN NULL ELSE emergency_disabled_at END,emergency_disabled_by=CASE WHEN $9=1 THEN NULL ELSE emergency_disabled_by END,emergency_reason=CASE WHEN $9=1 THEN NULL ELSE emergency_reason END,revision=revision+1,updated_at=$10,allowed_source_cidrs_json=$14 WHERE id=$11 AND org_id=$12 AND revision=$13",
     )
     .bind(i64::from(enabled))
     .bind(&tls_mode)
@@ -1123,6 +1182,7 @@ async fn update_route(
     .bind(route_id.to_string())
     .bind(&org)
     .bind(current.revision)
+    .bind(serde_json::to_string(&sources).map_err(|_| ApiError::CorruptData)?)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -1148,6 +1208,7 @@ async fn update_route(
             "tls_mode": tls_mode,
             "auth_mode": auth_mode,
             "allowed_email_domains": domains,
+            "allowed_source_cidrs": sources,
             "limits": limits,
         }),
     )
@@ -1296,6 +1357,7 @@ pub(crate) struct DeliveredRoute {
     tls_mode: String,
     auth_mode: String,
     allowed_email_domains: Vec<String>,
+    allowed_source_cidrs: Vec<String>,
     rate_limit_per_minute: i64,
     max_body_bytes: i64,
     max_connections: i64,
@@ -1332,6 +1394,7 @@ async fn deliverable(
             tls_mode: route.tls_mode,
             auth_mode: route.auth_mode,
             allowed_email_domains: route.allowed_email_domains,
+            allowed_source_cidrs: route.allowed_source_cidrs,
             rate_limit_per_minute: route.rate_limit_per_minute,
             max_body_bytes: route.max_body_bytes,
             max_connections: route.max_connections,
@@ -1473,6 +1536,23 @@ mod tests {
     }
 
     #[test]
+    fn source_networks_are_canonical() {
+        assert_eq!(
+            canonical_cidrs(&[
+                "203.0.113.77/24".into(),
+                " 198.51.100.9 ".into(),
+                "2001:db8::1/32".into(),
+                "203.0.113.0/24".into(),
+                "".into(),
+            ])
+            .unwrap(),
+            vec!["198.51.100.9/32", "2001:db8::/32", "203.0.113.0/24"]
+        );
+        assert!(canonical_cidrs(&["0.0.0.0/0".into()]).is_ok());
+        assert!(canonical_cidrs(&["::/129".into()]).is_err());
+    }
+
+    #[test]
     fn stale_bound_is_within_thirty_seconds() {
         const _: () = assert!(STALE_AFTER_SECS <= 30);
         const _: () = assert!(MAX_CONFIG_WAIT_SECS < STALE_AFTER_SECS);
@@ -1537,6 +1617,7 @@ mod tests {
                 "target_node_id": lab.target,
                 "target_port": 8080,
                 "max_body_bytes": 1024,
+                "allowed_source_cidrs": ["203.0.113.0/24"],
             }),
             Auth::Console(lab.org, role),
         )
@@ -1774,6 +1855,14 @@ mod tests {
                 base(json!({"allowed_email_domains": ["not a domain"]})),
                 "domains",
             ),
+            (
+                base(json!({"allowed_source_cidrs": ["10.0.0.0/33"]})),
+                "source network",
+            ),
+            (
+                base(json!({"allowed_source_cidrs": ["not-an-ip"]})),
+                "source address",
+            ),
         ] {
             let (status, body) = post_route(&lab.router, lab.org, Role::Owner, input).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
@@ -1796,6 +1885,7 @@ mod tests {
             .unwrap()
             .starts_with("100.64."));
         assert_eq!(route["max_body_bytes"], 1024);
+        assert_eq!(route["allowed_source_cidrs"], json!(["203.0.113.0/24"]));
         assert_eq!(delivered["stale_after_secs"], 30);
 
         // A device without the capability gets nothing.
@@ -1968,6 +2058,43 @@ mod tests {
         ] {
             assert!(text.contains(action), "audit lacks {action}: {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn widening_a_route_needs_the_typed_hostname() {
+        let lab = lab("office").await;
+        let (_, route) = create(&lab, "app.example.org.au", Role::Owner).await;
+        let id = route["id"].as_str().unwrap();
+        let path = format!("/v1/orgs/{}/public-ingress/routes/{id}", lab.org);
+        for body in [
+            json!({"revision": 1, "allowed_source_cidrs": []}),
+            json!({"revision": 1, "allowed_source_cidrs": [], "confirm_fqdn": "other.example.org.au"}),
+        ] {
+            let (status, _) = call(
+                &lab.router,
+                Method::PATCH,
+                &path,
+                body,
+                Auth::Console(lab.org, Role::Owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        // Narrowing needs no confirmation.
+        let route = patch(
+            &lab,
+            id,
+            json!({"revision": 1, "allowed_source_cidrs": ["203.0.113.8/29"]}),
+        )
+        .await;
+        assert_eq!(route["allowed_source_cidrs"], json!(["203.0.113.8/29"]));
+        let route = patch(
+            &lab,
+            id,
+            json!({"revision": 2, "allowed_source_cidrs": [], "confirm_fqdn": "app.example.org.au"}),
+        )
+        .await;
+        assert_eq!(route["allowed_source_cidrs"], json!([]));
     }
 
     #[tokio::test]

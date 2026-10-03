@@ -42,6 +42,10 @@ authorisation.
   custom zones, split DNS, split-match preview and revision history (owner/admin write)
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
+- `/ingress` — **public** ingress: organisation on/off setting, public routes
+  (marked PUBLIC, styled apart from private services), per-ingress status,
+  certificate expiry and policy reachability; owner-only to enable or publish,
+  owner/admin/network admin may emergency-disable ([public-ingress.md](public-ingress.md))
 - `/audit` — actor-attributed administration changes from the coordinator and
   console, filterable by actor, action, target and UTC date, paged with one
   cursor across both stores, redacted details, integrity-chain status, and
@@ -298,6 +302,19 @@ no serving-agent listener ships yet, so services show "Awaiting serving agent" (
 "Certificate issued, not verified") and are never presented as reachable or
 published in DNS. The organisation service CA certificate and fingerprint can be
 viewed and downloaded; trusting it on clients is manual.
+
+`/ingress` (nav group "Services", labelled PUBLIC) is the only place a service
+is put on the Internet. Public ingress is off per organisation until an owner
+records an abuse contact and types `PUBLIC`. Owners publish a route by typing
+its hostname again, choose an HTTP private service or a device and port as the
+target, the certificate source (operator files or ACME HTTP-01 on the ingress
+host), optional organisation sign-in (OIDC, optionally restricted to email
+domains), per-client request rate, body size, connection limit and access-log
+retention. Each route shows, per ingress host, whether it is live, blocked by
+policy, offline or withdrawn, and the certificate expiry the ingress reported.
+Owners, admins and network admins can emergency-disable a route; only an owner
+can re-enable it, again by typing the hostname. Members and auditors see the
+routes and status with no controls.
 
 Device details list overlay file shares published by `blaktaild share enable`.
 The coordinator stores the path and label only; file bytes never leave the node

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS public_routes (
     tls_mode TEXT NOT NULL DEFAULT 'operator_files',
     auth_mode TEXT NOT NULL DEFAULT 'none',
     allowed_email_domains_json TEXT NOT NULL DEFAULT '[]',
+    allowed_source_cidrs_json TEXT NOT NULL DEFAULT '[]',
     rate_limit_per_minute BIGINT NOT NULL DEFAULT 600,
     max_body_bytes BIGINT NOT NULL DEFAULT 10485760,
     max_connections BIGINT NOT NULL DEFAULT 256,

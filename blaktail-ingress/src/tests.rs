@@ -435,6 +435,24 @@ async fn request_rate_is_limited_per_route() {
     assert_eq!(send(&lab, OTHER, &get(OTHER, "/")).await.status, 200);
 }
 
+#[tokio::test]
+async fn allowed_client_networks_are_enforced() {
+    let lab = lab_with(
+        |route| route.allowed_source_cidrs = vec!["10.0.0.0/8".into()],
+        None,
+    )
+    .await;
+    let reply = send(&lab, APP, &get(APP, "/")).await;
+    assert_eq!(reply.status, 403);
+    assert_eq!(lab.upstream.hits.load(Ordering::SeqCst), 0);
+    let lab = lab_with(
+        |route| route.allowed_source_cidrs = vec!["127.0.0.0/8".into()],
+        None,
+    )
+    .await;
+    assert_eq!(send(&lab, APP, &get(APP, "/")).await.status, 200);
+}
+
 async fn open_websocket(lab: &Lab) -> Tls {
     let mut stream = connect(lab, Some(APP)).await.unwrap();
     stream

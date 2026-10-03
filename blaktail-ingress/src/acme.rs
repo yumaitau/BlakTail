@@ -16,7 +16,8 @@ use std::{
 use tokio::sync::Mutex;
 
 const RENEW_BEFORE_SECS: i64 = 30 * 24 * 60 * 60;
-const FAILURE_BACKOFF: Duration = Duration::from_secs(60 * 60);
+// Long enough to stay well inside public CA failed-validation limits.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
 
 pub struct Acme {
     pub directory: String,
@@ -126,7 +127,7 @@ impl Acme {
     }
 
     /// Issues or renews certificates that are missing or within 30 days of
-    /// expiry. Failures back off for an hour per name.
+    /// expiry. Failures back off for 15 minutes per name.
     pub async fn ensure(&self, names: &[String]) {
         for fqdn in names {
             let (cert, key) = tls::cert_paths(&self.dir, fqdn);

@@ -39,6 +39,10 @@ function readRoute(formData: FormData): RouteInput {
       .split(/[\s,]+/)
       .map((domain) => domain.trim())
       .filter(Boolean),
+    allowed_source_cidrs: String(formData.get("allowedSources") ?? "")
+      .split(/[\s,]+/)
+      .map((cidr) => cidr.trim())
+      .filter(Boolean),
     rate_limit_per_minute: int(formData, "rate", 600),
     max_body_bytes: int(formData, "maxBodyMiB", 10) * 1024 * 1024,
     max_connections: int(formData, "maxConnections", 256),

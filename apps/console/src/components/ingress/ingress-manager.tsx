@@ -341,6 +341,14 @@ function RouteCard({
           </dd>
         </div>
         <div>
+          <dt>Who can connect</dt>
+          <dd>
+            {route.allowed_source_cidrs.length > 0
+              ? route.allowed_source_cidrs.join(", ")
+              : "Any Internet address"}
+          </dd>
+        </div>
+        <div>
           <dt>Certificate</dt>
           <dd>{route.tls_mode === "acme_http01" ? "ACME HTTP-01 on the ingress" : "Operator files on the ingress"}</dd>
         </div>
@@ -597,6 +605,10 @@ function CreateRoute({
               <input name="allowedDomains" placeholder="example.org.au" disabled={disabled} />
             </label>
           ) : null}
+          <label>
+            Allowed client networks (optional, CIDR)
+            <input name="allowedSources" placeholder="203.0.113.0/24" disabled={disabled} />
+          </label>
           <label>
             Requests per minute per client
             <input name="rate" type="number" min={1} max={60000} defaultValue={600} disabled={disabled} />

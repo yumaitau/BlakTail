@@ -191,6 +191,12 @@ impl Proxy {
                 "bad_request",
             );
         }
+        if !route.source_allowed(client.ip()) {
+            return Outcome::of(
+                text(StatusCode::FORBIDDEN, "Not available from your network.\n"),
+                "source_denied",
+            );
+        }
         if !route
             .limiter
             .lock()
