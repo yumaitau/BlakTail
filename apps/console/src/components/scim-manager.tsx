@@ -12,10 +12,10 @@ export function ScimManager() {
     <section className="panel stack" aria-labelledby="scim-heading">
       <h2 id="scim-heading">Directory provisioning</h2>
       <p className="muted">
-        SCIM sits beside single sign-on. The identity provider creates and
-        suspends members here. Password sign-in stays the break-glass path.
-        Point the provider at <span className="mono">/api/scim/v2</span> with
-        the bearer token.
+        SCIM sits beside single sign-on. The identity provider creates,
+        suspends and groups members here (Users and Groups). Password sign-in
+        stays the break-glass path. Point the provider at{" "}
+        <span className="mono">/api/scim/v2</span> with the bearer token.
       </p>
       <button
         type="button"

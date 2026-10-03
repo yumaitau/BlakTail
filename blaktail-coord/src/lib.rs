@@ -14,6 +14,7 @@ pub mod https_services;
 pub mod ipam;
 mod metrics;
 mod notifications;
+mod notify_channels;
 mod operations;
 mod org_dns;
 mod peer_lifecycle;
@@ -385,7 +386,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 37,
-        name: "SCIM role mapping and alert channels",
+        name: "notification channels, quiet hours and digests",
         postgres_sql: include_str!("../migrations/postgres/0037_scim_alerts.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0037_scim_alerts.sql")),
     },
@@ -1553,6 +1554,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(audit_log::routes())
         .merge(traffic::routes())
         .merge(notifications::routes())
+        .merge(notify_channels::routes())
         .merge(post_quantum::routes())
         .merge(agent_gateway::routes())
         .merge(remote_access::routes())
@@ -6141,6 +6143,7 @@ mod tests {
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
     mod events_audit;
     mod forwarding;
+    mod notify_channels;
     mod operations;
     mod policy_posture;
     mod posture_integrations;

@@ -179,6 +179,14 @@ export const membership = pgTable(
       .$type<"invited" | "active" | "suspended" | "removed">()
       .default("active"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
+    /** "directory" once a group mapping set the role (draft 15). */
+    roleSource: text("role_source").$type<"manual" | "directory">().notNull().default("manual"),
+    /** SCIM deprovisioning: suspended now, tombstoned (status removed) after this. */
+    deprovisionAt: timestamp("deprovision_at", { withTimezone: true }),
+    tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+    /** OIDC `groups` claim from the member's latest sign-in to this organisation. */
+    idpGroupsJson: jsonb("idp_groups_json").$type<string[]>().notNull().default([]),
+    idpGroupsSeenAt: timestamp("idp_groups_seen_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("membership_org_user_unique").on(
@@ -641,3 +649,75 @@ export const membershipRelations = relations(membership, ({ one }) => ({
     references: [user.id],
   }),
 }));
+
+/** SCIM 2.0 Group resources pushed by the identity provider (draft 15). */
+export const scimGroup = pgTable(
+  "scim_group",
+  {
+    id: text("id").primaryKey(),
+    organisationId: text("organisation_id")
+      .notNull()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    displayName: text("display_name").notNull(),
+    externalId: text("external_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("scim_group_org_idx").on(table.organisationId)],
+);
+
+export const scimGroupMember = pgTable(
+  "scim_group_member",
+  {
+    groupId: text("group_id")
+      .notNull()
+      .references(() => scimGroup.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [uniqueIndex("scim_group_member_unique").on(table.groupId, table.userId)],
+);
+
+/** Owner-defined IdP group -> organisation role. Highest mapped role wins. */
+export const directoryGroupRoleMapping = pgTable(
+  "directory_group_role_mapping",
+  {
+    id: text("id").primaryKey(),
+    organisationId: text("organisation_id")
+      .notNull()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    source: text("source").$type<"scim" | "oidc">().notNull(),
+    groupName: text("group_name").notNull(),
+    role: text("role").$type<OrgRole>().notNull(),
+    createdByUserId: text("created_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  () => [
+    check("directory_group_role_mapping_source_check", sql.raw("\"source\" in ('scim', 'oidc')")),
+    check("directory_group_role_mapping_role_check", sql.raw(`"role" in (${ROLE_SQL})`)),
+  ],
+);
+
+export const directorySyncSettings = pgTable(
+  "directory_sync_settings",
+  {
+    organisationId: text("organisation_id")
+      .primaryKey()
+      .references(() => organisation.id, { onDelete: "cascade" }),
+    allowOwnerMapping: boolean("allow_owner_mapping").notNull().default(false),
+    deprovisionGraceDays: integer("deprovision_grace_days").notNull().default(7),
+    updatedByUserId: text("updated_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  () => [
+    check(
+      "directory_sync_settings_grace_check",
+      sql.raw("\"deprovision_grace_days\" BETWEEN 0 AND 90"),
+    ),
+  ],
+);

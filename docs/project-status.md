@@ -82,7 +82,12 @@ See [console.md](console.md).
   audited export and a per-organisation hash chain (tamper-evident, not
   tamper-proof)
 - Signed HTTPS webhooks with an event catalogue and per-destination
-  subscriptions (no email or chat delivery)
+  subscriptions; email (operator SMTP relay), Slack and Teams channels on the
+  same outbox with timezone-aware quiet hours and digests (Slack/Teams need
+  an owner's offshore residency acknowledgement)
+- SCIM Users and Groups, owner-defined directory group to role mappings with
+  drift preview and audited apply, and a deprovision grace period with
+  tombstones
 - Owner opt-in traffic diagnostics endpoint and page; current agents do not
   report traffic yet
 - Single-host SQLite or concurrent PostgreSQL coordinator storage

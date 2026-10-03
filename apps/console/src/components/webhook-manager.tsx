@@ -40,10 +40,10 @@ export function WebhookManager({
         <p className="muted">
           HTTPS endpoints that receive signed events from the catalogue below.
           The signing secret is shown once and stored sealed. Loopback,
-          private, overlay and cloud metadata targets are rejected. Webhooks
-          are the only delivery channel: BlakTail does not send email or
-          Slack alerts. Delivery is best effort with bounded retries — not a
-          safety control.
+          private, overlay and cloud metadata targets are rejected. Email,
+          Slack and Teams alerts are set up under Notification channels.
+          Delivery is best effort with bounded retries — not a safety
+          control.
         </p>
       </div>
       <form

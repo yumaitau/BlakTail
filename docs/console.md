@@ -339,8 +339,12 @@ exported. Exports are audited as `audit.exported`.
 
 Settings → Webhooks lets owners and admins choose which catalogued events
 each destination receives, inspect deliveries (including dead-lettered ones
-and their last error) and replay them. Webhooks are the only alert channel;
-there is no email or Slack delivery ([notifications.md](notifications.md)).
+and their last error) and replay them. Settings → Notification channels adds
+email, Slack and Microsoft Teams destinations with quiet hours, digests and
+**Send test**; Slack and Teams need an owner's residency acknowledgement
+([notifications.md](notifications.md)). Settings → Directory group roles maps
+SCIM groups and OIDC `groups` claims to roles with a drift preview
+([identity.md](identity.md#directory-groups-and-roles)).
 
 ## Local development
 

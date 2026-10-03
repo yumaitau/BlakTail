@@ -1,6 +1,7 @@
 //! Event catalogue and per-destination subscriptions on top of the signed
-//! webhook outbox (draft 18). Signed HTTPS webhooks are the only delivery
-//! channel; there is no email, Slack or third-party adapter.
+//! webhook outbox (draft 18). Signed HTTPS webhooks are delivered by
+//! `webhooks`; email, Slack and Teams channels by `notify_channels`, on the
+//! same outbox rows.
 //!
 //! Events come from three places: explicit `webhooks::enqueue` calls at the
 //! mutation (device, policy, DNS), audit actions mapped here (so every

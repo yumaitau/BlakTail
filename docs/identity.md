@@ -31,6 +31,63 @@ admin, network admin, auditor and member ([roles.md](roles.md)). The last active
 owner cannot be demoted, suspended or removed, and neither can the last active
 password owner while one exists.
 
+## Directory provisioning (SCIM)
+
+Settings → Directory mints an organisation SCIM bearer token (stored only as
+a SHA-256 hash). The identity provider points at `/api/scim/v2`:
+
+- `Users`: create (`POST`), list with `userName eq` filter, get, `PATCH`
+  `active`, and `DELETE` (same as deactivate).
+- `Groups` (RFC 7643 Group, RFC 7644 operations): `GET /Groups` with
+  `displayName eq` filter and `startIndex`/`count`, `POST`, `GET`, `PUT`,
+  `DELETE`, and `PATCH` with `add`/`remove`/`replace` of `members`,
+  `remove` of `members[value eq "id"]` (Okta), value-list removes (Entra ID),
+  and `replace` of `displayName`/`externalId`. Other operations and filters get
+  a SCIM 400. Members must already be users provisioned in the same
+  organisation; display names are unique per organisation (409).
+
+A token only ever sees its own organisation: another organisation's groups
+and users are 404, and a missing or unknown token is 401. Group writes are
+audited in the console audit log (`scim.group_created`, `.group_updated`,
+`.group_deleted`).
+
+## Directory groups and roles
+
+Owners map identity-provider groups to roles in Settings → Directory group
+roles. A mapping names a source, `scim` (a SCIM Group's `displayName`) or
+`oidc` (a value in the ID token or userinfo `groups` claim, recorded for
+each member at their latest sign-in), a group name (matched without regard to
+case) and a role.
+
+- **Precedence:** a member in several mapped groups gets the highest role
+  (owner > admin > network admin > auditor > member).
+- **No match:** a role set earlier by a mapping falls back to member; a role
+  an owner set by hand is left alone. Changing a role by hand marks it manual
+  again.
+- **Owner:** no mapping can grant owner, and mapped changes never touch an
+  existing owner, unless an owner turns on *Allow a directory group to grant
+  owner*. Even then a change that would remove the last active owner or the
+  last active password owner is shown as blocked and never applied.
+- **Drift preview, then apply:** group pushes and sign-ins never change roles
+  on their own. *Preview role changes* lists each person, current and new
+  role, the groups responsible and any block. *Apply* re-plans inside a
+  serializable transaction and refuses if anything changed since the preview.
+  Each change is audited (`membership.role_mapped`) and raises the
+  `membership.role_changed` webhook event; the run is audited as
+  `directory.mapping_applied`. Mapping and setting changes need the
+  organisation's step-up and MFA rules (`directory.mapping_added`,
+  `.mapping_removed`, `.settings_updated`).
+
+**Deprovisioning.** When the provider deactivates (or deletes) a user, the
+membership is suspended at once, so access stops immediately, and a deadline
+is set from the organisation's grace period (default 7 days, 0–90). Inside
+the grace period, reactivation restores the membership with its role. After
+it, the next SCIM request or preview turns the membership into a
+**tombstone**: status `removed`, `tombstoned_at` set, row kept for audit
+(`membership.tombstoned`). Reactivating a tombstone starts again as a
+member. A grace period of 0 tombstones immediately. SCIM never deactivates an
+owner.
+
 ## Break-glass
 
 Keep at least one password owner; the console refuses changes that would remove
