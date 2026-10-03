@@ -478,6 +478,9 @@ async fn provider_failures_never_log_the_credential() {
         .with_writer(move || writer.clone())
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
+    // Other test threads may have cached "never" interest for these
+    // callsites before this scoped subscriber existed.
+    tracing::callsite::rebuild_interest_cache();
 
     let store = Store::memory().await.unwrap();
     let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
