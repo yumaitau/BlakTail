@@ -387,10 +387,12 @@ async fn report_health(
         let serial = service
             .serial
             .filter(|serial| serial.len() <= 64 && serial.chars().all(|ch| ch.is_ascii_hexdigit()));
+        // A failed target check is reported whether or not the listener is
+        // up: the agent stops routing (and may stop listening) for it.
         let state = match (service.listening, service.healthy) {
-            (false, _) => "not_listening",
+            (_, false) => "unhealthy",
+            (false, true) => "not_listening",
             (true, true) => "healthy",
-            (true, false) => "unhealthy",
         };
         let was_published = before.state == "healthy"
             && before.fresh_for(&me, at)
@@ -611,6 +613,27 @@ mod tests {
         assert!(peers(&r, ally, &ally_token).await["service_records"].is_null());
         assert_eq!(status(&r, org).await["status"], "awaiting_certificate");
 
+        // The agent refuses a port outside its allow-list without a listener
+        // or certificate; the console shows the device's reason.
+        report(
+            &r,
+            server,
+            &server_token,
+            serde_json::json!({"listen_port": 443, "services": [
+                {"id": id, "listening": false, "healthy": false, "detail": "port 8080 is not in this agent's --serve-services-ports list"}
+            ]}),
+        )
+        .await;
+        let view = status(&r, org).await;
+        assert_eq!(view["status"], "target_unhealthy");
+        assert!(view["status_detail"]
+            .as_str()
+            .unwrap()
+            .contains("--serve-services-ports"));
+        assert!(peers(&r, ally, &ally_token).await["service_records"].is_null());
+        report(&r, server, &server_token, healthy("00")).await;
+        assert_eq!(status(&r, org).await["status"], "awaiting_certificate");
+
         let (_, issued) = call(
             &r,
             Method::POST,
@@ -622,14 +645,15 @@ mod tests {
         let serial = issued["serial"].as_str().unwrap().to_owned();
         assert_eq!(status(&r, org).await["status"], "certificate_issued");
 
-        // Listening with the live certificate but the target is down.
+        // The target is down: the agent drops the route, so it reports no
+        // listener and no serial, only the failed check.
         let before = revision(&store, org).await;
         report(
             &r,
             server,
             &server_token,
             serde_json::json!({"listen_port": 443, "services": [
-                {"id": id, "listening": true, "healthy": false, "detail": "connect 127.0.0.1:8080 refused\u{7}", "serial": serial}
+                {"id": id, "listening": false, "healthy": false, "detail": "connect 127.0.0.1:8080 refused\u{7}"}
             ]}),
         )
         .await;

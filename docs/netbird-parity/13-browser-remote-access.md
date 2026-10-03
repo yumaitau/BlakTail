@@ -109,6 +109,8 @@ Supersedes the design-only status above. ADR 0006 is Accepted (3 October 2026) a
   - browser-style session ran `id` as `deploy` over WireGuard with a certificate;
   - reused ticket, member and unlisted user refused;
   - revoke and device suspend ended live sessions in 10 s;
+  - re-run 3 October 2026: clearing the gateway setting (`gateway_changed`) and a SCIM-style
+    `system:scim` service-assertion user revoke each ended a live session in 10 s;
   - host-key swap failed closed and was audited, and the reported new key blocked sessions;
   - jobs ran as `jobrunner`, with timeout and cancel enforced and the audit chain intact;
   - RDP frames reached the client from xrdp through guacd.
@@ -119,7 +121,8 @@ Supersedes the design-only status above. ADR 0006 is Accepted (3 October 2026) a
 - Windows RDP targets, and the decision to leave RDP certificates unpinned.
 - Gateway behind a public TLS proxy, and across NAT or relay paths.
 - Postgres runs of the new tables.
-- SCIM-driven deactivation does not revoke live sessions; they end at the 30-minute cap.
+- SCIM deactivation now revokes live sessions (lab-proven through the coordinator call the
+  console makes); a run driven by a real IdP's SCIM client is still to do.
 - CA and job-key rotation are not built: a changed job key stops jobs until the pin file is removed.
 - Draft 07/12 field drills.
 - Threat-model external review of the gateway.

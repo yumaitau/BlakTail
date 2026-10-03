@@ -193,14 +193,18 @@ Routes are not yet in the `/api/v1` automation API.
 coordinator, `blaktaild` and `blaktail-ingress` from tracked sources and runs a
 coordinator, an ingress host (kernel WireGuard), a target agent serving HTTP
 only on its overlay address (`python3 -m http.server --bind 100.64.0.2`), a
-Pebble ACME server and an "Internet" client on one Docker network. Result:
-`public_ingress_proof passed`.
+Pebble ACME server and an "Internet" client on one Docker network. Re-run on
+3 October 2026 after owner designation became mandatory
+(`LAB_PREFIX=final-pubingress`). Result: `public_ingress_proof passed`.
 
 | Check | Result |
 | --- | --- |
 | Client cannot reach the app directly | refused |
 | Member, admin, network admin create route | `403` each |
 | Owner create while the organisation is off | `409` |
+| Route published, edge reports `public-ingress` but is not designated (15 s, three polls) | nothing served |
+| Admin, network admin, member designate the edge | `403` each |
+| Owner designates the edge | `200`; route served |
 | `https://app.example.org.au/` through the ingress (lab CA verified) | `200`, app body |
 | Response headers | no `Server`, overlay address or `.blaktail` name |
 | Wrong `Host` on the published connection | `421` |
@@ -209,7 +213,7 @@ Pebble ACME server and an "Internet" client on one Docker network. Result:
 | Policy set to deny-by-default | route withdrawn, console `blocked_by_policy`; restored when policy restored |
 | ACME HTTP-01 route `auto.example.org.au` against Pebble | certificate issued, served and verified against Pebble's root |
 | Console workspace | ingress online, certificate expiry reported |
-| Emergency disable (admin) to first failed public request | 1.60 s (bound 30 s; 1.85 s on an earlier run) |
+| Emergency disable (admin) to first failed public request | 1.47 s (bound 30 s; 1.60 s and 1.85 s on earlier runs) |
 | Access log on the ingress host | entries present, no target address |
 | Owner re-enable with typed hostname | served again |
-| Coordinator stopped | ingress stopped serving after 29.6 s (bound 30 s; 28.9 s earlier) |
+| Coordinator stopped | ingress stopped serving after 29.9 s (bound 30 s; 29.6 s and 28.9 s earlier) |
