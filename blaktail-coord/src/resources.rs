@@ -1863,6 +1863,69 @@ pub(crate) async fn api_delete(
     .await
 }
 
+/// How often a long-poll re-reads routing-peer liveness for its organisation.
+const LIVENESS_CHECK_SECS: i64 = 2;
+
+/// Routing-peer selection follows liveness (online within `NODE_ONLINE_SECS`),
+/// which changes without any write that bumps the control revision, so idle
+/// clients would keep a dead router's routes forever. Control long-polls call
+/// this; at most every `LIVENESS_CHECK_SECS` per organisation it compares the
+/// online nodes that advertise routes with what this process last saw and
+/// bumps the revision when they differ. The first look after start bumps as
+/// well (when any node advertises), since a router may have gone quiet while
+/// nothing was watching. Each replica keeps its own view; a transition seen by
+/// several replicas only costs an extra snapshot.
+pub(crate) async fn bump_on_router_liveness_change(
+    pool: &AnyPool,
+    org_id: &str,
+) -> Result<bool, ApiError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    /// Per organisation: when it was last checked and its online advertisers.
+    type Seen = HashMap<String, (i64, Vec<String>)>;
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    let at = now();
+    if seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(org_id)
+        .is_some_and(|(checked, _)| at - checked < LIVENESS_CHECK_SECS)
+    {
+        return Ok(false);
+    }
+    let rows = sqlx::query(
+        "SELECT id,last_seen_at FROM nodes WHERE org_id=$1 AND advertised_routes_json<>'[]' AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY id",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    let online = rows
+        .iter()
+        .filter_map(|row| {
+            let id: String = row.try_get(0).ok()?;
+            let last_seen: Option<i64> = row.try_get(1).ok()?;
+            last_seen
+                .is_some_and(|seen| at - seen <= NODE_ONLINE_SECS)
+                .then_some(id)
+        })
+        .collect::<Vec<_>>();
+    let changed = match seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(org_id.to_owned(), (at, online.clone()))
+    {
+        Some((_, before)) => before != online,
+        None => !rows.is_empty(),
+    };
+    if changed {
+        let mut tx = pool.begin().await?;
+        bump_control_revision(&mut tx, org_id).await?;
+        tx.commit().await?;
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

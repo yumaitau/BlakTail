@@ -29,3 +29,41 @@ Create overlapping and non-overlapping dual-stack resources with two routers; on
 - **Done:** `blaktail-coord/src/forwarding.rs` compiles, for a routing peer reporting `forward-filter`, a `forward_filter` field in its peer map/update response: per authorised client, overlay source addresses x each prefix it receives through that router (device-approved routes, resource routes via `resources::Distribution::grants_via`) x resource ports/protocols, plus policy `hosts` rules inside those prefixes (deny carve-outs win, allow rules add ports). `0.0.0.0/0` only for clients currently selecting that exit node (selection persisted in `nodes.exit_node_id`, migration slot 28; a change bumps the control revision), with the router's other ungranted prefixes denied to them. `blaktaild` (`blaktaild/src/forward_filter.rs`) enforces it in `BLAKTAIL-FWD` (iptables/ip6tables, default reject, atomic staging-chain swap, cleaned on `down`/`pause`/route withdrawal) and reports `forward-filter`. Routers without the capability keep distributing, but resources, device routes and routing peers show `forwarding: not_enforced` ("Forwarding not enforced — upgrade agent" in `/networks`), and policy explain returns `not_enforced` for hosts behind them.
 - **Proven by tests:** `blaktail-coord/src/tests/forwarding.rs` (authorised client present with exact ports, unauthorised client and other organisation absent, host deny/allow entries, disabled resource removes entries, exit node only for selecting clients and withdrawn on deselect, capability-driven status and explain enforcement); `blaktaild/src/forward_filter.rs` tests (deterministic rules, IPv4/IPv6 split, default reject, malformed entries never widen access, atomic swap order, failed install keeps previous chain, idempotent cleanup) with a fake command runner.
 - **Still needs live/field proof or a decision:** no packet test on a real Linux router (iptables-legacy and iptables-nft `-E` rename with a live jump is relied on, not proven here). A router joining for the first time, with no stored list, forwards legacy-style until its first peer map (seconds).
+
+### Live lab: two-site routing (3 October 2026)
+
+`deploy/homelab/prove-routing.sh` on Docker context `m3-max` (about 5 minutes;
+everything `labs-routing-*`, removed on exit; results table in
+`docs/network-resources.md#live-lab-3-october-2026`). Two sites (site A: `ra1`
+metric 10 on iptables-nft, `ra2` metric 20 on iptables-legacy; site B: `rb` on
+iptables-legacy), an exit node on iptables-nft, an authorised client and a
+guest, all on internal Docker networks.
+
+- **Passed:** allowed port behind each router reachable 1 s after resource
+  creation; adjacent ports refused with the `BLAKTAIL-FWD` default reject
+  counting them on nft and legacy (3 → 4 packets each); a guest that forced
+  the site prefix into WireGuard was refused by `BLAKTAIL-FWD` (4 → 5);
+  router-to-router traffic both ways. Six resource edits rebuilt and renamed
+  `BLAKTAIL-FWD-NEW` over the live, jumped-to chain on all four routers while
+  the client connected 150 times: 0 failures, one jump and no staging chain
+  left on both backends.
+- **Exit node:** only the selecting client reached the Internet host; the
+  guest's forced exit traffic was rejected (0 → 2); captures showed 0 packets
+  on the exit's Internet uplink from non-exit attempts and 0 non-WireGuard
+  packets on the exit client's uplink while it used DNS and HTTP through the
+  exit (no DNS or default-route leak).
+- **Router loss:** `docker kill` of the primary; the client reached site A
+  through the standby after **82 s** (89 s in an earlier run; bound now about 92 s).
+- **Bugs found and fixed:** (1) `/updates` ignored a changed `exit_node` when
+  the revision was unchanged, so an agent resumed with `--exit-node` never got
+  its default route; the long-poll now records the selection and bumps the
+  revision (`exit_selection_on_a_long_poll_returns_a_fresh_snapshot`).
+  (2) Routing-peer liveness never bumped the revision, so idle clients kept a
+  dead router's routes indefinitely; long-polls now re-check online
+  route-advertising devices every 2 s per organisation
+  (`resources::bump_on_router_liveness_change`,
+  `routing_peer_failover_reaches_idle_long_polls`). The long-poll
+  `last_seen_at` refresh from the app-connector lab is also required.
+- **Still unproven:** IPv6 routing, host-to-host site-to-site without NAT
+  (unsupported), physical routers and real WAN links, other Linux
+  distributions' iptables builds.

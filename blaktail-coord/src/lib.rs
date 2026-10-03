@@ -3697,11 +3697,27 @@ async fn list_updates(
         selection.mac_addresses.as_deref(),
     )
     .await?;
+    // Likewise a changed exit-node choice (an agent resumed with a new
+    // `--exit-node`): otherwise an idle organisation answers 204 forever and
+    // the client never receives, nor the exit node allows, its default route.
+    {
+        let requested_exit = selection
+            .exit_node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let mut tx = s.store.pool.begin().await?;
+        if forwarding::record_exit_selection(&mut tx, node_id, requested_exit).await? {
+            bump_control_revision(&mut tx, &org).await?;
+        }
+        tx.commit().await?;
+    }
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
         posture::due(&s.store.pool, &org).await?;
         app_connectors::expire_leases(&s.store.pool, &org).await?;
+        resources::bump_on_router_liveness_change(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
