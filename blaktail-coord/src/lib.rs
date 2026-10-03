@@ -90,7 +90,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 28;
+pub const CURRENT_SCHEMA_VERSION: i64 = 40;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -327,6 +327,78 @@ const MIGRATIONS: &[Migration] = &[
         postgres_sql: include_str!("../migrations/postgres/0028_operations.sql"),
         sqlite_sql: Some(include_str!("../migrations/sqlite/0028_operations.sql")),
     },
+    Migration {
+        version: 29,
+        name: "public ingress",
+        postgres_sql: include_str!("../migrations/postgres/0029_public_ingress.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0029_public_ingress.sql")),
+    },
+    Migration {
+        version: 30,
+        name: "browser remote access and jobs",
+        postgres_sql: include_str!("../migrations/postgres/0030_remote_access.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0030_remote_access.sql")),
+    },
+    Migration {
+        version: 31,
+        name: "AI agent gateway",
+        postgres_sql: include_str!("../migrations/postgres/0031_agent_gateway.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0031_agent_gateway.sql")),
+    },
+    Migration {
+        version: 32,
+        name: "post-quantum peer protection",
+        postgres_sql: include_str!("../migrations/postgres/0032_post_quantum.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0032_post_quantum.sql")),
+    },
+    Migration {
+        version: 33,
+        name: "posture integrations",
+        postgres_sql: include_str!("../migrations/postgres/0033_edr_integrations.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0033_edr_integrations.sql")),
+    },
+    Migration {
+        version: 34,
+        name: "mobile relay and transport",
+        postgres_sql: include_str!("../migrations/postgres/0034_mobile_relay.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0034_mobile_relay.sql")),
+    },
+    Migration {
+        version: 35,
+        name: "private service serving",
+        postgres_sql: include_str!("../migrations/postgres/0035_service_serving.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0035_service_serving.sql")),
+    },
+    Migration {
+        version: 36,
+        name: "traffic reporting and endpoint filters",
+        postgres_sql: include_str!("../migrations/postgres/0036_traffic_agents.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0036_traffic_agents.sql")),
+    },
+    Migration {
+        version: 37,
+        name: "SCIM role mapping and alert channels",
+        postgres_sql: include_str!("../migrations/postgres/0037_scim_alerts.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0037_scim_alerts.sql")),
+    },
+    Migration {
+        version: 38,
+        name: "HTTPS relay fallback",
+        postgres_sql: include_str!("../migrations/postgres/0038_https_relay.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0038_https_relay.sql")),
+    },
+    Migration {
+        version: 39,
+        name: "address renumbering and IPv6 routes",
+        postgres_sql: include_str!("../migrations/postgres/0039_renumbering.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0039_renumbering.sql")),
+    },
+    Migration {
+        version: 40,
+        name: "reserved",
+        postgres_sql: include_str!("../migrations/postgres/0040_reserved.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0040_reserved.sql")),
+    },
 ];
 
 impl Store {
@@ -536,7 +608,7 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             16 => migrate_sqlite_to_v16(&mut tx).await?,
             17 => migrate_sqlite_to_v17(&mut tx).await?,
             18 => migrate_sqlite_to_v18(&mut tx).await?,
-            19..=28 => {
+            19..=40 => {
                 let sql = migration
                     .sqlite_sql
                     .ok_or(StoreError::InvalidMigrationPlan {
@@ -578,6 +650,18 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             26 => "PRAGMA user_version=26",
             27 => "PRAGMA user_version=27",
             28 => "PRAGMA user_version=28",
+            29 => "PRAGMA user_version=29",
+            30 => "PRAGMA user_version=30",
+            31 => "PRAGMA user_version=31",
+            32 => "PRAGMA user_version=32",
+            33 => "PRAGMA user_version=33",
+            34 => "PRAGMA user_version=34",
+            35 => "PRAGMA user_version=35",
+            36 => "PRAGMA user_version=36",
+            37 => "PRAGMA user_version=37",
+            38 => "PRAGMA user_version=38",
+            39 => "PRAGMA user_version=39",
+            40 => "PRAGMA user_version=40",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -9828,8 +9912,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 28);
-        sqlx::raw_sql("PRAGMA user_version=29")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 40);
+        sqlx::raw_sql("PRAGMA user_version=41")
             .execute(&pool)
             .await
             .unwrap();
