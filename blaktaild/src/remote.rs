@@ -302,12 +302,15 @@ pub async fn execute(
         .kill_on_drop(true)
         .process_group(0);
     if let Some(run_as) = run_as.filter(|run_as| run_as.switch) {
-        command.uid(run_as.uid).gid(run_as.gid);
-        // SAFETY: setgroups is async-signal-safe; it drops the agent's
-        // supplementary groups in the child before exec.
+        let (uid, gid) = (run_as.uid, run_as.gid);
+        // SAFETY: setgroups, setgid and setuid are async-signal-safe. The
+        // order matters: groups and gid must change while still root.
         unsafe {
-            command.pre_exec(|| {
-                if libc::setgroups(0, std::ptr::null()) != 0 {
+            command.pre_exec(move || {
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(gid) != 0
+                    || libc::setuid(uid) != 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

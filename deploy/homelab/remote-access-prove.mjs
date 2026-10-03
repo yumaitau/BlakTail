@@ -200,7 +200,8 @@ async function sessionId(orgId) {
       ws.send(new TextEncoder().encode("id; exit\n"));
     },
   });
-  const line = result.output.split(/\r?\n/).find((text) => text.includes("uid="));
+  const plain = result.output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  const line = plain.split(/\r?\n/).find((text) => text.includes("uid="));
   if (!line || !line.includes("(deploy)")) {
     throw new Error(`id output missing: ${JSON.stringify(result)}`);
   }
