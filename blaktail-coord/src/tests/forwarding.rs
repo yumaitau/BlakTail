@@ -655,3 +655,186 @@ async fn changed_advertisements_bump_the_control_revision_once() {
     );
     assert_eq!(revision().await, before + 1, "changed advertisement");
 }
+
+#[tokio::test]
+async fn exit_selection_on_a_long_poll_returns_a_fresh_snapshot() {
+    // An agent resumed with a new `--exit-node` only long-polls `/updates`
+    // with its current revision; the selection must still take effect.
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "exit-long-poll-org").await;
+    let owner = || signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let exit = register_test_node(
+        &router,
+        org.id,
+        &owner(),
+        "exit-one",
+        "exit-one-key",
+        &["0.0.0.0/0"],
+    )
+    .await;
+    approve(&router, org.id, &owner(), exit.id, &["0.0.0.0/0"]).await;
+    let client =
+        register_test_node(&router, org.id, &owner(), "client-one", "client-key", &[]).await;
+    let updates = |since: i64, query: &'static str| {
+        let router = router.clone();
+        let (id, token) = (client.id, client.node_token.clone());
+        async move {
+            call(
+                &router,
+                Method::GET,
+                &format!("/v1/nodes/{id}/updates?since={since}&wait=0&version=2{query}"),
+                serde_json::Value::Null,
+                Some(&token),
+            )
+            .await
+        }
+    };
+    let has_default = |snapshot: &serde_json::Value| {
+        snapshot["peers"].as_array().unwrap().iter().any(|peer| {
+            peer["allowed_ips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ip| ip == "0.0.0.0/0")
+        })
+    };
+
+    // The exit node's first capability report bumps the revision; get it
+    // out of the way so the client's long poll below starts idle.
+    let filter = allow_list(&router, &exit).await;
+    assert!(!reaches(&filter, &client, "203.0.113.9/32", None, None));
+    let first: serde_json::Value = body(updates(0, "").await).await;
+    assert!(!has_default(&first));
+    let revision = first["revision"].as_i64().unwrap();
+    assert_eq!(updates(revision, "").await.status(), StatusCode::NO_CONTENT);
+
+    // Selecting the exit node on an otherwise idle organisation answers at
+    // once with the default route.
+    let response = updates(revision, "&exit_node=exit-one").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let selected: serde_json::Value = body(response).await;
+    assert_eq!(selected["exit_node_active"], true);
+    assert!(has_default(&selected));
+    let revision = selected["revision"].as_i64().unwrap();
+    let filter = allow_list(&router, &exit).await;
+    assert!(reaches(&filter, &client, "203.0.113.9/32", None, None));
+    // Repeating the same choice does not churn the revision.
+    assert_eq!(
+        updates(revision, "&exit_node=exit-one").await.status(),
+        StatusCode::NO_CONTENT
+    );
+    // Dropping the choice withdraws it the same way.
+    let response = updates(revision, "").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let dropped: serde_json::Value = body(response).await;
+    assert_eq!(dropped["exit_node_active"], false);
+    assert!(!has_default(&dropped));
+}
+
+#[tokio::test]
+async fn routing_peer_failover_reaches_idle_long_polls() {
+    // Liveness changes write nothing that bumps the revision; a client whose
+    // long-poll is otherwise idle must still move to the standby router.
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "failover-poll-org").await;
+    let owner = || signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let primary = register_test_node(
+        &router,
+        org.id,
+        &owner(),
+        "primary",
+        "primary-key",
+        &["10.30.0.0/24"],
+    )
+    .await;
+    let standby = register_test_node(
+        &router,
+        org.id,
+        &owner(),
+        "standby",
+        "standby-key",
+        &["10.30.0.0/24"],
+    )
+    .await;
+    create_resource(
+        &router,
+        org.id,
+        &owner(),
+        serde_json::json!({
+            "name": "Site",
+            "cidr": "10.30.0.0/24",
+            "routing_peers": [
+                {"node_id": primary.id, "metric": 10},
+                {"node_id": standby.id, "metric": 20}
+            ],
+            "access": {"roles": ["owner"]},
+        }),
+    )
+    .await;
+    let client = register_test_node(&router, org.id, &owner(), "client", "client-key", &[]).await;
+    let seen = |node: Uuid, at: i64| {
+        let pool = store.pool.clone();
+        async move {
+            sqlx::query("UPDATE nodes SET last_seen_at=$1 WHERE id=$2")
+                .bind(at)
+                .bind(node.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    seen(primary.id, now()).await;
+    seen(standby.id, now()).await;
+    let updates = |since: i64| {
+        let router = router.clone();
+        let (id, token) = (client.id, client.node_token.clone());
+        async move {
+            call(
+                &router,
+                Method::GET,
+                &format!("/v1/nodes/{id}/updates?since={since}&wait=0&version=2"),
+                serde_json::Value::Null,
+                Some(&token),
+            )
+            .await
+        }
+    };
+    let carrier = |snapshot: &serde_json::Value| {
+        snapshot["peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|peer| {
+                peer["allowed_ips"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|ip| ip == "10.30.0.0/24")
+            })
+            .map(|peer| peer["id"].as_str().unwrap().to_owned())
+    };
+
+    let first: serde_json::Value = body(updates(0).await).await;
+    assert_eq!(carrier(&first), Some(primary.id.to_string()));
+    let revision = first["revision"].as_i64().unwrap();
+    assert_eq!(updates(revision).await.status(), StatusCode::NO_CONTENT);
+
+    // The primary goes quiet; after the next liveness check the idle poll
+    // answers with the standby carrying the prefix.
+    seen(primary.id, now() - NODE_ONLINE_SECS - 30).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    let response = updates(revision).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let failed_over: serde_json::Value = body(response).await;
+    assert_eq!(carrier(&failed_over), Some(standby.id.to_string()));
+    let revision = failed_over["revision"].as_i64().unwrap();
+    assert_eq!(updates(revision).await.status(), StatusCode::NO_CONTENT);
+
+    // And back again when the primary returns.
+    seen(primary.id, now()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    let back: serde_json::Value = body(updates(revision).await).await;
+    assert_eq!(carrier(&back), Some(primary.id.to_string()));
+}

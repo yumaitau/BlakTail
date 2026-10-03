@@ -36,14 +36,17 @@ resource's access selection allows.
   peer of that resource in its own organisation. A report naming another
   organisation's resource is not found; another node's token is refused.
 - Each accepted answer becomes a host route lease (`/32` or `/128`) that
-  expires after the DNS TTL clamped to **30 seconds minimum and 5 minutes
-  maximum**. The floor stops very short TTLs flapping routes between
-  connector polls; the cap bounds how long a silent connector's answer lives.
+  expires after the DNS TTL clamped to **90 seconds minimum and 5 minutes
+  maximum**. The floor outlives the connector's report cadence (about every
+  25-30 seconds) with room for a missed report, so very short TTLs do not
+  flap routes; the cap bounds how long a silent connector's answer lives.
 - Each report replaces the previous answer set: changed answers withdraw the
   old addresses at once, an empty answer (NXDOMAIN or no records) withdraws
   everything, and leases that expire without a fresh report stop being
-  distributed. A resolver failure (timeout, SERVFAIL) keeps current leases
-  until they expire.
+  distributed: the coordinator bumps the control revision when a lease
+  expires, so clients and the connector drop the route within a second or
+  two. A resolver failure (timeout, SERVFAIL) keeps current leases until they
+  expire.
 - Clients receive the selected connector's leases through that connector's
   WireGuard peer, exactly like a CIDR resource: only devices matching the
   access selection whose policy lets them reach the connector. The connector
@@ -97,5 +100,36 @@ The next clean report resumes routing.
   the name in organisation DNS if clients cannot resolve it themselves.
 - **Static routes.** A host route inside a subnet already routed by another
   resource or approved route is more specific and wins for that address.
-- Linux only. A full end-to-end test through a real connector (allowed port
-  works, adjacent port fails, connector outage and restart) has not been run.
+- Linux only. A changed DNS answer takes effect at the connector's next
+  report (up to ~30 seconds); a silent or crashed connector's routes are
+  withdrawn when its leases expire (90 seconds to 5 minutes, by TTL).
+
+## Live lab (3 October 2026)
+
+`deploy/homelab/prove-app-connector.sh` (Docker, default context `m3-max`;
+`LABS_IMAGE=<tag>` reuses an image built from `deploy/homelab/labs.Dockerfile`)
+runs a coordinator, a Linux connector on a WAN and a site network, a Linux
+client on the WAN only, a lab authoritative DNS server (TTL 5) and three site
+hosts serving HTTP on TCP 8080 and 8081. The DNS resource
+`app.connector-lab.example` allows tag `office` on TCP 8080; a CIDR resource
+`10.77.2.0/24` (nobody) stands for a protected network. Result of the passing
+run (about 6 minutes, kernel WireGuard, SQLite coordinator):
+
+| Step | Result |
+| --- | --- |
+| Answer `10.77.1.10` | Client reached `10.77.1.10:8080` 25 s after the resource was created; `:8081` and the unresolved `10.77.1.20:8080` refused; `BLAKTAIL-FWD` held one accept, client overlay address to `10.77.1.10/32` TCP 8080; detail `distributing`, ports `enforced` |
+| Answer changed to `10.77.1.20` | New address reachable after 23 s; old host route gone from the client in the same second; old address and `:8081` refused |
+| Answer moved to `10.77.2.10` (inside the protected CIDR) | Resource `dns_blocked` after 25 s with reason "possible DNS rebinding: … resolved to 10.77.2.10 (inside a network resource or approved device route)"; every route withdrawn, protected host unreachable |
+| Answer back to `10.77.1.10` | Reachable again after 24 s |
+| Connector container restarted, agent down | Client route withdrawn after 86 s (lease floor), detail `dns_not_resolved` with no answers |
+| `blaktaild run` started again | `10.77.1.10:8080` reachable within 1 s of the agent starting; `:8081` still refused |
+
+The lab found and fixed three defects: control-update long-polls did not
+refresh `last_seen_at`, so idle connected routing peers showed offline after
+90 seconds (and resources `stale`); expired leases were not pushed to agents
+until an unrelated change; and the 30-second lease floor was shorter than the
+real report cadence (~50 s), so routes were re-added on every report.
+
+Not covered: IPv6 answers, failover between two connectors, CNAME chains
+through a real recursive resolver, clients other than Linux, and two
+organisations on live connectors (covered by coordinator tests only).

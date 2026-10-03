@@ -53,6 +53,15 @@ approved routes, join-key limits and policy back through the console API. That
 is a disposable in-memory proof; it is not a substitute for rehearsing the
 upgrade on a restored copy of your own database.
 
+Live proof (3 October 2026, `deploy/homelab/prove-upgrade.sh`): a database
+written by the round-1 release (`main` at `cab5fe4`, schema 28) on SQLite and
+on PostgreSQL 16 was migrated in place to schema 40 and served by the new
+coordinator. Round-1 Linux agents (`blaktaild` built from `cab5fe4`) kept
+reaching each other through the new coordinator without re-enrolling, and
+again after their binary was replaced by this release's agent (`blaktaild run`,
+persisted enrolment). That is one observed N−1 pairing on Linux, not a
+declared compatibility window; see [upgrades.md](upgrades.md#live-upgrade-drill-3-october-2026).
+
 ## Rollback limits
 
 | Component | Roll back by | Limit |

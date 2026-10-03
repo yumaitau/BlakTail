@@ -766,11 +766,25 @@ mod tests {
         .await
     }
 
+    // Checks field names, not the whole text: bodies carry random base64
+    // public keys that can spell "psk" by chance.
     fn assert_no_key_material(body: &str) {
-        let lower = body.to_ascii_lowercase();
-        for needle in ["psk", "preshared", "secret", "private", "shared_key"] {
-            assert!(!lower.contains(needle), "{needle} leaked in {body}");
+        fn walk(value: &serde_json::Value, body: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, value) in map {
+                        let lower = key.to_ascii_lowercase();
+                        for needle in ["psk", "preshared", "secret", "private", "shared_key"] {
+                            assert!(!lower.contains(needle), "{needle} leaked in {body}");
+                        }
+                        walk(value, body);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, body)),
+                _ => {}
+            }
         }
+        walk(&serde_json::from_str(body).unwrap(), body);
     }
 
     #[test]

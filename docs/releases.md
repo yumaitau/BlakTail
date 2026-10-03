@@ -126,6 +126,46 @@ RPM-family Linux, Apple silicon macOS, and Intel macOS hosts. Confirm the displa
 version, one-time enrollment, service startup, restart persistence, and the
 [two-node drill](two-node-drill.md). Publishing files alone is not this proof.
 
+### Clean-host drill in a lab (3 October 2026)
+
+`deploy/homelab/prove-clean-install.sh` (Docker context `m3-max`, about four
+minutes) rehearses the Debian/Ubuntu half of that list without a published
+release. It builds the packages with `deploy/docker/agent-package.Dockerfile`
+(the release build), serves them and `SHA256SUMS` from a lab HTTPS server, and
+runs the unmodified `scripts/install-agent.sh` with `BLAKTAIL_RELEASE_BASE_URL`
+pointed at it on fresh `debian:bookworm` and `ubuntu:24.04` systemd containers
+(only systemd, curl and CA certificates preinstalled). Result of the last run,
+arm64, 245 s:
+
+- refusals: a tampered `.deb` (`SHA-256 mismatch`), `BLAKTAIL_REQUIRE_SIGNATURE=1`
+  without cosign, and, with cosign v2.4.1 installed, a `SHA256SUMS.sigstore.json`
+  that is not a valid bundle (`Sigstore signature on SHA256SUMS did not verify`).
+  Nothing was installed after any refusal.
+- install through the checksum path in 6 s (Debian) and 13 s (Ubuntu), with
+  `wireguard-tools`, `iptables` and `iproute2` pulled in as dependencies.
+- enrolment with a one-use join key on stdin (Debian) and in
+  `BLAKTAIL_JOIN_KEY` (Ubuntu); about 1,200 reads of every `/proc/*/cmdline`
+  taken every 50 ms during each enrolment never contained the key.
+- `systemctl enable --now blaktaild`: ping both ways over the overlay; after
+  `systemctl restart` on both, ping again with the same addresses.
+- owner revocation of Ubuntu: Debian dropped the peer within 1 s and neither
+  side could reach the other; Ubuntu's restarted service logs `authentication failed`.
+- uninstall (below) on both: no binary, unit, state directory, `blaktail0`,
+  iptables chain or policy rule left; both nodes show as revoked.
+
+The drill found and fixed two bugs: the installer used bare `dpkg -i`, which
+leaves the package unconfigured on a host without `wireguard-tools` and
+`iptables` (it now uses `apt-get install`, or `dnf install` for RPMs), and
+`blaktaild down` on an already revoked node stopped at the coordinator's 401
+and left the tunnel and firewall chain behind (it now tears down locally and
+says the coordinator no longer accepts the credential).
+
+Not covered by the lab: a Sigstore bundle that **verifies** (only a tagged
+GitHub release can produce one), RPM hosts, macOS packages, a real VM reboot,
+and x86_64. The containers' WireGuard port is pinned to the advertised one
+with `wg set` because the agent listens on a random port and there is no relay
+in the lab.
+
 ## Install a published release
 
 Download and inspect the installer from the same tag, then run it as root:
@@ -139,3 +179,20 @@ sudo BLAKTAIL_VERSION="$VERSION" sh install-agent.sh
 
 Omitting `BLAKTAIL_VERSION` selects the latest release. Pinning is recommended for
 controlled rollout and rollback.
+
+On Debian and Ubuntu the installer runs `apt-get update` and installs the
+package with `apt-get install`, so its dependencies are fetched from the
+distribution's archive.
+
+### Uninstall
+
+```sh
+sudo systemctl disable --now blaktaild
+sudo blaktaild down        # revokes the node; on an already revoked node it only cleans up locally
+sudo apt-get purge blaktaild    # or: sudo dnf remove blaktaild
+sudo rm -rf /etc/blaktail /var/lib/blaktail
+```
+
+`down` restores DNS settings, removes forwarding and filter rules and deletes
+the WireGuard interface. Remove any `Include /var/lib/blaktail/sshd_policy.conf`
+line you added to `sshd_config` and reload sshd.

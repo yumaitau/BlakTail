@@ -3114,7 +3114,8 @@ async fn approve_node_routes(
         &serde_json::json!({"approved_routes": approved}),
     )
     .await?;
-    // Long-polling peers and routers only recompile on a revision change.
+    // Clients and the router's forward filter learn approvals and
+    // withdrawals only through a control-revision change.
     bump_control_revision(&mut tx, org_id.to_string()).await?;
     tx.commit().await?;
     info!(%node_id, %org_id, routes = approved.len(), "node routes approved");
@@ -3690,6 +3691,14 @@ async fn list_updates(
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
+    // A long-poll is control-plane contact. Idle agents whose revision never
+    // changes get 204s here and no snapshot, so without this they would look
+    // offline after the online window and lose routing-peer selection.
+    sqlx::query("UPDATE nodes SET last_seen_at=$1 WHERE id=$2")
+        .bind(now())
+        .bind(node_id.to_string())
+        .execute(&s.store.pool)
+        .await?;
     // Record reported capabilities before waiting: a change bumps the
     // revision so this same request returns the recompiled snapshot.
     posture::record_report(
@@ -3709,12 +3718,29 @@ async fn list_updates(
         selection.mac_addresses.as_deref(),
     )
     .await?;
+    // Likewise a changed exit-node choice (an agent resumed with a new
+    // `--exit-node`): otherwise an idle organisation answers 204 forever and
+    // the client never receives, nor the exit node allows, its default route.
+    {
+        let requested_exit = selection
+            .exit_node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let mut tx = s.store.pool.begin().await?;
+        if forwarding::record_exit_selection(&mut tx, node_id, requested_exit).await? {
+            bump_control_revision(&mut tx, &org).await?;
+        }
+        tx.commit().await?;
+    }
     let wait = selection.wait.min(MAX_CONTROL_UPDATE_WAIT_SECS);
     let started = Instant::now();
     loop {
         posture::due(&s.store.pool, &org).await?;
         // A renumber window ending bumps the revision, so waiters wake.
         renumber::complete_due(&s.store.pool, &org).await?;
+        app_connectors::expire_leases(&s.store.pool, &org).await?;
+        resources::bump_on_router_liveness_change(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
@@ -8383,6 +8409,76 @@ mod tests {
             .unwrap();
         assert_ne!(second_peer["ingress"]["all"], true);
         assert_eq!(second_peer["ingress"]["tcp"], serde_json::json!(["8080"]));
+    }
+
+    #[tokio::test]
+    async fn route_approval_and_withdrawal_reach_long_polling_clients() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&router, "route-update-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let subnet = register_test_node(
+            &router,
+            org.id,
+            &owner,
+            "router",
+            "router-key",
+            &["10.9.0.0/24"],
+        )
+        .await;
+        let client = register_test_node(&router, org.id, &owner, "client", "client-key", &[]).await;
+        async fn poll(router: &Router, client: &RegisterResponse, since: i64) -> Response {
+            call(
+                router,
+                Method::GET,
+                &format!("/v1/nodes/{}/updates?since={since}&wait=0", client.id),
+                serde_json::Value::Null,
+                Some(&client.node_token),
+            )
+            .await
+        }
+        let first: serde_json::Value = body(poll(&router, &client, 0).await).await;
+        let mut revision = first["revision"].as_i64().unwrap();
+        assert_eq!(
+            poll(&router, &client, revision).await.status(),
+            StatusCode::NO_CONTENT
+        );
+
+        // Console approval, then withdrawal through the automation API: each
+        // must change the revision a long-polling client waits on.
+        let console_path = format!("/v1/orgs/{}/nodes/{}/routes", org.id, subnet.id);
+        let api_path = format!("/api/v1/devices/{}/routes", subnet.id);
+        for (path, routes, expect_route) in [
+            (&console_path, vec!["10.9.0.0/24"], true),
+            (&api_path, vec![], false),
+        ] {
+            let request = Request::builder()
+                .method(Method::PUT)
+                .uri(path.as_str())
+                .header("content-type", "application/json")
+                .header(
+                    AUTHORIZATION,
+                    format!("Bearer {}", sign_test_assertion(&owner)),
+                )
+                .header("x-blaktail-organisation", org.id.to_string())
+                .body(Body::from(
+                    serde_json::json!({"approved_routes": routes}).to_string(),
+                ))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
+            let update = poll(&router, &client, revision).await;
+            assert_eq!(update.status(), StatusCode::OK, "{path} did not notify");
+            let update: serde_json::Value = body(update).await;
+            assert!(update["revision"].as_i64().unwrap() > revision);
+            revision = update["revision"].as_i64().unwrap();
+            let routed = update["peers"][0]["allowed_ips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ip| ip == "10.9.0.0/24");
+            assert_eq!(routed, expect_route, "{path}");
+        }
     }
 
     #[tokio::test]

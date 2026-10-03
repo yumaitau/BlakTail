@@ -30,10 +30,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use uuid::Uuid;
 
 pub(crate) const CAP_APP_CONNECTOR: &str = "app-connector";
-/// Lease lifetime is the reported TTL clamped to this window. The floor stops
-/// a zero or tiny TTL flapping routes between connector polls; the cap bounds
-/// how long a stale answer can outlive a silent connector.
-pub(crate) const MIN_LEASE_SECS: i64 = 30;
+/// Lease lifetime is the reported TTL clamped to this window. The floor
+/// outlives the connector's report cadence (the 30 s interval is checked on
+/// the agent's 25 s control-update loop, so reports arrive up to ~55 s apart)
+/// so short TTLs do not flap routes between reports; the cap bounds how long a
+/// stale answer can outlive a silent connector.
+pub(crate) const MIN_LEASE_SECS: i64 = 90;
 pub(crate) const MAX_LEASE_SECS: i64 = 300;
 const MAX_ANSWERS: usize = 32;
 const RESOLVE_INTERVAL_SECS: i64 = 30;
@@ -604,6 +606,26 @@ async fn report_resolution(
     }))
 }
 
+/// Drop leases whose TTL ran out without a fresh report and bump the control
+/// revision so clients and the connector withdraw them. Long-polls call this;
+/// without it an expired lease stays installed until an unrelated change.
+pub(crate) async fn expire_leases(pool: &sqlx::AnyPool, org_id: &str) -> Result<bool, ApiError> {
+    let expired = sqlx::query("DELETE FROM connector_leases WHERE org_id=$1 AND expires_at<=$2")
+        .bind(org_id)
+        .bind(now())
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if expired == 0 {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE orgs SET control_revision=control_revision+1 WHERE id=$1")
+        .bind(org_id)
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
 // ---------- read side for resources.rs ----------
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1069,6 +1091,55 @@ pub(crate) mod integration {
     }
 
     #[tokio::test]
+    async fn idle_long_polls_keep_a_connector_online() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store.clone(), "ap-southeast-2".into(), SECRET);
+        let org = create_org(&router, "idle-org").await;
+        let owner = Who::person(org.id, "owner-1", "owner");
+        let connector = register(&router, &owner, "connector", &[CAP_APP_CONNECTOR]).await;
+        let resource =
+            create_dns_resource(&router, &owner, "idle.example.org.au", &connector).await;
+        let poll = |since: i64| {
+            let uri = format!("/v1/nodes/{}/updates?since={since}&wait=0", connector.id);
+            let token = connector.node_token.clone();
+            let router = router.clone();
+            async move {
+                call(
+                    &router,
+                    Method::GET,
+                    &uri,
+                    serde_json::Value::Null,
+                    Some(token),
+                    &[],
+                )
+                .await
+            }
+        };
+        let snapshot: serde_json::Value = json(poll(0).await).await;
+        let revision = snapshot["revision"].as_i64().expect("revision");
+        sqlx::query("UPDATE nodes SET last_seen_at=$1 WHERE id=$2")
+            .bind(now() - 600)
+            .bind(connector.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let online = |view: ResourceDetail| {
+            serde_json::to_value(view).unwrap()["status"]["routing_peers"][0]["online"].clone()
+        };
+        assert_eq!(
+            online(detail(&router, &owner, resource.resource.id).await),
+            false
+        );
+        // Nothing changed, so the poll returns 204 with no snapshot, yet it
+        // is control-plane contact and the connector is online again.
+        assert_eq!(poll(revision).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            online(detail(&router, &owner, resource.resource.id).await),
+            true
+        );
+    }
+
+    #[tokio::test]
     async fn connector_leases_reach_authorised_clients_and_expire() {
         let store = Store::memory().await.unwrap();
         let router = app(store.clone(), "ap-southeast-2".into(), SECRET);
@@ -1129,7 +1200,7 @@ pub(crate) mod integration {
                 )
             })
             .collect();
-        assert_eq!(lifetimes["10.20.0.5/32"], (60, 60));
+        assert_eq!(lifetimes["10.20.0.5/32"], (60, MIN_LEASE_SECS));
         assert_eq!(lifetimes["fd12::5/128"], (5, MIN_LEASE_SECS));
 
         // A changed answer withdraws the old addresses atomically.
@@ -1150,12 +1221,25 @@ pub(crate) mod integration {
         let lease = &view.connector.unwrap().answers[0];
         assert_eq!(lease.expires_at - lease.resolved_at, MAX_LEASE_SECS);
 
-        // TTL expiry withdraws the host route without any new report.
+        // TTL expiry withdraws the host route without any new report, and
+        // bumps the control revision once so agents drop it promptly.
         sqlx::query("UPDATE connector_leases SET expires_at=$1")
             .bind(now() - 1)
             .execute(&store.pool)
             .await
             .unwrap();
+        let revision = || async {
+            sqlx::query_scalar::<_, i64>("SELECT control_revision FROM orgs WHERE id=$1")
+                .bind(org.id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap()
+        };
+        let before = revision().await;
+        let org_id = org.id.to_string();
+        assert!(expire_leases(&store.pool, &org_id).await.unwrap());
+        assert!(!expire_leases(&store.pool, &org_id).await.unwrap());
+        assert_eq!(revision().await, before + 1);
         assert!(!routes_via(&router, &laptop, &connector)
             .await
             .contains(&"10.20.0.6/32".to_owned()));

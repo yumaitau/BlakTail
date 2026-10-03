@@ -18,8 +18,17 @@ sudo blaktaild up --coord https://coord.example.org \
 sudo blaktaild status
 sudo blaktaild status --json   # one JSON object for local tools; no credentials
 sudo blaktaild pause  # reversible; keeps enrolment
-sudo blaktaild down
+sudo blaktaild down   # revokes; a node already revoked from the console is cleaned up locally
 ```
+
+Uninstalling a package is covered in [releases.md](releases.md#uninstall).
+
+On hosts with neither `systemd-resolved` nor `resolvconf`, MagicDNS falls back
+to rewriting `/etc/resolv.conf`. The hardened unit (`ProtectSystem=strict`)
+cannot write `/etc`, so under systemd that fallback logs `Read-only file
+system` and MagicDNS names resolve only by querying the overlay resolver
+directly; install `systemd-resolved` or `resolvconf` for system-wide MagicDNS.
+A failed rewrite leaves `/etc/resolv.conf` and the agent's backup untouched.
 
 On a fresh node, `up` prints a ten-minute console URL and waits. Open that URL on
 any browser, sign in, confirm the displayed name and WireGuard-key fingerprint,
@@ -210,7 +219,17 @@ warning and keeps TCP 22 closed to those sources. Logins that are not plain
 names become `DenyUsers *` for that source.
 
 The agent never edits `sshd_config`. To revert, remove the `Include` line,
-unset the variable, and reload sshd. The hardened systemd unit only allows
+unset the variable, and reload sshd.
+
+Proven on real OpenSSH (Debian bookworm, OpenSSH 9.2) by
+`deploy/homelab/prove-sshd-limits.sh` on 3 October 2026: with an SSH rule
+allowing `office` to log in to `store` as `deploy`, office logged in as
+`deploy` with key auth; office as `intruder` (whose `authorized_keys` holds
+the same key) was refused by sshd (`not listed in AllowUsers`); a third
+device allowed only TCP 8080 to the store reached 8080 but TCP 22 was reset by
+`BLAKTAIL-ACL`. After the agent was killed and restarted with `blaktaild run`
+the same three outcomes held. The drop-in was verified about 2 s after the
+first peer map. sshd was reloaded through `/run/sshd.pid`, not systemd. The hardened systemd unit only allows
 writes under `/var/lib/blaktail`, which is why the drop-in lives there.
 The SSH port is fixed at 22.
 

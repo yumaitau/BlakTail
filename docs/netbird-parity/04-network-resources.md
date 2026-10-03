@@ -35,3 +35,41 @@ Create overlapping and non-overlapping dual-stack resources with two routers; on
 - **Done:** IPv6 resources now have routing peers: Linux agents advertise IPv6 subnets (see draft 05 status), so an IPv6 CIDR resource is distributed and forward-filtered like an IPv4 one. `docs/network-resources.md` updated.
 - **Proven by tests:** `ipv6_subnet_routes_are_approved_distributed_and_forward_filtered` (coordinator) and the IPv6 subnet step of `deploy/homelab/prove-ipv6-renumber.sh` (device-approved route, one Docker host, 3 October 2026).
 - **Still needs live/field proof or a decision:** the live lab used a device approval, not a named IPv6 resource; a two-router dual-stack resource lab is still outstanding.
+
+### Live lab: two-site routing (3 October 2026)
+
+`deploy/homelab/prove-routing.sh` on Docker context `m3-max` (about 5 minutes;
+everything `labs-routing-*`, removed on exit; results table in
+`docs/network-resources.md#live-lab-3-october-2026`). Two sites (site A: `ra1`
+metric 10 on iptables-nft, `ra2` metric 20 on iptables-legacy; site B: `rb` on
+iptables-legacy), an exit node on iptables-nft, an authorised client and a
+guest, all on internal Docker networks.
+
+- **Passed:** allowed port behind each router reachable 1 s after resource
+  creation; adjacent ports refused with the `BLAKTAIL-FWD` default reject
+  counting them on nft and legacy (3 → 4 packets each); a guest that forced
+  the site prefix into WireGuard was refused by `BLAKTAIL-FWD` (4 → 5);
+  router-to-router traffic both ways. Six resource edits rebuilt and renamed
+  `BLAKTAIL-FWD-NEW` over the live, jumped-to chain on all four routers while
+  the client connected 150 times: 0 failures, one jump and no staging chain
+  left on both backends.
+- **Exit node:** only the selecting client reached the Internet host; the
+  guest's forced exit traffic was rejected (0 → 2); captures showed 0 packets
+  on the exit's Internet uplink from non-exit attempts and 0 non-WireGuard
+  packets on the exit client's uplink while it used DNS and HTTP through the
+  exit (no DNS or default-route leak).
+- **Router loss:** `docker kill` of the primary; the client reached site A
+  through the standby after **82 s** (89 s in an earlier run; bound now about 92 s).
+- **Bugs found and fixed:** (1) `/updates` ignored a changed `exit_node` when
+  the revision was unchanged, so an agent resumed with `--exit-node` never got
+  its default route; the long-poll now records the selection and bumps the
+  revision (`exit_selection_on_a_long_poll_returns_a_fresh_snapshot`).
+  (2) Routing-peer liveness never bumped the revision, so idle clients kept a
+  dead router's routes indefinitely; long-polls now re-check online
+  route-advertising devices every 2 s per organisation
+  (`resources::bump_on_router_liveness_change`,
+  `routing_peer_failover_reaches_idle_long_polls`). The long-poll
+  `last_seen_at` refresh from the app-connector lab is also required.
+- **Still unproven:** IPv6 routing, host-to-host site-to-site without NAT
+  (unsupported), physical routers and real WAN links, other Linux
+  distributions' iptables builds.
