@@ -306,6 +306,14 @@ fn reconcile_forwarding(
     Ok(true)
 }
 
+/// Delay before the next report. The pass runs once per control-update loop
+/// (up to 25 s apart), so a deadline of exactly the interval would usually
+/// be missed by one loop and stretch a 30 s interval to ~50 s; aim a little
+/// early instead.
+fn report_delay(interval_seconds: u64) -> Duration {
+    Duration::from_secs(interval_seconds.clamp(10, 300).saturating_sub(5))
+}
+
 /// One connector pass. Returns true when `state` changed and must be saved.
 pub async fn manage(
     coordinator: &Coordinator,
@@ -335,8 +343,7 @@ pub async fn manage(
             return false;
         }
     };
-    runtime.next_due =
-        Some(Instant::now() + Duration::from_secs(assignments.interval_seconds.clamp(10, 300)));
+    runtime.next_due = Some(Instant::now() + report_delay(assignments.interval_seconds));
     let mut desired = BTreeSet::new();
     for assignment in &assignments.resources {
         let (answers, error) = match resolve(&assignment.fqdn).await {
@@ -441,6 +448,13 @@ mod tests {
             parse_answers(&response(1, 0, TYPE_A, &[(TYPE_A, &[1, 2], 5)]), 1, TYPE_A).is_err()
         );
         assert!(parse_answers(&[0u8; 5], 1, TYPE_A).is_err());
+    }
+
+    #[test]
+    fn report_delay_fits_the_control_update_loop() {
+        assert_eq!(report_delay(30), Duration::from_secs(25));
+        assert_eq!(report_delay(0), Duration::from_secs(5));
+        assert_eq!(report_delay(10_000), Duration::from_secs(295));
     }
 
     #[test]

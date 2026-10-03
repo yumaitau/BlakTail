@@ -3667,6 +3667,14 @@ async fn list_updates(
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
     }
+    // A long-poll is control-plane contact. Idle agents whose revision never
+    // changes get 204s here and no snapshot, so without this they would look
+    // offline after the online window and lose routing-peer selection.
+    sqlx::query("UPDATE nodes SET last_seen_at=$1 WHERE id=$2")
+        .bind(now())
+        .bind(node_id.to_string())
+        .execute(&s.store.pool)
+        .await?;
     // Record reported capabilities before waiting: a change bumps the
     // revision so this same request returns the recompiled snapshot.
     posture::record_report(
@@ -3690,6 +3698,7 @@ async fn list_updates(
     let started = Instant::now();
     loop {
         posture::due(&s.store.pool, &org).await?;
+        app_connectors::expire_leases(&s.store.pool, &org).await?;
         let expired = wg_only::expire_overlaps(&s.store.pool, &org).await?;
         let revision: i64 = sqlx::query_scalar("SELECT control_revision FROM orgs WHERE id=$1")
             .bind(&org)
