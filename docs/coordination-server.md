@@ -81,6 +81,22 @@ integration test starts two independent pools, races concurrent migrations and a
 single-use registration, proves cross-replica reads, closes one replica, and
 rechecks the survivor.
 
+`deploy/homelab/prove-pg-races.sh` (3 October 2026) runs two coordinator
+replicas over HTTP on one PostgreSQL 16 database and releases 8 writers at once
+per round (a threading barrier, alternating replicas), 50 rounds per race:
+
+| Race | Result | Lost updates |
+| --- | --- | --- |
+| `PUT /v1/orgs/{org}/acl` with the same `If-Match` etag | exactly one 204 per round (50), 350 × 412 | 0 |
+| The same change draft version published 8 times | exactly one 200 per round (50), 350 × 409 | 0 |
+| 8 different drafts on the same policy base published at once | exactly one 200 per round (50), 350 × 409 "rebase required"; losers stay open | 0 |
+
+After every round the stored policy was the winner's document and its revision
+rose by exactly one; 150 `acl.updated` audit rows for 150 winning writes. Each
+race took 1 to 12 seconds. Writers serialise on the organisation row lock taken
+by the control-revision bump at the start of each write transaction, and the
+policy write is a compare-and-swap on the revision.
+
 ## HTTP API
 
 - `POST /v1/orgs` — on-host bootstrap service assertion with action

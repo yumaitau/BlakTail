@@ -59,6 +59,49 @@ Database downgrade is unsupported: restore the pre-upgrade snapshot with the old
 binary. Agent rollback is supported only when that release's notes confirm its state
 format is compatible.
 
+## Live upgrade drill (3 October 2026)
+
+`deploy/homelab/prove-upgrade.sh` rehearses steps 3 to 5 on one Docker host
+(`docker --context m3-max`, OrbStack, Linux). For SQLite and then PostgreSQL 16
+it starts the round-1 coordinator (`main` at `cab5fe4`, schema 28) with two
+round-1 Linux agents on kernel WireGuard, seeds a policy (2 groups, tag owners,
+a named host, 6 rules, 1 SSH rule), a friendly name, an approved subnet route
+(`10.77.0.0/24`), one-use, reusable and revoked join keys, an API client and an
+open change draft, and snapshots everything through the console API. It then
+stops the old coordinator, runs this tree's `blaktail-coord migrate` and
+`serve` on the same database, and compares.
+
+```sh
+BACKENDS="sqlite postgres" deploy/homelab/prove-upgrade.sh
+```
+
+| Check | SQLite | PostgreSQL 16 |
+| --- | --- | --- |
+| Schema before → after | 28 → 40 | 28 → 40 |
+| Coordinator stop → `/readyz` (migrate included) | 2 s | 2 s |
+| Pre-upgrade API fields unchanged (2 devices with detail, policy and revision, DNS, 4 join keys, 1 API client, 1 draft) | yes | yes |
+| Round-1 agents reach each other after the upgrade (ping, TCP 8080) | 2 s | 2 s |
+| Approved route still distributed | yes | yes |
+| Agents replaced by this release's binary, `blaktaild run` | ping/TCP after 2–7 s, reverse ping | same |
+| State after agent upgrade | unchanged except newly reported capabilities (`pq-psk`) | same |
+
+Whole run for both backends: about 3 minutes 15 seconds including image builds
+from cache. Only liveness fields (last seen, heartbeat age, server time,
+credential renewal) were excluded from the comparison; the full list is printed
+by the script.
+
+The drill found one round-1 bug, fixed in this release: approving or
+withdrawing a device's subnet route (console and `/api/v1/devices/{id}/routes`)
+did not bump the organisation's control revision, so long-polling clients and
+the router's forward filter did not learn the change until an unrelated policy
+or device change. After the fix the lab sees a withdrawal and a re-approval
+reach the client within one poll (under a second). Round-1 coordinators still
+have the bug; until upgraded, republish the policy after a route approval.
+
+Not covered: console (Drizzle) migrations and Better Auth sign-in, relays,
+macOS and mobile agents, failed-migration rollback, and restore into a new
+environment.
+
 ## Backup and restore
 
 This runbook covers what an operator must back up and how to prove a restore.

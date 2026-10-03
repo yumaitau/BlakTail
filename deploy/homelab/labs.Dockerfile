@@ -6,8 +6,12 @@ FROM rust:1.98-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=labs-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=labs-target,target=/src/target \
-    cargo build --release -p blaktail-coord -p blaktaild \
+    --mount=type=cache,id=labs-target,target=/src/target,sharing=locked \
+    # The target cache is shared by labs built from different trees (locked,
+    # one build at a time) and cargo trusts mtimes, so stamp the sources
+    # newer than any cached artefact.
+    find . -name '*.rs' -not -path './target/*' -exec touch {} + \
+ && cargo build --release -p blaktail-coord -p blaktaild \
  && mkdir -p /out \
  && cp target/release/blaktail-coord target/release/blaktaild /out/
 
