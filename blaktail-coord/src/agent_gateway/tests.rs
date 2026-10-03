@@ -55,6 +55,26 @@ async fn enrol(router: &AxumRouter, org: Uuid, name: &str, capabilities: &[&str]
     }
 }
 
+async fn designate(router: &AxumRouter, org: Uuid, node: &Node, designated: bool) {
+    let (status, body) = console(
+        router,
+        Method::PUT,
+        org,
+        Role::Admin,
+        &format!("/gateways/{}", node.id),
+        json!({"designated": designated}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+}
+
+/// An enrolled gateway device an admin has designated.
+async fn gateway(router: &AxumRouter, org: Uuid, name: &str) -> Node {
+    let node = enrol(router, org, name, &[CAP_AGENT_GATEWAY]).await;
+    designate(router, org, &node, true).await;
+    node
+}
+
 async fn console(
     router: &AxumRouter,
     method: Method,
@@ -147,7 +167,7 @@ struct Lab {
 async fn lab() -> Lab {
     let (router, store) = router().await;
     let org = create_org(&router, "agents-org").await;
-    let gateway = enrol(&router, org, "gateway", &[CAP_AGENT_GATEWAY]).await;
+    let gateway = gateway(&router, org, "gateway").await;
     let provider = provider(
         &router,
         org,
@@ -222,7 +242,7 @@ async fn roles_are_enforced_server_side() {
 async fn organisations_are_isolated() {
     let lab = lab().await;
     let other = create_org(&lab.router, "other-org").await;
-    let other_gateway = enrol(&lab.router, other, "other-gw", &[CAP_AGENT_GATEWAY]).await;
+    let other_gateway = gateway(&lab.router, other, "other-gw").await;
     let provider_id = lab.provider["id"].as_str().unwrap();
     let (secret, created) = key(
         &lab.router,
@@ -305,6 +325,113 @@ async fn gateway_needs_node_token_and_capability() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reported_capability_without_designation_is_refused() {
+    let lab = lab().await;
+    let (secret, _) = key(
+        &lab.router,
+        lab.org,
+        "agent",
+        json!({"allowed_provider_ids": [lab.provider["id"]]}),
+    )
+    .await;
+    // Any device can claim the capability; without a designation it gets no
+    // grant (and so no provider credential), no model list and no usage say.
+    let rogue = enrol(&lab.router, lab.org, "rogue", &[CAP_AGENT_GATEWAY]).await;
+    for (path, body) in [
+        ("authorize", ask(&secret, "llama3.2:1b")),
+        (
+            "models",
+            json!({"api_key": secret, "client_ip": lab.gateway.ip}),
+        ),
+        (
+            "usage",
+            json!({"request_id": Uuid::new_v4(), "status": "ok", "prompt_tokens": 0}),
+        ),
+    ] {
+        let (status, reply) = call(
+            &lab.router,
+            Method::POST,
+            &format!("/v1/nodes/{}/agent-gateway/{path}", rogue.id),
+            body,
+            Auth::Node(&rogue.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {reply}");
+        assert!(!reply.to_string().contains(CREDENTIAL));
+    }
+    // The overview shows it as capable but not designated.
+    let (_, overview) = console(
+        &lab.router,
+        Method::GET,
+        lab.org,
+        Role::Auditor,
+        "",
+        Value::Null,
+    )
+    .await;
+    let listed = overview["gateways"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["id"] == rogue.id.to_string())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["capable"], true);
+    assert_eq!(listed["designated"], false);
+
+    // Only owners and admins designate; other roles and other orgs cannot.
+    for role in [Role::Member, Role::NetworkAdmin, Role::Auditor] {
+        let (status, _) = console(
+            &lab.router,
+            Method::PUT,
+            lab.org,
+            role,
+            &format!("/gateways/{}", rogue.id),
+            json!({"designated": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{role:?} designates");
+    }
+    let other = create_org(&lab.router, "other-designator").await;
+    let (status, _) = console(
+        &lab.router,
+        Method::PUT,
+        other,
+        Role::Owner,
+        &format!("/gateways/{}", rogue.id),
+        json!({"designated": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    designate(&lab.router, lab.org, &rogue, true).await;
+    let decision = authorize(&lab.router, &rogue, ask(&secret, "llama3.2:1b")).await;
+    assert_eq!(decision["allowed"], true, "{decision}");
+    assert_eq!(decision["grant"]["provider"]["credential"], CREDENTIAL);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE org_id=$1 AND action='node.role.designated' AND target_id=$2",
+    )
+    .bind(lab.org.to_string())
+    .bind(rogue.id.to_string())
+    .fetch_one(&lab.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+
+    // Releasing it cuts the device off on its next request.
+    designate(&lab.router, lab.org, &rogue, false).await;
+    let (status, _) = call(
+        &lab.router,
+        Method::POST,
+        &format!("/v1/nodes/{}/agent-gateway/authorize", rogue.id),
+        ask(&secret, "llama3.2:1b"),
+        Auth::Node(&rogue.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -419,6 +546,8 @@ async fn provider_validation() {
     let cases = [
         json!({"name": "meta", "base_url": "http://169.254.169.254/v1", "data_location": "x", "residency": "onshore", "models": ["m"]}),
         json!({"name": "meta6", "base_url": "http://[fd00:ec2::254]/v1", "data_location": "x", "residency": "onshore", "models": ["m"]}),
+        json!({"name": "mapped", "base_url": "http://[::ffff:169.254.169.254]/v1", "data_location": "x", "residency": "onshore", "models": ["m"]}),
+        json!({"name": "mappedpub", "base_url": "http://[::ffff:203.0.113.9]/v1", "data_location": "x", "residency": "onshore", "credential": "sk-1", "models": ["m"]}),
         json!({"name": "gcp", "base_url": "http://metadata.google.internal/v1", "data_location": "x", "residency": "onshore", "models": ["m"]}),
         json!({"name": "plain", "base_url": "http://api.example.com/v1", "data_location": "US", "residency": "offshore", "models": ["m"]}),
         json!({"name": "leaky", "base_url": "http://api.example.com.au/v1", "data_location": "Sydney", "residency": "onshore", "credential": "sk-1", "models": ["m"]}),
@@ -666,6 +795,93 @@ async fn concurrent_requests_never_exceed_the_request_quota() {
 }
 
 #[tokio::test]
+async fn concurrent_requests_never_exceed_the_token_quota() {
+    let lab = lab().await;
+    let (secret, _) = key(
+        &lab.router,
+        lab.org,
+        "agent",
+        json!({"allowed_provider_ids": [lab.provider["id"]], "daily_token_quota": 1000}),
+    )
+    .await;
+    // Each request reserves 25 (100 bytes / 4) + 200 output tokens = 225;
+    // however many race, four fit in 1000 and a fifth gets only the 75 left.
+    let ask_with_limit =
+        json!({"api_key": secret, "model": "llama3.2:1b", "request_bytes": 100, "max_tokens": 200});
+    let mut tasks = Vec::new();
+    for _ in 0..20 {
+        let router = lab.router.clone();
+        let body = ask_with_limit.clone();
+        let (id, token) = (lab.gateway.id, lab.gateway.token.clone());
+        tasks.push(tokio::spawn(async move {
+            let (status, body) = call(
+                &router,
+                Method::POST,
+                &format!("/v1/nodes/{id}/agent-gateway/authorize"),
+                body,
+                Auth::Node(&token),
+            )
+            .await;
+            (status == StatusCode::OK && body["allowed"] == true).then(|| body["grant"].clone())
+        }));
+    }
+    let mut grants = Vec::new();
+    for task in tasks {
+        grants.extend(task.await.unwrap());
+    }
+    let mut limits: Vec<i64> = grants
+        .iter()
+        .map(|grant| grant["max_tokens"].as_i64().unwrap())
+        .collect();
+    limits.sort_unstable();
+    assert_eq!(limits, [75, 200, 200, 200, 200]);
+    let (_, overview) = console(
+        &lab.router,
+        Method::GET,
+        lab.org,
+        Role::Auditor,
+        "",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(overview["keys"][0]["today"]["tokens"], 1000);
+    // Settling a 225-token reservation at 50 real tokens releases 175.
+    let full = grants
+        .iter()
+        .find(|grant| grant["max_tokens"] == 200)
+        .unwrap();
+    let status = record(
+        &lab.router,
+        &lab.gateway,
+        json!({"request_id": full["request_id"], "status": "ok", "prompt_tokens": 30, "completion_tokens": 20}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, overview) = console(
+        &lab.router,
+        Method::GET,
+        lab.org,
+        Role::Auditor,
+        "",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(overview["keys"][0]["today"]["tokens"], 825);
+    // 175 left: the next grant's output allowance is clamped to what remains
+    // after its prompt estimate, whatever the client asked for.
+    let decision = authorize(
+        &lab.router,
+        &lab.gateway,
+        json!({"api_key": secret, "model": "llama3.2:1b", "request_bytes": 100, "max_tokens": 100_000}),
+    )
+    .await;
+    assert_eq!(decision["allowed"], true, "{decision}");
+    assert_eq!(decision["grant"]["max_tokens"], 150);
+    let decision = authorize(&lab.router, &lab.gateway, ask(&secret, "llama3.2:1b")).await;
+    assert_eq!(decision["denial"]["code"], "quota_exceeded");
+}
+
+#[tokio::test]
 async fn node_binding_uses_the_callers_overlay_address() {
     let lab = lab().await;
     let laptop = enrol(&lab.router, lab.org, "laptop", &[]).await;
@@ -794,7 +1010,7 @@ async fn full_logging_needs_owner_icip_acknowledgement_and_short_retention() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    let second_gateway = enrol(&lab.router, lab.org, "gateway-2", &[CAP_AGENT_GATEWAY]).await;
+    let second_gateway = gateway(&lab.router, lab.org, "gateway-2").await;
     let status = record(
         &lab.router,
         &second_gateway,

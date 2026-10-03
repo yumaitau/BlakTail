@@ -9,11 +9,12 @@ import {
   readContentAction,
   revokeKeyAction,
   rotateProviderCredentialAction,
+  setGatewayDesignationAction,
   setOffshoreAction,
   setProviderEnabledAction,
   updateKeyAction,
 } from "@/app/agents/actions";
-import type { AgentKey, AgentPolicy, AgentProvider } from "@/lib/coord-agents";
+import type { AgentGateway, AgentKey, AgentPolicy, AgentProvider } from "@/lib/coord-agents";
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -105,6 +106,91 @@ export function OffshorePolicy({
       </div>
       {reason ? <p className="muted">{reason}</p> : null}
       <ErrorLine error={error} />
+    </div>
+  );
+}
+
+export function GatewayDesignations({
+  gateways,
+  organisationName,
+  roleLabel,
+  readOnlyReason,
+}: {
+  gateways: AgentGateway[];
+  organisationName: string;
+  roleLabel: string;
+  readOnlyReason: string | null;
+}) {
+  const { pending, error, run } = useRunner();
+  const disabled = pending || readOnlyReason !== null;
+  if (gateways.length === 0) {
+    return (
+      <p className="muted">
+        No device reports the agent gateway capability. Run <code>blaktaild up --agent-gateway</code> on a node,
+        start <code>blaktail-agentgw</code> there, then designate it here.
+      </p>
+    );
+  }
+  return (
+    <div className="stack">
+      <p className="muted">
+        A device only acts as a gateway once designated: it receives provider credentials and vouches for the
+        calling device&apos;s address. Changing this for {organisationName} as {roleLabel} is audited.
+      </p>
+      <ErrorLine error={error} />
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Device</th>
+              <th scope="col">Last seen</th>
+              <th scope="col">Status</th>
+              <th scope="col">
+                <span className="visually-hidden">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {gateways.map((gateway) => (
+              <tr key={gateway.id}>
+                <td>{gateway.name}</td>
+                <td>{when(gateway.last_seen_at)}</td>
+                <td>
+                  {gateway.designated && gateway.capable ? (
+                    <span className="badge online">Designated gateway</span>
+                  ) : gateway.designated ? (
+                    <span className="badge warn">Designated — not reporting the capability</span>
+                  ) : (
+                    <span className="badge">Not designated — refused</span>
+                  )}
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className={gateway.designated ? "quiet-danger" : "secondary"}
+                    disabled={disabled}
+                    title={readOnlyReason ?? undefined}
+                    aria-label={`${gateway.designated ? "Release" : "Designate"} ${gateway.name} as an AI gateway`}
+                    onClick={() => {
+                      if (
+                        gateway.designated ||
+                        window.confirm(
+                          `Designate ${gateway.name} as an AI gateway? It will receive provider credentials for every request it forwards.`,
+                        )
+                      ) {
+                        run(() => setGatewayDesignationAction(gateway.id, !gateway.designated));
+                      }
+                    }}
+                  >
+                    {gateway.designated ? "Release" : "Designate"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {readOnlyReason ? <p className="muted">{readOnlyReason}</p> : null}
     </div>
   );
 }

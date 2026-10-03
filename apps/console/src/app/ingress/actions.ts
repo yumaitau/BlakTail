@@ -6,6 +6,7 @@ import {
   createRoute,
   deleteRoute,
   emergencyDisableRoute,
+  setIngressDesignation,
   setIngressEnabled,
   updateRoute,
   type AuthMode,
@@ -72,6 +73,23 @@ export async function setIngressEnabledAction(formData: FormData): Promise<Actio
     return { ok: true, data: undefined };
   } catch (error) {
     return { ok: false, error: message(error, "Could not change public ingress.") };
+  }
+}
+
+export async function setIngressDesignationAction(
+  nodeId: string,
+  designated: boolean,
+): Promise<ActionResult> {
+  try {
+    const ctx = await requireConsoleContext();
+    if (!can(ctx.role, "manage_public_ingress")) {
+      return { ok: false, error: OWNER_ONLY };
+    }
+    await setIngressDesignation(ctx, nodeId, designated);
+    revalidatePath("/ingress");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return { ok: false, error: message(error, "Could not change the ingress designation.") };
   }
 }
 

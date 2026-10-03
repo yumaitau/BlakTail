@@ -6,6 +6,7 @@ mod audit_log;
 mod automation;
 mod change_drafts;
 pub mod connectors;
+mod designations;
 mod dns_workspace;
 pub mod flows;
 mod forwarding;
@@ -407,9 +408,11 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 40,
-        name: "reserved",
-        postgres_sql: include_str!("../migrations/postgres/0040_reserved.sql"),
-        sqlite_sql: Some(include_str!("../migrations/sqlite/0040_reserved.sql")),
+        name: "node designations",
+        postgres_sql: include_str!("../migrations/postgres/0040_node_designations.sql"),
+        sqlite_sql: Some(include_str!(
+            "../migrations/sqlite/0040_node_designations.sql"
+        )),
     },
 ];
 

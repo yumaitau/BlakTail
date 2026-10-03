@@ -268,6 +268,14 @@ impl Lab {
             .await
             .unwrap();
         lab.node_token = node["node_token"].as_str().unwrap().to_owned();
+        let (status, designated) = lab
+            .owner(
+                reqwest::Method::PUT,
+                &format!("/agents/gateways/{}", node["id"].as_str().unwrap()),
+                Some(json!({"designated": true})),
+            )
+            .await;
+        assert_eq!(status, 204, "{designated}");
         let (status, provider) = lab
             .owner(
                 reqwest::Method::POST,
@@ -410,6 +418,9 @@ async fn redaction_happens_before_forwarding_and_full_logs_store_redacted_text()
     let seen = lab.mock.seen.lock().unwrap().clone();
     let forwarded = seen[0].1["messages"][0]["content"].as_str().unwrap();
     assert_eq!(forwarded, "Say hello. My Medicare number is [REDACTED].");
+    // The forwarded output limit never exceeds the coordinator's reservation.
+    let limit = seen[0].1["max_tokens"].as_i64().unwrap();
+    assert!((1..=4096).contains(&limit), "{limit}");
     let state = lab.today().await;
     let recent = &state["usage"]["recent"][0];
     assert_eq!(recent["has_content"], true);

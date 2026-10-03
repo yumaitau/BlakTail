@@ -55,11 +55,21 @@ export type AgentKey = {
   today: { requests: number; tokens: number; denied: number };
 };
 
+export type AgentGateway = {
+  id: string;
+  name: string;
+  last_seen_at: number | null;
+  /** Reports the agent-gateway capability. */
+  capable: boolean;
+  /** Designated by an owner or admin; only capable and designated devices act as gateways. */
+  designated: boolean;
+};
+
 export type AgentOverview = {
   settings: AgentSettings;
   providers: AgentProvider[];
   keys: AgentKey[];
-  gateways: { id: string; name: string; last_seen_at: number | null }[];
+  gateways: AgentGateway[];
   icip_warning: string;
   day: string;
 };
@@ -149,6 +159,20 @@ export async function setAllowOffshore(
     body: JSON.stringify({ allow_offshore: allowOffshore }),
   });
   return send<AgentSettings>(res, "");
+}
+
+export async function setGatewayDesignation(
+  ctx: ConsoleContext,
+  nodeId: string,
+  designated: boolean,
+): Promise<void> {
+  requireManage(ctx);
+  const res = await coordFetch(agentsPath(ctx, `/gateways/${encodeURIComponent(nodeId)}`), {
+    method: "PUT",
+    ctx,
+    body: JSON.stringify({ designated }),
+  });
+  await send<void>(res, "");
 }
 
 export async function createProvider(

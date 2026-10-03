@@ -24,8 +24,15 @@ Internet client --HTTPS--> blaktail-ingress (onshore host) --HTTP over WireGuard
   on every poll, so token renewals are picked up), and dials targets over the
   agent's WireGuard interface. The ingress never registers its own node and
   never holds WireGuard keys.
-- The coordinator delivers a route only to `public-ingress` devices **in the
-  same organisation**, and only when all of these hold: the organisation
+- Reporting the capability is not enough: an **owner designates** each
+  ingress device (Console → Public ingress → Ingress hosts → *Designate*,
+  audited as `node.role.designated` / `node.role.released`). Any enrolled
+  device can claim the capability; an undesignated one gets `403` from the
+  config feed and the report endpoint, so it never sees overlay targets or
+  sign-in allowlists and cannot write certificate or status reports.
+  Releasing a device bumps the control revision and cuts its feed at once.
+- The coordinator delivers a route only to designated `public-ingress`
+  devices **in the same organisation**, and only when all of these hold: the organisation
   setting is on, the route is enabled and not emergency-disabled, the target is
   an active device (not revoked, deleted, suspended or expired), a service
   target is enabled and uses HTTP, and the **published access policy lets the
@@ -46,7 +53,7 @@ Internet client --HTTPS--> blaktail-ingress (onshore host) --HTTP over WireGuard
 | Redirects | The ingress never follows redirects; `3xx` responses go back to the client. A `Location` that points at the target or another internal address/name is rewritten onto the public hostname. |
 | Header leaks | Hop-by-hop headers (and any named in `Connection`) are dropped both ways. Client-supplied `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and `X-BlakTail-*` are removed; the ingress sets `X-Forwarded-For`, `X-Forwarded-Proto: https` and `X-Forwarded-Host`. Responses lose `Server`, `X-Powered-By`, `Via` and similar banners, and any header whose value contains the target address, an overlay (100.64.0.0/10) or unique-local IPv6 address, a loopback/link-local address or a `.blaktail` name. Ingress error pages carry no details. |
 | Client networks | Optional `allowed_source_cidrs` per route (IPv4/IPv6 CIDRs, at most 64). Other clients get `403` before anything else happens. Removing the restriction is a widening change and needs the typed hostname. |
-| Rate | Token bucket per route per client IP: `rate_limit_per_minute`, burst of ten seconds' worth. Over the limit: `429` with `Retry-After: 10`. |
+| Rate | Token bucket per route per client: `rate_limit_per_minute`, burst of ten seconds' worth. IPv4 clients (including IPv4-mapped IPv6) are keyed per address, IPv6 clients per /64. A second bucket per route allows 100 times the per-client rate in total, so many distinct sources cannot multiply the limit. When 10,000 clients are tracked, refilled buckets are dropped and then the least recently seen client is forgotten (new clients are never refused wholesale). Over either limit: `429` with `Retry-After: 10`. |
 | Body size | `Content-Length` above `max_body_bytes` is refused with `413` before connecting; chunked bodies are cut off at the limit and answered `413`. |
 | Connections | `max_connections` in-flight requests and open WebSocket tunnels per route; beyond that `503`. The listener also caps total connections (`--max-connections`, default 4096), TLS handshakes (10 s) and request headers (15 s). |
 | Protocols | HTTPS with HTTP/1.1 (ALPN `http/1.1`) and WebSocket upgrades. Port 80 only answers ACME HTTP-01 challenges for the matching host and redirects live routes to HTTPS. No raw TCP/UDP. |
@@ -67,8 +74,8 @@ Internet client --HTTPS--> blaktail-ingress (onshore host) --HTTP over WireGuard
   So even if the coordinator becomes unreachable, a disable cannot be outrun
   for longer than 30 seconds. The trade-off is that a coordinator outage takes
   public routes down after 30 seconds.
-- A refused node credential (revoked, suspended, expired, or the capability no
-  longer reported) withdraws every route at once.
+- A refused node credential (revoked, suspended, expired, the capability no
+  longer reported, or the designation released) withdraws every route at once.
 
 ## Identity gate (optional)
 
@@ -133,6 +140,7 @@ own onshore records; BlakTail does not collect them.
 2. On the onshore host:
    `blaktaild up --coord https://coord.example --name edge --public-ingress`
    (the host's device must be allowed by policy to reach each target port).
+   Owner: Console → Public ingress → Ingress hosts → *Designate* that device.
 3. Run the ingress as root (it reads the agent state and binds 443/80):
    ```
    blaktail-ingress \
@@ -154,15 +162,17 @@ Console session routes (`/v1/orgs/:org_id/...`):
 
 | Method and path | Permission |
 | --- | --- |
-| `GET public-ingress` (settings, ingress hosts, routes with per-ingress state) | view network |
+| `GET public-ingress` (settings, ingress hosts with `capable` and `designated`, routes with per-ingress state) | view network |
+| `PUT public-ingress/nodes/:node_id` `{designated}` | owner (`manage_public_ingress`) |
 | `PUT public-ingress/settings` `{enabled, abuse_contact, confirm: "PUBLIC"}` | owner (`manage_public_ingress`) |
 | `POST public-ingress/routes` `{fqdn, confirm_fqdn, target_service_id \| target_node_id+target_port, tls_mode, auth_mode, allowed_email_domains, allowed_source_cidrs, rate_limit_per_minute, max_body_bytes, max_connections, log_retention_days}` | owner |
 | `PATCH public-ingress/routes/:id` `{revision, enabled?, confirm_fqdn?, ...}` (enabling, dropping sign-in or removing client-network limits needs `confirm_fqdn`; stale revision `412`) | owner |
 | `DELETE public-ingress/routes/:id` | owner |
 | `POST public-ingress/routes/:id/emergency-disable` `{reason}` | owner, admin, network admin |
 
-Node-token routes used by `blaktail-ingress`: `GET /v1/nodes/:id/public-ingress/config?since=&wait=`
-(long-poll, `204` when unchanged) and `POST /v1/nodes/:id/public-ingress/report`.
+Node-token routes used by `blaktail-ingress` (capable **and designated** devices only):
+`GET /v1/nodes/:id/public-ingress/config?since=&wait=` (long-poll, `204` when
+unchanged) and `POST /v1/nodes/:id/public-ingress/report`.
 Every mutation is in the audit log (`public_ingress.enabled|disabled|updated`,
 `public_route.created|updated|enabled|disabled|emergency_disabled|deleted`).
 Routes are not yet in the `/api/v1` automation API.

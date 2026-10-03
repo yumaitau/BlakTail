@@ -1,8 +1,11 @@
 //! Agent network (draft 24, ADR 0008): an organisation-run AI model gateway.
 //!
 //! The coordinator holds providers, agent keys and their policies. The
-//! `blaktail-agentgw` process runs on an enrolled node with the
-//! `agent-gateway` capability and asks the coordinator to authorise every
+//! `blaktail-agentgw` process runs on an enrolled node that reports the
+//! `agent-gateway` capability and that an owner or admin designated as a
+//! gateway (a reported capability alone is never enough, because the gateway
+//! receives provider credentials and vouches for the caller's address). It
+//! asks the coordinator to authorise every
 //! request: key, node binding, size, model allowlist, offshore policy and the
 //! daily quota are all decided here, so several gateways share one quota and a
 //! revoked key stops working on the next request.
@@ -14,7 +17,7 @@
 //! after at most 30 days.
 
 use crate::{
-    append_audit, bearer, console_session, hash, now,
+    append_audit, bearer, console_session, designations, hash, now,
     permissions::{require, Permission},
     private_services::{open_key, seal_key},
     ApiError, AppState, Role,
@@ -44,6 +47,9 @@ const MAX_CREDENTIAL: usize = 4096;
 const MAX_CONTENT_CHARS: usize = 256 * 1024;
 const MAX_FULL_RETENTION_DAYS: i64 = 30;
 const METADATA_RETENTION_DAYS: i64 = 90;
+/// Output tokens reserved when a request sets no `max_tokens`; the gateway
+/// forwards the granted allowance so the provider cannot exceed it.
+const DEFAULT_OUTPUT_TOKENS: i64 = 4096;
 /// A reservation the gateway never finalised is closed as abandoned.
 const PENDING_TIMEOUT_SECS: i64 = 15 * 60;
 const KEY_PREFIX: &str = "btak_";
@@ -64,6 +70,10 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/v1/orgs/:org_id/agents/keys/:key_id",
             put(update_key).delete(revoke_key),
+        )
+        .route(
+            "/v1/orgs/:org_id/agents/gateways/:node_id",
+            put(designate_gateway),
         )
         .route("/v1/orgs/:org_id/agents/usage", get(usage))
         .route(
@@ -167,9 +177,14 @@ pub(crate) struct KeyView {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GatewayNode {
-    id: String,
+    pub(crate) id: String,
     name: String,
     last_seen_at: Option<i64>,
+    /// Reports the `agent-gateway` capability.
+    pub(crate) capable: bool,
+    /// Designated by an owner or admin; only capable and designated devices
+    /// can act as a gateway.
+    pub(crate) designated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -265,6 +280,23 @@ fn check_residency(value: &str) -> Result<String, ApiError> {
     }
 }
 
+/// Whether an IPv4 provider address is private; refuses link-local
+/// (including 169.254.169.254), metadata and unspecified addresses.
+fn ipv4_private(ip: std::net::Ipv4Addr) -> Result<bool, ApiError> {
+    if ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip == std::net::Ipv4Addr::new(100, 100, 100, 200)
+    {
+        return Err(bad(
+            "link-local, metadata and unspecified addresses cannot be providers",
+        ));
+    }
+    Ok(ip.is_loopback()
+        || ip.is_private()
+        || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64))
+}
+
 /// Upstream URL rules. Self-hosted providers on private addresses are the
 /// point, so private ranges are allowed; cloud metadata endpoints never are,
 /// and an offshore provider or a credential crossing a public network needs
@@ -292,26 +324,21 @@ fn check_base_url(value: &str, residency: &str, has_credential: bool) -> Result<
             }
             domain == "localhost" || domain.ends_with(".internal") || domain.ends_with(".blaktail")
         }
-        url::Host::Ipv4(ip) => {
-            if ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast() {
-                return Err(bad(
-                    "link-local, metadata and unspecified addresses cannot be providers",
-                ));
+        url::Host::Ipv4(ip) => ipv4_private(*ip)?,
+        // An IPv4-mapped literal must not bypass the IPv4 rules.
+        url::Host::Ipv6(ip) => match ip.to_ipv4_mapped() {
+            Some(v4) => ipv4_private(v4)?,
+            None => {
+                let first = ip.segments()[0];
+                let metadata = std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+                if (first & 0xffc0) == 0xfe80 || ip.is_unspecified() || *ip == metadata {
+                    return Err(bad(
+                        "link-local, metadata and unspecified addresses cannot be providers",
+                    ));
+                }
+                ip.is_loopback() || (first & 0xfe00) == 0xfc00
             }
-            ip.is_loopback()
-                || ip.is_private()
-                || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
-        }
-        url::Host::Ipv6(ip) => {
-            let first = ip.segments()[0];
-            let metadata = std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
-            if (first & 0xffc0) == 0xfe80 || ip.is_unspecified() || *ip == metadata {
-                return Err(bad(
-                    "link-local, metadata and unspecified addresses cannot be providers",
-                ));
-            }
-            ip.is_loopback() || (first & 0xfe00) == 0xfc00
-        }
+        },
     };
     if url.scheme() == "http" {
         if residency == "offshore" {
@@ -523,6 +550,7 @@ async fn overview(
     let settings = load_settings(&mut conn, &org).await?;
     let providers = load_providers(&mut conn, &org, settings.allow_offshore).await?;
     let keys = load_keys(&mut conn, &org).await?;
+    let designated = designations::designated(&mut conn, &org, designations::AGENT_GATEWAY).await?;
     let gateways = sqlx::query(
         "SELECT id,COALESCE(NULLIF(TRIM(display_name),''),name),last_seen_at,capabilities_json FROM nodes WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL ORDER BY name",
     )
@@ -532,17 +560,17 @@ async fn overview(
     .iter()
     .filter_map(|row| {
         let capabilities: Vec<String> = json_col(row, 3).unwrap_or_default();
-        capabilities
-            .iter()
-            .any(|c| c == CAP_AGENT_GATEWAY)
-            .then(|| {
-                Some(GatewayNode {
-                    id: row.try_get(0).ok()?,
-                    name: row.try_get(1).ok()?,
-                    last_seen_at: row.try_get(2).ok()?,
-                })
-            })
-            .flatten()
+        let id: String = row.try_get(0).ok()?;
+        let capable = capabilities.iter().any(|c| c == CAP_AGENT_GATEWAY);
+        let is_designated = designated.contains(&id);
+        (capable || is_designated).then_some(())?;
+        Some(GatewayNode {
+            id,
+            name: row.try_get(1).ok()?,
+            last_seen_at: row.try_get(2).ok()?,
+            capable,
+            designated: is_designated,
+        })
     })
     .collect();
     Ok(Json(Overview {
@@ -602,6 +630,35 @@ async fn put_settings(
     let settings = load_settings(&mut tx, &org).await?;
     tx.commit().await?;
     Ok(Json(settings))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesignationInput {
+    designated: bool,
+}
+
+/// Designates (or releases) a device as an AI gateway for this organisation.
+async fn designate_gateway(
+    State(s): State<AppState>,
+    UrlPath((org_id, node_id)): UrlPath<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<DesignationInput>,
+) -> Result<StatusCode, ApiError> {
+    let session = console_session(&s, &headers, org_id).await?;
+    require(&session, Permission::ManageAgentGateway)?;
+    let mut tx = s.store.pool.begin().await?;
+    designations::set(
+        &mut tx,
+        org_id,
+        &session,
+        node_id,
+        designations::AGENT_GATEWAY,
+        input.designated,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1351,7 +1408,9 @@ async fn request_content(
 // ---------------------------------------------------------------- gateway
 
 /// Authenticates the gateway node: node token, active, not suspended or
-/// expired, and the `agent-gateway` capability.
+/// expired, the `agent-gateway` capability and an owner/admin designation.
+/// Every gateway endpoint goes through here, so the caller address a gateway
+/// reports (`client_ip`) is only ever trusted from a designated device.
 async fn gateway_org(s: &AppState, node_id: Uuid, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = bearer(headers)?;
     let row = sqlx::query(
@@ -1372,7 +1431,12 @@ async fn gateway_org(s: &AppState, node_id: Uuid, headers: &HeaderMap) -> Result
     if !capabilities.iter().any(|c| c == CAP_AGENT_GATEWAY) {
         return Err(ApiError::Forbidden);
     }
-    Ok(row.try_get(0)?)
+    let org: String = row.try_get(0)?;
+    let mut conn = s.store.pool.acquire().await?;
+    if !designations::is_designated(&mut conn, &org, node_id, designations::AGENT_GATEWAY).await? {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(org)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1409,6 +1473,9 @@ pub(crate) struct Grant {
     pub(crate) provider: UpstreamGrant,
     pub(crate) logging_mode: String,
     pub(crate) redact_patterns: Vec<String>,
+    /// Output tokens reserved for this request; the gateway clamps the
+    /// forwarded `max_tokens` to it.
+    pub(crate) max_tokens: i64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1428,6 +1495,9 @@ struct AuthorizeInput {
     #[serde(default)]
     client_ip: Option<String>,
     request_bytes: i64,
+    /// The client's requested output limit, if any.
+    #[serde(default)]
+    max_tokens: Option<i64>,
 }
 
 struct ActiveKey {
@@ -1661,18 +1731,39 @@ async fn decide(
         .bind(org)
         .execute(&mut *tx)
         .await?;
+    // Tokens are reserved up front (prompt estimate plus the output
+    // allowance) and settled when usage arrives, so concurrent requests
+    // cannot together overrun the daily token quota.
+    let used: i64 =
+        sqlx::query_scalar("SELECT tokens FROM agent_quota_days WHERE key_id=$1 AND day=$2")
+            .bind(&key.id)
+            .bind(&day)
+            .fetch_one(&mut *tx)
+            .await?;
+    let prompt_estimate = (input.request_bytes + 3) / 4;
+    let output = input
+        .max_tokens
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or(DEFAULT_OUTPUT_TOKENS)
+        .min(key.policy.daily_token_quota - used - prompt_estimate);
+    let reserve = prompt_estimate + output;
     // The conditional increment is the quota check, so concurrent requests
-    // can never exceed the daily request quota.
-    let reserved = sqlx::query(
-        "UPDATE agent_quota_days SET requests=requests+1 WHERE key_id=$1 AND day=$2 AND requests<$3 AND tokens<$4",
-    )
-    .bind(&key.id)
-    .bind(&day)
-    .bind(key.policy.daily_request_quota)
-    .bind(key.policy.daily_token_quota)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    // can never exceed the daily request or token quota.
+    let reserved = if output < 1 {
+        0
+    } else {
+        sqlx::query(
+            "UPDATE agent_quota_days SET requests=requests+1,tokens=tokens+$5 WHERE key_id=$1 AND day=$2 AND requests<$3 AND tokens+$5<=$4",
+        )
+        .bind(&key.id)
+        .bind(&day)
+        .bind(key.policy.daily_request_quota)
+        .bind(key.policy.daily_token_quota)
+        .bind(reserve)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    };
     if reserved != 1 {
         return Ok(Err(deny(
             429,
@@ -1688,7 +1779,7 @@ async fn decide(
         .transpose()?;
     let request_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO agent_requests(id,org_id,key_id,provider_id,model,gateway_node_id,caller_node_id,day,logging_mode,status,request_bytes,started_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11)",
+        "INSERT INTO agent_requests(id,org_id,key_id,provider_id,model,gateway_node_id,caller_node_id,day,logging_mode,status,request_bytes,started_at,reserved_tokens) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,$12)",
     )
     .bind(request_id.to_string())
     .bind(org)
@@ -1701,6 +1792,7 @@ async fn decide(
     .bind(&key.policy.logging_mode)
     .bind(input.request_bytes)
     .bind(current)
+    .bind(reserve)
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE agent_keys SET last_used_at=$1 WHERE id=$2")
@@ -1723,6 +1815,7 @@ async fn decide(
         },
         logging_mode: key.policy.logging_mode.clone(),
         redact_patterns: key.policy.redact_patterns.clone(),
+        max_tokens: output,
     }))
 }
 
@@ -1855,7 +1948,7 @@ async fn ingest_usage(
     let mut tx = s.store.pool.begin().await?;
     // Only the gateway that reserved the request may close it, once.
     let row = sqlx::query(
-        "SELECT r.key_id,r.model,r.day,r.status,k.logging_mode,k.log_retention_days FROM agent_requests r JOIN agent_keys k ON k.id=r.key_id WHERE r.id=$1 AND r.org_id=$2 AND r.gateway_node_id=$3",
+        "SELECT r.key_id,r.model,r.day,r.status,k.logging_mode,k.log_retention_days,r.reserved_tokens FROM agent_requests r JOIN agent_keys k ON k.id=r.key_id WHERE r.id=$1 AND r.org_id=$2 AND r.gateway_node_id=$3",
     )
     .bind(input.request_id.to_string())
     .bind(&org)
@@ -1874,9 +1967,11 @@ async fn ingest_usage(
     // The key's current mode wins: switching logging off stops storage at once.
     let mode: String = row.try_get(4)?;
     let retention: i64 = row.try_get(5)?;
+    let reserved: i64 = row.try_get(6)?;
     let tokens = input.prompt_tokens + input.completion_tokens;
+    // Settle the reservation: release what was not used, charge any overrun.
     sqlx::query("UPDATE agent_quota_days SET tokens=tokens+$1 WHERE key_id=$2 AND day=$3")
-        .bind(tokens)
+        .bind(tokens - reserved)
         .bind(&key_id)
         .bind(&day)
         .execute(&mut *tx)

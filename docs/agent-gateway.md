@@ -15,7 +15,7 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
 | --- | --- | --- |
 | `blaktail-agentgw` | an enrolled node | `GET /v1/models`, `POST /v1/chat/completions` (JSON and SSE streaming), `GET /healthz`. Listens only on the node's overlay address. |
 | Coordinator | `blaktail-coord/src/agent_gateway.rs` | Providers, agent keys, policies, quotas, usage and audit. Authorises each request for the gateway node. |
-| Console | `/agents` (nav group **Agents**) | Offshore policy, providers with location, keys and policies, usage table and chart, stored-prompt viewer for owners. |
+| Console | `/agents` (nav group **Agents**) | Offshore policy, gateway designation, providers with location, keys and policies, usage table and chart, stored-prompt viewer for owners. |
 
 ## Set up
 
@@ -37,6 +37,15 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
    It refuses `0.0.0.0`, `::` and any address that is not loopback or
    BlakTail overlay (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). RFC 1918 / ULA
    addresses need `--allow-private-listen` and are meant for labs only.
+
+3. An owner or admin designates the device: Console → Agents → **Gateways** →
+   *Designate*. Any enrolled device can claim the `agent-gateway`
+   capability, so the capability alone gets nothing: until a device is
+   designated, every gateway endpoint answers `403` and it never receives a
+   provider credential, a model list or a say over quota. Only a designated
+   gateway's `client_ip` (the caller address used for device-bound keys) is
+   trusted. *Release* cuts the device off on its next request. Both are
+   audited (`node.role.designated`, `node.role.released`).
 
 3. In the console, open **Agents → Agent network**:
    - Add a provider: name, OpenAI-compatible base URL (for Ollama,
@@ -60,10 +69,10 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
 | Allowed providers | none | A key with no providers can do nothing. |
 | Allowed models | all models the allowed providers declare | Exact model ids. |
 | Requests per day | 1000 | UTC day. Checked atomically before forwarding; concurrent requests never exceed it. |
-| Tokens per day | 1,000,000 | Checked before forwarding; a single request can overshoot by its own size. |
+| Tokens per day | 1,000,000 | Reserved atomically at authorisation: the prompt estimate (request bytes / 4) plus the output allowance (the request's `max_completion_tokens`/`max_tokens`, or 4096 if it sets none), clamped to what is left today. The gateway forwards the allowance as the provider's output limit; usage settles the reservation and releases what was unused. Concurrent requests cannot together overrun the quota; a provider that ignores the output limit is charged its real usage. A request the gateway never closes keeps its reservation. |
 | Max request size | 256 KiB | Hard ceiling 4 MiB at the gateway. |
 | Bound device | none | When set, the key works only from that device's overlay address (the gateway reports the caller's source address and the coordinator maps it to a device). |
-| Redaction patterns | none | Up to 16 regular expressions; matches in message text become `[REDACTED]` before the provider sees them. If a pattern cannot compile the request is refused. |
+| Redaction patterns | none | Up to 16 regular expressions; matches in **every string value of the request** (message text and names, tool calls and their arguments, tool and function descriptions, `prompt`, unknown fields), except the top-level `model`, become `[REDACTED]` before the provider sees them. If a pattern cannot compile the request is refused. |
 | Prompt logging | off | See below. |
 
 ### Prompt logging
@@ -109,7 +118,8 @@ Console routes (console assertion, organisation-scoped):
 
 | Method and path | Permission |
 | --- | --- |
-| `GET /v1/orgs/:org/agents` | `view_agent_usage` |
+| `GET /v1/orgs/:org/agents` | `view_agent_usage` (includes `gateways` with `capable` and `designated`) |
+| `PUT /v1/orgs/:org/agents/gateways/:node` `{designated}` | `manage_agent_gateway` (owner or admin; device must be active in the organisation) |
 | `PUT /v1/orgs/:org/agents/settings` | `manage_agent_gateway`, owner |
 | `POST /v1/orgs/:org/agents/providers` | `manage_agent_gateway` |
 | `PATCH`/`DELETE /v1/orgs/:org/agents/providers/:id` | `manage_agent_gateway` (PATCH needs `revision`; stale is 412) |
@@ -119,11 +129,11 @@ Console routes (console assertion, organisation-scoped):
 | `GET /v1/orgs/:org/agents/requests/:id/content` | owner |
 
 Gateway routes (node bearer token; node must be active, not suspended or
-expired, and report the `agent-gateway` capability):
+expired, report the `agent-gateway` capability **and be designated**):
 
 | Method and path | Purpose |
 | --- | --- |
-| `POST /v1/nodes/:node/agent-gateway/authorize` | Key, binding, size, allowlist, offshore and quota decision; reserves one request and returns the upstream grant. |
+| `POST /v1/nodes/:node/agent-gateway/authorize` | Key, binding, size, allowlist, offshore and quota decision; reserves one request and its token estimate and returns the upstream grant with the output allowance (`max_tokens`). |
 | `POST /v1/nodes/:node/agent-gateway/models` | Models a key may use now. |
 | `POST /v1/nodes/:node/agent-gateway/usage` | Closes a reservation once, from the gateway that opened it, with token counts. |
 
@@ -142,16 +152,20 @@ No `/api/v1` automation endpoints exist for the agent network yet.
 - **Fail closed.** No coordinator, no request (`503 gateway_unavailable`).
 - **Redirects are not followed** to upstreams, so a provider cannot bounce a
   credential-bearing request elsewhere. Provider URLs cannot carry userinfo,
-  query strings, link-local or cloud-metadata hosts; a credential may only go
-  over plain HTTP to a private or loopback address.
+  query strings, link-local or cloud-metadata hosts (IPv4-mapped IPv6 literals
+  are checked as IPv4); a credential may only go over plain HTTP to a private
+  or loopback address. The gateway re-checks at connect time: it resolves the
+  provider host itself and never connects to link-local, cloud-metadata,
+  unspecified or multicast addresses, and a public hostname that resolves to a
+  loopback, private or overlay address is refused (only an IP literal or a
+  `localhost`, `.internal` or `.blaktail` name may reach those).
 - **Token counts** come from the provider's `usage` object. For streams the
   gateway asks for `stream_options.include_usage`; if none arrives it estimates
   (characters / 4) and marks the record *estimated*.
 - **Not built:** Anthropic Messages API translation (use an
   OpenAI-compatible endpoint), embeddings and other OpenAI endpoints, tool or
   MCP allowlists, per-model pricing or billing, and re-sealing after a
-  coordinator secret rotation. DNS rebinding of a provider hostname to a
-  metadata address is not re-checked at connect time.
+  coordinator secret rotation.
 
 ## Tests
 

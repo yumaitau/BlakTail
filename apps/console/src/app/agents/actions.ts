@@ -9,6 +9,7 @@ import {
   getRequestContent,
   revokeAgentKey,
   setAllowOffshore,
+  setGatewayDesignation,
   updateAgentKey,
   updateProvider,
   type AgentPolicy,
@@ -73,6 +74,20 @@ export async function setOffshoreAction(allow: boolean): Promise<ActionResult> {
     return { ok: true, data: undefined };
   } catch (error) {
     return { ok: false, error: message(error, "Could not change the offshore policy.") };
+  }
+}
+
+export async function setGatewayDesignationAction(
+  nodeId: string,
+  designated: boolean,
+): Promise<ActionResult> {
+  try {
+    const ctx = await manage();
+    await setGatewayDesignation(ctx, nodeId, designated);
+    revalidatePath("/agents");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return { ok: false, error: message(error, "Could not change the gateway designation.") };
   }
 }
 

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fmt,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -107,6 +107,88 @@ pub fn check_listen(
     ))
 }
 
+/// Whether the gateway may connect to `ip` for a provider. `private_ok` is
+/// true when the provider URL itself names a private or loopback target (an
+/// IP literal or a `localhost`, `.internal` or `.blaktail` name the
+/// coordinator accepted as private); a public name that resolves to a
+/// private, loopback or overlay address is refused, as are link-local and
+/// cloud metadata addresses always.
+pub fn upstream_allowed(ip: IpAddr, private_ok: bool) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        ip => ip,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            if v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4 == Ipv4Addr::new(100, 100, 100, 200)
+            {
+                return false;
+            }
+            let private = v4.is_loopback() || v4.is_private() || (a == 100 && b & 0xc0 == 64);
+            private_ok || !private
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            if (first & 0xffc0) == 0xfe80
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
+            {
+                return false;
+            }
+            let private = v6.is_loopback() || (first & 0xfe00) == 0xfc00;
+            private_ok || !private
+        }
+    }
+}
+
+fn private_name(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost" || host.ends_with(".internal") || host.ends_with(".blaktail")
+}
+
+/// Resolves provider names at connect time and drops every address
+/// [`upstream_allowed`] refuses, so DNS cannot steer a credential-bearing
+/// request to metadata or internal services.
+struct GuardedResolver;
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let private_ok = private_name(&host);
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|address| upstream_allowed(address.ip(), private_ok))
+                .collect();
+            if addresses.is_empty() {
+                return Err(format!("{host} resolves only to refused addresses").into());
+            }
+            let addresses: reqwest::dns::Addrs = Box::new(addresses.into_iter());
+            Ok(addresses)
+        })
+    }
+}
+
+/// IP-literal provider URLs never reach the resolver; check them directly.
+fn literal_allowed(base_url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    match host.trim_start_matches('[').trim_end_matches(']').parse() {
+        Ok(ip) => upstream_allowed(ip, true),
+        Err(_) => true,
+    }
+}
+
 pub struct GatewayConfig {
     pub coordinator_url: String,
     pub node_id: Uuid,
@@ -138,6 +220,8 @@ impl Gateway {
         let upstream = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .dns_resolver(Arc::new(GuardedResolver))
             .build()
             .map_err(|e| format!("upstream client: {e}"))?;
         Ok(Self {
@@ -248,6 +332,9 @@ struct Grant {
     provider: Upstream,
     logging_mode: String,
     redact_patterns: Vec<String>,
+    /// Output tokens the coordinator reserved against the daily quota.
+    #[serde(default)]
+    max_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -331,37 +418,76 @@ async fn list_models(
     Json(json!({"object": "list", "data": data})).into_response()
 }
 
-/// Replaces matches in message text with `[REDACTED]`; returns the count.
+/// Replaces matches with `[REDACTED]` in every string anywhere in the
+/// request (messages, names, tool calls and their arguments, tool and
+/// function descriptions, prompts, unknown fields) except the top-level
+/// `model`, which the coordinator already checked; returns the count.
 pub fn redact(body: &mut Value, patterns: &[Regex]) -> usize {
-    if patterns.is_empty() {
-        return 0;
-    }
-    let mut count = 0;
-    let mut scrub = |text: &mut String| {
-        for pattern in patterns {
-            let matches = pattern.find_iter(text).count();
-            if matches > 0 {
-                count += matches;
-                *text = pattern.replace_all(text, "[REDACTED]").into_owned();
-            }
-        }
-    };
-    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        for message in messages {
-            match message.get_mut("content") {
-                Some(Value::String(text)) => scrub(text),
-                Some(Value::Array(parts)) => {
-                    for part in parts {
-                        if let Some(Value::String(text)) = part.get_mut("text") {
-                            scrub(text);
-                        }
+    fn walk(value: &mut Value, patterns: &[Regex], count: &mut usize) {
+        match value {
+            Value::String(text) => {
+                for pattern in patterns {
+                    let matches = pattern.find_iter(text).count();
+                    if matches > 0 {
+                        *count += matches;
+                        *text = pattern.replace_all(text, "[REDACTED]").into_owned();
                     }
                 }
-                _ => {}
             }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, patterns, count);
+                }
+            }
+            Value::Object(fields) => {
+                for value in fields.values_mut() {
+                    walk(value, patterns, count);
+                }
+            }
+            _ => {}
         }
     }
+    let mut count = 0;
+    if patterns.is_empty() {
+        return count;
+    }
+    match body {
+        Value::Object(fields) => {
+            for (name, value) in fields.iter_mut() {
+                if name != "model" {
+                    walk(value, patterns, &mut count);
+                }
+            }
+        }
+        other => walk(other, patterns, &mut count),
+    }
     count
+}
+
+/// The output limit the client asked for (`max_completion_tokens` wins, as
+/// in the OpenAI API).
+fn requested_max_tokens(request: &Value) -> Option<i64> {
+    ["max_completion_tokens", "max_tokens"]
+        .iter()
+        .find_map(|field| request.get(*field).and_then(Value::as_i64))
+}
+
+/// Never lets the provider produce more than the coordinator reserved.
+fn clamp_max_tokens(request: &mut Value, limit: i64) {
+    let mut present = false;
+    for field in ["max_completion_tokens", "max_tokens"] {
+        if let Some(value) = request.get(field).filter(|v| !v.is_null()) {
+            present = true;
+            let clamped = value
+                .as_i64()
+                .filter(|v| *v > 0)
+                .map_or(limit, |v| v.min(limit));
+            request[field] = json!(clamped);
+        }
+    }
+    if !present {
+        request["max_tokens"] = json!(limit);
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -455,6 +581,7 @@ async fn chat_completions(
                 "model": model,
                 "client_ip": client_ip(addr),
                 "request_bytes": body.len(),
+                "max_tokens": requested_max_tokens(&request),
             }),
         )
         .await
@@ -491,8 +618,26 @@ async fn chat_completions(
             "a redaction pattern could not be compiled",
         );
     }
+    if !literal_allowed(&grant.provider.base_url) {
+        record(
+            gw.clone(),
+            UsageReport {
+                request_id: grant.request_id,
+                status: "error",
+                ..Default::default()
+            },
+        );
+        return openai_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_refused",
+            "the provider address is link-local or a metadata endpoint",
+        );
+    }
     let redactions = redact(&mut request, &patterns);
     request["model"] = Value::String(grant.model.clone());
+    if let Some(limit) = grant.max_tokens {
+        clamp_max_tokens(&mut request, limit);
+    }
     if stream {
         request["stream_options"] = json!({"include_usage": true});
     }
@@ -796,6 +941,96 @@ mod tests {
         assert_eq!(redact(&mut body, &patterns), 2);
         assert_eq!(body["messages"][0]["content"], "call [REDACTED] now");
         assert_eq!(body["messages"][1]["content"][0]["text"], "id [REDACTED]");
+    }
+
+    #[test]
+    fn redaction_walks_every_string_but_the_model() {
+        let mut body = json!({
+            "model": "0412-345-678",
+            "messages": [
+                {"role": "user", "name": "0412-345-678", "content": "hi"},
+                {"role": "assistant", "tool_calls": [{"type": "function", "function": {
+                    "name": "lookup", "arguments": "{\"phone\":\"0412-345-678\"}"}}]},
+            ],
+            "tools": [{"type": "function", "function": {"description": "dial 0412-345-678"}}],
+            "prompt": ["0412-345-678"],
+            "metadata": {"nested": {"deep": "0412-345-678"}},
+            "max_tokens": 10,
+        });
+        let patterns = [Regex::new(r"\d{4}-\d{3}-\d{3}").unwrap()];
+        assert_eq!(redact(&mut body, &patterns), 5);
+        assert_eq!(body["model"], "0412-345-678");
+        assert!(!body
+            .to_string()
+            .replace("\"model\":\"0412-345-678\"", "")
+            .contains("0412"));
+        assert_eq!(body["max_tokens"], 10);
+    }
+
+    #[test]
+    fn max_tokens_is_clamped_to_the_reservation() {
+        let mut body = json!({"max_tokens": 5000});
+        assert_eq!(requested_max_tokens(&body), Some(5000));
+        clamp_max_tokens(&mut body, 300);
+        assert_eq!(body["max_tokens"], 300);
+        let mut body = json!({"max_completion_tokens": 20, "max_tokens": 9000});
+        assert_eq!(requested_max_tokens(&body), Some(20));
+        clamp_max_tokens(&mut body, 300);
+        assert_eq!(body["max_completion_tokens"], 20);
+        assert_eq!(body["max_tokens"], 300);
+        let mut body = json!({});
+        clamp_max_tokens(&mut body, 300);
+        assert_eq!(body["max_tokens"], 300);
+    }
+
+    #[test]
+    fn upstream_addresses_are_guarded() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for refused in [
+            "169.254.169.254",
+            "::ffff:169.254.169.254",
+            "fe80::1",
+            "fd00:ec2::254",
+            "0.0.0.0",
+            "100.100.100.200",
+            "224.0.0.1",
+        ] {
+            assert!(!upstream_allowed(ip(refused), true), "{refused}");
+        }
+        for private in [
+            "127.0.0.1",
+            "::ffff:127.0.0.1",
+            "10.0.0.5",
+            "100.64.0.9",
+            "fd12::1",
+            "::1",
+        ] {
+            assert!(upstream_allowed(ip(private), true), "{private}");
+            assert!(
+                !upstream_allowed(ip(private), false),
+                "{private} via public name"
+            );
+        }
+        assert!(upstream_allowed(ip("203.0.113.7"), false));
+        assert!(private_name("ollama.internal") && private_name("LOCALHOST."));
+        assert!(!private_name("api.example.com"));
+        assert!(literal_allowed("http://10.0.0.5:11434/v1"));
+        assert!(literal_allowed("https://api.example.com/v1"));
+        assert!(!literal_allowed("http://[::ffff:169.254.169.254]/v1"));
+        assert!(!literal_allowed("http://169.254.169.254/v1"));
+    }
+
+    #[tokio::test]
+    async fn resolver_keeps_loopback_for_private_names() {
+        use reqwest::dns::Resolve;
+        // `localhost` is a private name, so loopback is fine there; a public
+        // name resolving to loopback is filtered by `upstream_allowed`.
+        let resolved: Vec<SocketAddr> = GuardedResolver
+            .resolve("localhost".parse().unwrap())
+            .await
+            .unwrap()
+            .collect();
+        assert!(resolved.iter().all(|a| a.ip().is_loopback()) && !resolved.is_empty());
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! Public HTTPS ingress (draft 11, ADR 0007). An organisation runs its own
 //! onshore `blaktail-ingress` next to a blaktaild that reports the
-//! `public-ingress` capability. This module holds the public route model,
+//! `public-ingress` capability and that an owner designated as an ingress
+//! device (the capability alone is never enough: an ingress receives every
+//! route's overlay target and access policy). This module holds the public
+//! route model,
 //! owner-only management, and the node-token config feed that ingress polls.
 //!
 //! A route is delivered to an ingress only when the organisation has public
@@ -10,7 +13,7 @@
 //! never widens policy.
 
 use crate::{
-    append_audit, bearer, bump_control_revision, console_session, now,
+    append_audit, bearer, bump_control_revision, console_session, designations, now,
     permissions::{require, Permission},
     policy_explain::{device_flow, device_subject},
     posture::PostureContext,
@@ -66,6 +69,10 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/v1/orgs/:org_id/public-ingress/routes/:route_id/emergency-disable",
             post(emergency_disable),
+        )
+        .route(
+            "/v1/orgs/:org_id/public-ingress/nodes/:node_id",
+            put(designate_node),
         )
         .route("/v1/nodes/:node_id/public-ingress/config", get(node_config))
         .route(
@@ -610,6 +617,9 @@ pub(crate) struct IngressNodeView {
     pub(crate) online: bool,
     last_config_at: Option<i64>,
     capable: bool,
+    /// Designated by an owner; only capable and designated devices receive
+    /// routes.
+    pub(crate) designated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -643,6 +653,7 @@ struct IngressNode {
     id: Uuid,
     name: String,
     capable: bool,
+    designated: bool,
     last_config_at: Option<i64>,
     reports: Vec<RouteReport>,
 }
@@ -654,22 +665,26 @@ async fn ingress_nodes(pool: &sqlx::AnyPool, org_id: &str) -> Result<Vec<Ingress
     .bind(org_id)
     .fetch_all(pool)
     .await?;
+    let designated = {
+        let mut connection = pool.acquire().await?;
+        designations::designated(&mut connection, org_id, designations::PUBLIC_INGRESS).await?
+    };
     let mut out = Vec::new();
     for row in rows {
         let capabilities: Vec<String> =
             serde_json::from_str(&row.try_get::<String, _>(2)?).unwrap_or_default();
         let capable = capabilities.iter().any(|c| c == CAP_PUBLIC_INGRESS);
         let last_config_at: Option<i64> = row.try_get(3)?;
-        if !capable && last_config_at.is_none() {
+        let id: String = row.try_get(0)?;
+        let is_designated = designated.contains(&id);
+        if !capable && !is_designated && last_config_at.is_none() {
             continue;
         }
         out.push(IngressNode {
-            id: row
-                .try_get::<String, _>(0)?
-                .parse()
-                .map_err(|_| ApiError::CorruptData)?,
+            id: id.parse().map_err(|_| ApiError::CorruptData)?,
             name: row.try_get(1)?,
             capable,
+            designated: is_designated,
             last_config_at,
             reports: row
                 .try_get::<Option<String>, _>(4)?
@@ -712,6 +727,7 @@ async fn build_workspace(s: &AppState, org_id: Uuid) -> Result<Workspace, ApiErr
     let current = now();
     let online = |node: &IngressNode| {
         node.capable
+            && node.designated
             && node
                 .last_config_at
                 .is_some_and(|at| current - at <= ONLINE_WINDOW_SECS)
@@ -726,6 +742,8 @@ async fn build_workspace(s: &AppState, org_id: Uuid) -> Result<Workspace, ApiErr
                     let report = node.reports.iter().find(|r| r.route_id == route.id);
                     let state = if !node.capable {
                         "ingress_not_capable"
+                    } else if !node.designated {
+                        "ingress_not_designated"
                     } else {
                         view.state(&route, node.id)
                     };
@@ -809,6 +827,7 @@ async fn build_workspace(s: &AppState, org_id: Uuid) -> Result<Workspace, ApiErr
                 online: online(node),
                 last_config_at: node.last_config_at,
                 capable: node.capable,
+                designated: node.designated,
             })
             .collect(),
         routes,
@@ -877,6 +896,39 @@ async fn put_settings(
     )
     .await?;
     bump_control_revision(&mut tx, &org).await?;
+    tx.commit().await?;
+    Ok(Json(build_workspace(&s, org_id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesignationInput {
+    designated: bool,
+}
+
+/// Designates (or releases) a device as a public ingress. Owner-only, like
+/// every other public ingress decision.
+async fn designate_node(
+    State(s): State<AppState>,
+    UrlPath((org_id, node_id)): UrlPath<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<DesignationInput>,
+) -> Result<Json<Workspace>, ApiError> {
+    let session = console_session(&s, &headers, org_id).await?;
+    require(&session, Permission::ManagePublicIngress)?;
+    let mut tx = s.store.pool.begin().await?;
+    if designations::set(
+        &mut tx,
+        org_id,
+        &session,
+        node_id,
+        designations::PUBLIC_INGRESS,
+        input.designated,
+    )
+    .await?
+    {
+        bump_control_revision(&mut tx, org_id.to_string()).await?;
+    }
     tx.commit().await?;
     Ok(Json(build_workspace(&s, org_id).await?))
 }
@@ -1309,7 +1361,8 @@ async fn delete_route(
 // ---------- ingress node feed ----------
 
 /// Authenticates an ingress device: a valid, unsuspended node token whose
-/// device reports the `public-ingress` capability.
+/// device reports the `public-ingress` capability and is designated by an
+/// owner. Both the config feed and reports go through here.
 async fn ingress_node(
     s: &AppState,
     headers: &HeaderMap,
@@ -1335,7 +1388,14 @@ async fn ingress_node(
     if !capabilities.iter().any(|c| c == CAP_PUBLIC_INGRESS) {
         return Err(ApiError::Forbidden);
     }
-    row.try_get(0).map_err(Into::into)
+    let org: String = row.try_get(0)?;
+    let mut connection = s.store.pool.acquire().await?;
+    if !designations::is_designated(&mut connection, &org, node_id, designations::PUBLIC_INGRESS)
+        .await?
+    {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(org)
 }
 
 #[derive(Default, Deserialize)]
@@ -1579,6 +1639,23 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
+    async fn designate(
+        router: &Router,
+        org: Uuid,
+        node: Uuid,
+        designated: bool,
+        role: Role,
+    ) -> (StatusCode, Value) {
+        call(
+            router,
+            Method::PUT,
+            &format!("/v1/orgs/{org}/public-ingress/nodes/{node}"),
+            json!({"designated": designated}),
+            Auth::Console(org, role),
+        )
+        .await
+    }
+
     async fn enable(router: &Router, org: Uuid) {
         let (status, body) = call(
             router,
@@ -1597,6 +1674,8 @@ mod tests {
         let (ingress, token, _) = register(&router, org, "edge", &["office"]).await;
         let (target, _, _) = register(&router, org, "app", &[target_tag]).await;
         claim_capability(&router, ingress, &token).await;
+        let (status, body) = designate(&router, org, ingress, true, Role::Owner).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
         enable(&router, org).await;
         Lab {
             router,
@@ -1915,6 +1994,7 @@ mod tests {
         let other = create_org(&lab.router, "Other org").await;
         let (other_edge, other_token, _) = register(&lab.router, other, "edge", &["office"]).await;
         claim_capability(&lab.router, other_edge, &other_token).await;
+        designate(&lab.router, other, other_edge, true, Role::Owner).await;
         enable(&lab.router, other).await;
         let (status, body) = call(
             &lab.router,
@@ -1975,6 +2055,99 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         // The original route is still intact.
         assert_eq!(fqdns(&config(&lab).await).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capable_ingress_needs_an_owner_designation() {
+        let lab = lab("office").await;
+        let (status, body) = create(&lab, "app.example.org.au", Role::Owner).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        // Any device can claim the capability; undesignated, it receives no
+        // routes (overlay targets, email allowlists) and cannot report.
+        let (rogue, rogue_token, _) = register(&lab.router, lab.org, "rogue", &["office"]).await;
+        claim_capability(&lab.router, rogue, &rogue_token).await;
+        let (status, _) = call(
+            &lab.router,
+            Method::GET,
+            &format!("/v1/nodes/{rogue}/public-ingress/config"),
+            Value::Null,
+            Auth::Node(&rogue_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &lab.router,
+            Method::POST,
+            &format!("/v1/nodes/{rogue}/public-ingress/report"),
+            json!({"routes": [{"route_id": body["id"], "certificate_not_after": 1}]}),
+            Auth::Node(&rogue_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (_, workspace) = call(
+            &lab.router,
+            Method::GET,
+            &format!("/v1/orgs/{}/public-ingress", lab.org),
+            Value::Null,
+            Auth::Console(lab.org, Role::Owner),
+        )
+        .await;
+        let node = workspace["ingress_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == rogue.to_string())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (node["capable"].clone(), node["designated"].clone()),
+            (json!(true), json!(false))
+        );
+        let state = workspace["routes"][0]["ingress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["node_id"] == rogue.to_string())
+            .unwrap()["state"]
+            .clone();
+        assert_eq!(state, "ingress_not_designated");
+
+        // Designation is an owner decision, scoped to the organisation.
+        for role in [Role::Admin, Role::NetworkAdmin, Role::Member] {
+            let (status, _) = designate(&lab.router, lab.org, rogue, true, role).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{role:?} designates");
+        }
+        let other = create_org(&lab.router, "Designating org").await;
+        let (status, _) = designate(&lab.router, other, rogue, true, Role::Owner).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, workspace) = designate(&lab.router, lab.org, rogue, true, Role::Owner).await;
+        assert_eq!(status, StatusCode::OK, "{workspace}");
+        let (status, delivered) = call(
+            &lab.router,
+            Method::GET,
+            &format!("/v1/nodes/{rogue}/public-ingress/config"),
+            Value::Null,
+            Auth::Node(&rogue_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fqdns(&delivered), vec!["app.example.org.au"]);
+
+        // Releasing it bumps the revision and cuts the feed at once.
+        let (status, _) = designate(&lab.router, lab.org, rogue, false, Role::Owner).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(
+            &lab.router,
+            Method::GET,
+            &format!("/v1/nodes/{rogue}/public-ingress/config"),
+            Value::Null,
+            Auth::Node(&rogue_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let revision: i64 = delivered["revision"].as_i64().unwrap();
+        assert!(config(&lab).await["revision"].as_i64().unwrap() > revision);
     }
 
     async fn patch(lab: &Lab, id: &str, body: Value) -> Value {

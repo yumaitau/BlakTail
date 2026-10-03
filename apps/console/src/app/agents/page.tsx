@@ -1,6 +1,7 @@
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import {
+  GatewayDesignations,
   KeyManager,
   OffshorePolicy,
   ProviderManager,
@@ -94,12 +95,16 @@ export default async function AgentsPage() {
                 isOwner={isOwner}
                 readOnlyReason={manageReason}
               />
-              <p className="muted">
-                Gateways:{" "}
-                {overview.gateways.length === 0
-                  ? "none enrolled. Run blaktaild up --agent-gateway on a node, then start blaktail-agentgw there."
-                  : overview.gateways.map((g) => `${g.name} (last seen ${when(g.last_seen_at)})`).join(", ")}
-              </p>
+            </section>
+
+            <section className="panel stack" aria-labelledby="agents-gateways">
+              <h2 id="agents-gateways">Gateways</h2>
+              <GatewayDesignations
+                gateways={overview.gateways}
+                organisationName={ctx.organisationName}
+                roleLabel={roleLabel(ctx.role).toLowerCase()}
+                readOnlyReason={manageReason}
+              />
             </section>
 
             <section className="panel stack" aria-labelledby="agents-providers">

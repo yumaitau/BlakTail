@@ -63,10 +63,13 @@ authorisation.
 - `/services` — private service names, target device, access tags, status and
   the organisation service CA (owner/admin write)
 - `/agents` — agent network (AI model gateway): offshore policy (owner),
+  gateway designation (a device reporting the capability acts as a gateway
+  only once an owner or admin designates it; audited),
   model providers with their declared data location, agent keys (secret shown
   once) and per-key policies, usage by key/model/day and recent requests
   (owner/admin write, auditor read; see [agent-gateway.md](agent-gateway.md))
-- `/ingress` — **public** ingress: organisation on/off setting, public routes
+- `/ingress` — **public** ingress: organisation on/off setting, owner
+  designation of ingress hosts (the capability alone receives nothing), public routes
   (marked PUBLIC, styled apart from private services), per-ingress status,
   certificate expiry and policy reachability; owner-only to enable or publish,
   owner/admin/network admin may emergency-disable ([public-ingress.md](public-ingress.md))
@@ -339,7 +342,9 @@ target, the certificate source (operator files or ACME HTTP-01 on the ingress
 host), optional organisation sign-in (OIDC, optionally restricted to email
 domains), per-client request rate, body size, connection limit and access-log
 retention. Each route shows, per ingress host, whether it is live, blocked by
-policy, offline or withdrawn, and the certificate expiry the ingress reported.
+policy, offline, not designated or withdrawn, and the certificate expiry the
+ingress reported. Under *Ingress hosts* an owner designates which capable
+devices may act as ingress; an undesignated device receives no routes.
 Owners, admins and network admins can emergency-disable a route; only an owner
 can re-enable it, again by typing the hostname. Members and auditors see the
 routes and status with no controls.

@@ -6,6 +6,7 @@ import {
   createRouteAction,
   deleteRouteAction,
   emergencyDisableAction,
+  setIngressDesignationAction,
   setIngressEnabledAction,
   setRouteEnabledAction,
 } from "@/app/ingress/actions";
@@ -60,6 +61,11 @@ const STATUS: Record<RouteStatus, { label: string; tone: string; detail: string 
     label: "Ingress not enabled",
     tone: "pending",
     detail: "Run blaktaild up --public-ingress on the ingress host.",
+  },
+  ingress_not_designated: {
+    label: "Ingress not designated",
+    tone: "pending",
+    detail: "An owner must designate this device as an ingress host before it receives routes.",
   },
   no_ingress_node: {
     label: "No ingress host",
@@ -177,7 +183,14 @@ export function IngressManager({
           run={run}
         />
       ) : null}
-      <IngressHosts workspace={workspace} />
+      <IngressHosts
+        workspace={workspace}
+        organisationName={organisationName}
+        roleLabel={roleLabel}
+        ownerReason={ownerReason}
+        pending={pending}
+        run={run}
+      />
     </div>
   );
 }
@@ -647,14 +660,36 @@ function CreateRoute({
   );
 }
 
-function IngressHosts({ workspace }: { workspace: IngressWorkspace }) {
+function IngressHosts({
+  workspace,
+  organisationName,
+  roleLabel,
+  ownerReason,
+  pending,
+  run,
+}: {
+  workspace: IngressWorkspace;
+  organisationName: string;
+  roleLabel: string;
+  ownerReason: string | null;
+  pending: boolean;
+  run: (action: () => Promise<Result>) => void;
+}) {
   return (
     <div className="panel stack" id="hosts">
       <div>
         <h2>Ingress hosts</h2>
         <p className="muted">
-          Devices running <span className="mono">blaktaild up --public-ingress</span>. Each one
-          serves every live route; online means it fetched configuration in the last 90 seconds.
+          Devices running <span className="mono">blaktaild up --public-ingress</span>. Reporting the
+          capability is not enough: an owner must designate a device before it receives any route,
+          because it learns every route&apos;s overlay target and sign-in allowlist. Each designated
+          host serves every live route; online means it fetched configuration in the last 90
+          seconds.
+        </p>
+        <p className="muted">
+          {ownerReason
+            ? `Read only. ${ownerReason}`
+            : `Designations for ${organisationName} as ${roleLabel} are audited.`}
         </p>
       </div>
       {workspace.ingress_nodes.length === 0 ? (
@@ -667,6 +702,9 @@ function IngressHosts({ workspace }: { workspace: IngressWorkspace }) {
                 <th scope="col">Device</th>
                 <th scope="col">State</th>
                 <th scope="col">Last configuration fetch</th>
+                <th scope="col">
+                  <span className="visually-hidden">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -676,6 +714,8 @@ function IngressHosts({ workspace }: { workspace: IngressWorkspace }) {
                   <td>
                     {!node.capable ? (
                       <span className="badge pending">Capability off</span>
+                    ) : !node.designated ? (
+                      <span className="badge pending">Not designated</span>
                     ) : node.online ? (
                       <span className="badge online">Online</span>
                     ) : (
@@ -683,6 +723,27 @@ function IngressHosts({ workspace }: { workspace: IngressWorkspace }) {
                     )}
                   </td>
                   <td>{when(node.last_config_at)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className={node.designated ? "quiet-danger" : "secondary"}
+                      disabled={pending || ownerReason !== null}
+                      title={ownerReason ?? undefined}
+                      aria-label={`${node.designated ? "Release" : "Designate"} ${node.name} as an ingress host`}
+                      onClick={() => {
+                        if (
+                          node.designated ||
+                          window.confirm(
+                            `Designate ${node.name} as a public ingress host? It will receive every live route, including overlay targets and sign-in allowlists.`,
+                          )
+                        ) {
+                          run(() => setIngressDesignationAction(node.id, !node.designated));
+                        }
+                      }}
+                    >
+                      {node.designated ? "Release" : "Designate"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

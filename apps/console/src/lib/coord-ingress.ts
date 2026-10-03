@@ -18,6 +18,7 @@ export type RouteStatus =
   | "blocked_by_policy"
   | "ingress_offline"
   | "ingress_not_capable"
+  | "ingress_not_designated"
   | "no_ingress_node";
 
 export type RouteLimits = {
@@ -65,6 +66,8 @@ export type IngressNode = {
   online: boolean;
   last_config_at: number | null;
   capable: boolean;
+  /** Designated by an owner; only capable and designated devices receive routes. */
+  designated: boolean;
 };
 
 export type IngressWorkspace = {
@@ -126,6 +129,21 @@ export async function setIngressEnabled(
       method: "PUT",
       ctx,
       body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function setIngressDesignation(
+  ctx: ConsoleContext,
+  nodeId: string,
+  designated: boolean,
+): Promise<IngressWorkspace> {
+  requireOwner(ctx);
+  return json(
+    await coordFetch(ingressPath(ctx, `/nodes/${encodeURIComponent(nodeId)}`), {
+      method: "PUT",
+      ctx,
+      body: JSON.stringify({ designated }),
     }),
   );
 }
