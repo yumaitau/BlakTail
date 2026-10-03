@@ -243,6 +243,7 @@ fn records_from_state(state: &NodeState, domain: &str) -> Records {
             insert_record(&mut addresses, &peer.dns_name, address, domain);
         }
     }
+    insert_service_records(&mut addresses, &state.service_records, domain);
     let mut split = Vec::new();
     let mut zones = Vec::new();
     if let Some(snapshot) = &state.org_dns {
@@ -571,6 +572,30 @@ fn insert_record(
         insert(label.into());
     }
     insert(name);
+}
+
+/// Published private service names: full names under `svc.<domain>` only,
+/// never a short label (that would shadow a device name).
+fn insert_service_records(
+    records: &mut HashMap<String, Vec<IpAddr>>,
+    services: &[crate::services::ServiceRecord],
+    domain: &str,
+) {
+    let subtree = format!(".svc.{domain}");
+    for service in services {
+        let name = service.name.trim_end_matches('.').to_ascii_lowercase();
+        if !name.ends_with(&subtree) || !labels_are_safe(&name) {
+            continue;
+        }
+        for address in &service.addresses {
+            if let Ok(address) = address.parse::<IpAddr>() {
+                let values = records.entry(name.clone()).or_default();
+                if !values.contains(&address) {
+                    values.push(address);
+                }
+            }
+        }
+    }
 }
 
 fn insert_extra_record(records: &mut HashMap<String, Vec<IpAddr>>, record: &crate::OrgDnsRecord) {
@@ -1299,6 +1324,10 @@ mod tests {
             app_connector: false,
             agent_gateway: false,
             connector_routes: Vec::new(),
+            serve_services: false,
+            service_listen_port: None,
+            service_access: Vec::new(),
+            service_records: Vec::new(),
         }
     }
 
@@ -1482,6 +1511,38 @@ mod tests {
         assert_eq!(public[3] & 0x0f, 5);
         let private_missing = answer(&query("missing.12345678.blaktail", 1), &records).unwrap();
         assert_eq!(private_missing[3] & 0x0f, 3);
+    }
+
+    #[test]
+    fn answers_published_service_names_only_under_the_svc_subtree() {
+        let mut state = state();
+        let missing = answer(
+            &query("wiki.svc.12345678.blaktail", 1),
+            &records_from_state(&state, "12345678.blaktail"),
+        )
+        .unwrap();
+        assert_eq!(missing[3] & 0x0f, 3, "unpublished service is NXDOMAIN");
+        state.service_records = vec![
+            crate::services::ServiceRecord {
+                name: "wiki.svc.12345678.blaktail".into(),
+                addresses: vec!["100.64.0.9".into(), "fd12:3456:789a:bcde::9".into()],
+            },
+            // Outside the svc subtree: ignored, cannot shadow a device.
+            crate::services::ServiceRecord {
+                name: "peer.12345678.blaktail".into(),
+                addresses: vec!["100.64.0.99".into()],
+            },
+        ];
+        let records = records_from_state(&state, "12345678.blaktail");
+        let a = answer(&query("wiki.svc.12345678.blaktail", 1), &records).unwrap();
+        assert_eq!(a[3] & 0x0f, 0);
+        assert_eq!(&a[a.len() - 4..], &[100, 64, 0, 9]);
+        let aaaa = answer(&query("wiki.svc.12345678.blaktail", 28), &records).unwrap();
+        assert_eq!(aaaa[3] & 0x0f, 0);
+        let peer = answer(&query("peer.12345678.blaktail", 1), &records).unwrap();
+        assert_eq!(&peer[peer.len() - 4..], &[100, 64, 0, 2]);
+        let short = answer(&query("wiki", 1), &records).unwrap();
+        assert_eq!(short[3] & 0x0f, 3, "no short alias for a service");
     }
 
     #[test]
