@@ -321,11 +321,15 @@ this release answer only zone A/AAAA records.
 `svc.<org-prefix>.blaktail` namespace, separate from device MagicDNS names. Owners
 and admins preview a name (full name, collisions, warnings) before creating it,
 choose the target device, local port and protocol, and the device tags allowed to
-use it, and can disable or delete it (certificates are revoked). Status is honest:
-no serving-agent listener ships yet, so services show "Awaiting serving agent" (or
-"Certificate issued, not verified") and are never presented as reachable or
-published in DNS. The organisation service CA certificate and fingerprint can be
-viewed and downloaded; trusting it on clients is manual.
+use it, and can disable or delete it (certificates are revoked). Status comes from
+the target device's serving agent (`blaktaild up --serve-services`): "Awaiting
+certificate", "Certificate issued, not serving" (no fresh report naming the live
+certificate), "Target unhealthy" (listener up, local target failing its check) or
+"Serving". Only "Serving" publishes the name to allowed devices' MagicDNS, and it is
+the device's own report, not a probe from a client. The organisation service CA
+certificate and fingerprint can be viewed and downloaded; clients can install it
+with `blaktaild trust-service-ca` (explicit, never automatic). See
+`docs/private-services.md`.
 
 `/ingress` (nav group "Services", labelled PUBLIC) is the only place a service
 is put on the Internet. Public ingress is off per organisation until an owner

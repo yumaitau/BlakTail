@@ -16,12 +16,15 @@ hkdf = "0.13"
 hmac = "0.13"
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
 rand = "0.8"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }
@@ -42,4 +45,5 @@ wintun = "0.4"
 
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 tempfile = "3"

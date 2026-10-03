@@ -7,6 +7,7 @@ use blaktaild::{
     organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
     pq::{self, PqRuntime},
     published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
+    services::{self, ServiceRuntime},
     sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
     Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
     HANDSHAKE_FRESH_SECS,
@@ -92,6 +93,14 @@ enum Command {
         /// `--public-ingress=false` turns it off again.
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         public_ingress: Option<bool>,
+        /// Serve the private services that target this node: generate their
+        /// keys here, request certificates and listen on the overlay only.
+        /// `--serve-services=false` stops serving and deletes the keys.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        serve_services: Option<bool>,
+        /// Overlay TCP port for the private service listener (default 443).
+        #[arg(long)]
+        service_listen_port: Option<u16>,
     },
     /// Resume the persisted enrollment and keep WireGuard peers synchronized.
     Run {
@@ -111,6 +120,17 @@ enum Command {
     Share {
         #[command(subcommand)]
         action: ShareCommand,
+    },
+    /// Install this organisation's private service CA into the system trust
+    /// store after showing its fingerprint and asking for confirmation.
+    /// Never run automatically.
+    TrustServiceCa {
+        /// Write the CA PEM to this path instead of installing it.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
     /// Stop the local tunnel while retaining enrollment for a later resume.
     Pause,
@@ -185,6 +205,7 @@ impl AgentOverrides {
             Command::Reauth
             | Command::Status { .. }
             | Command::Share { .. }
+            | Command::TrustServiceCa { .. }
             | Command::Pause
             | Command::Down => {}
         }
@@ -441,6 +462,7 @@ async fn sync_loop(
         .unwrap_or_default();
     let mut pq = PqRuntime::new(&own_key, state_dir, network.psk_device(&state.interface));
     let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
+    let mut serving = ServiceRuntime::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -451,6 +473,7 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
+        serving.manage(coordinator, state, state_dir).await;
         if connector::manage(coordinator, network, state, &mut connector).await {
             if let Err(error) = write_state(state_dir, state) {
                 warn!(%error, "could not persist app connector routes");
@@ -518,6 +541,7 @@ async fn sync_loop(
     if let Some(active) = shares.take() {
         active.stop();
     }
+    serving.stop();
     shutdown_magic_dns(&mut dns, state, state_dir);
     Ok(())
 }
@@ -1220,6 +1244,8 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             app_connector,
             agent_gateway,
             public_ingress,
+            serve_services,
+            service_listen_port,
         } => {
             let coord = coord
                 .or_else(|| operator_config.coordinator_url.clone())
@@ -1332,6 +1358,17 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
             }
             if let Some(enabled) = public_ingress {
                 state.public_ingress = enabled;
+            }
+            if let Some(enabled) = serve_services {
+                state.serve_services = enabled;
+            }
+            if let Some(port) = service_listen_port {
+                if port == 0 {
+                    return Err(blaktaild::Error::Message(
+                        "--service-listen-port must be 1-65535".into(),
+                    ));
+                }
+                state.service_listen_port = Some(port);
             }
             let mut network = make_network();
             let interface_addresses = state.interface_addresses();
@@ -1555,6 +1592,11 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
             }
         }
+        Command::TrustServiceCa { output, yes } => {
+            let state = read_state(state_dir)?;
+            let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
+            trust_service_ca(&coordinator, &state, output, yes).await?;
+        }
         Command::Pause => {
             let state = read_state(state_dir)?;
             if let Some(domain) = dns_domain(&state.dns_name) {
@@ -1609,6 +1651,106 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
         }
     }
     Ok(())
+}
+
+/// Fetches the organisation's service CA, checks its fingerprint, and either
+/// writes it out or installs it after explicit confirmation.
+async fn trust_service_ca(
+    coordinator: &Coordinator,
+    state: &blaktaild::NodeState,
+    output: Option<PathBuf>,
+    yes: bool,
+) -> Result<(), blaktaild::Error> {
+    let ca = coordinator.service_ca(state).await?;
+    let fingerprint = services::pem_fingerprint(&ca.cert_pem)?;
+    if !fingerprint.eq_ignore_ascii_case(&ca.fingerprint_sha256) {
+        return Err(blaktaild::Error::Message(
+            "service CA fingerprint does not match what the coordinator reported; not trusting it"
+                .into(),
+        ));
+    }
+    println!(
+        "BlakTail private service CA\nnames: *.{} only (name-constrained)\nSHA-256: {fingerprint}\nexpires: {} (unix)",
+        ca.namespace, ca.not_after
+    );
+    if let Some(path) = output {
+        fs::write(&path, ca.cert_pem.as_bytes())?;
+        println!("written to {}", path.display());
+        return Ok(());
+    }
+    if !yes {
+        println!("Compare the fingerprint with the console's Services page, then type 'yes' to install it into the system trust store:");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if answer.trim() != "yes" {
+            return Err(blaktaild::Error::Message("not installed".into()));
+        }
+    }
+    install_ca(&ca.namespace, &ca.cert_pem)?;
+    println!("installed; browsers that use their own trust store (for example Firefox) need it imported separately");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
+    let file = format!("blaktail-{namespace}.crt");
+    let run = |program: &str, args: &[&str]| -> Result<(), blaktaild::Error> {
+        let status = process::Command::new(program).args(args).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(blaktaild::Error::Message(format!(
+                "{program} failed ({status})"
+            )))
+        }
+    };
+    let debian = std::path::Path::new("/usr/local/share/ca-certificates");
+    let redhat = std::path::Path::new("/etc/pki/ca-trust/source/anchors");
+    if debian.is_dir() {
+        fs::write(debian.join(&file), pem)?;
+        run("update-ca-certificates", &[])
+    } else if redhat.is_dir() {
+        fs::write(redhat.join(&file), pem)?;
+        run("update-ca-trust", &["extract"])
+    } else {
+        Err(blaktaild::Error::Message(
+            "no supported system trust store found; use --output and install the CA manually"
+                .into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
+    let path = std::env::temp_dir().join(format!("blaktail-{namespace}.pem"));
+    fs::write(&path, pem)?;
+    // macOS asks for an administrator's approval before changing trust.
+    let status = process::Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .arg(&path)
+        .status();
+    let _ = fs::remove_file(&path);
+    if status?.success() {
+        Ok(())
+    } else {
+        Err(blaktaild::Error::Message(
+            "security add-trusted-cert failed".into(),
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn install_ca(_namespace: &str, _pem: &str) -> Result<(), blaktaild::Error> {
+    Err(blaktaild::Error::Message(
+        "trust installation is supported on Linux and macOS; use --output".into(),
+    ))
 }
 
 /// Machine-readable status for local tools. Carries no node token, relay

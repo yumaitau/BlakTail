@@ -9,8 +9,10 @@ export type ServiceProtocol = "http" | "https";
 export type ServiceStatus =
   | "disabled"
   | "target_unavailable"
-  | "awaiting_serving_agent"
-  | "certificate_issued";
+  | "awaiting_certificate"
+  | "certificate_issued"
+  | "target_unhealthy"
+  | "serving";
 
 export type ServiceCertificate = {
   serial: string;

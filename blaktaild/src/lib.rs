@@ -23,6 +23,7 @@ pub mod pq;
 pub mod relay_client;
 pub mod relay_select;
 pub mod remote;
+pub mod services;
 pub mod share;
 pub mod sshd;
 pub use dns::{
@@ -297,6 +298,18 @@ pub struct NodeState {
     /// `blaktail-ingress` uses this node's identity to fetch public routes.
     #[serde(default)]
     pub public_ingress: bool,
+    /// Operator opted this node in to serve private services that target it.
+    #[serde(default)]
+    pub serve_services: bool,
+    /// Overlay TCP port for the private service listener (default 443).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_listen_port: Option<u16>,
+    /// Sources allowed per served service, compiled by the coordinator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_access: Vec<services::ServiceAccess>,
+    /// Published private service names this node may resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_records: Vec<services::ServiceRecord>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -466,6 +479,10 @@ struct PeersResponse {
     forward_filter: Option<forward_filter::ForwardFilter>,
     #[serde(default)]
     remote_access: Option<remote::RemoteAccessView>,
+    #[serde(default)]
+    service_access: Vec<services::ServiceAccess>,
+    #[serde(default)]
+    service_records: Vec<services::ServiceRecord>,
 }
 
 #[derive(Serialize)]
@@ -658,6 +675,10 @@ impl Coordinator {
             connector_routes: Vec::new(),
             remote: Default::default(),
             public_ingress: false,
+            serve_services: false,
+            service_listen_port: None,
+            service_access: Vec::new(),
+            service_records: Vec::new(),
         })
     }
     pub async fn peers(&self, state: &mut NodeState) -> Result<Vec<Peer>, Error> {
@@ -746,6 +767,8 @@ impl Coordinator {
         state.published_shares = body.shares;
         forward_filter::adopt(&mut state.forward_filter, body.forward_filter);
         state.remote.view = body.remote_access;
+        state.service_access = body.service_access;
+        state.service_records = body.service_records;
         Ok(peers)
     }
 
@@ -951,6 +974,9 @@ fn inventory_query(state: &NodeState) -> [(&'static str, String); 5] {
     capabilities.extend(state.remote.capabilities());
     if state.agent_gateway {
         capabilities.push("agent-gateway".into());
+    }
+    if state.serve_services {
+        capabilities.push(services::CAPABILITY.into());
     }
     let (serial, macs) = hardware_ids();
     if state.public_ingress {
@@ -2850,6 +2876,10 @@ mod tests {
             connector_routes: Vec::new(),
             remote: Default::default(),
             public_ingress: false,
+            serve_services: false,
+            service_listen_port: None,
+            service_access: Vec::new(),
+            service_records: Vec::new(),
         };
         let mut network = RecordingNetwork::default();
         let dir =
@@ -2928,6 +2958,10 @@ mod tests {
             connector_routes: Vec::new(),
             remote: Default::default(),
             public_ingress: false,
+            serve_services: false,
+            service_listen_port: None,
+            service_access: Vec::new(),
+            service_records: Vec::new(),
         };
         apply_org_dns_snapshot(&mut state, None);
         assert_eq!(state.org_dns.as_ref().map(|dns| dns.revision), Some(4));
@@ -3024,6 +3058,8 @@ mod tests {
             shares: vec![],
             forward_filter: None,
             remote_access: None,
+            service_access: vec![],
+            service_records: vec![],
         };
         let merged = Coordinator::apply_control_peers(&current, &body);
         assert_eq!(

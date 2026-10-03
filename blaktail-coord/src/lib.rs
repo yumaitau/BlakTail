@@ -27,6 +27,7 @@ mod private_services;
 mod public_ingress;
 mod remote_access;
 mod resources;
+mod service_serving;
 mod service_users;
 mod shares;
 pub mod tailnet_lock;
@@ -1550,6 +1551,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(dns_workspace::routes())
         .merge(private_services::routes())
         .merge(public_ingress::routes())
+        .merge(service_serving::routes())
         .merge(topology::routes())
         .merge(change_drafts::routes())
         .merge(operations::routes())
@@ -3265,6 +3267,12 @@ struct PeersResponse {
     /// Organisation SSH CA, gateway addresses and job signing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_access: Option<remote_access::AgentView>,
+    /// Present only for a private service's target node: who may connect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    service_access: Vec<service_serving::ServiceAccess>,
+    /// Published private service names this node may resolve and reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    service_records: Vec<service_serving::ServiceRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3578,6 +3586,14 @@ async fn list_peers(
         settings.agent_view(&org, org_dns_revision, &device_tags)
     });
     posture::record_deadline(&s.store.pool, &org, posture.next_deadline(&acl)).await?;
+    let (service_access, service_records) = service_serving::apply_to_peer_map(
+        &s.store.pool,
+        &org,
+        node_id,
+        &serde_json::from_str::<Vec<DeviceTag>>(&source_tags).unwrap_or_default(),
+        &mut peers,
+    )
+    .await?;
     post_quantum::annotate_peers(
         &s.store.pool,
         &org,
@@ -3604,6 +3620,8 @@ async fn list_peers(
         }),
         forward_filter,
         remote_access: Some(remote_access::agent_view(&s, &org, node_id).await?),
+        service_access,
+        service_records,
     }))
 }
 
