@@ -34,3 +34,6 @@ libc = "0.2"
 blaktail-ios-wg = { path = "../blaktail-ios-wg" }
 wintun = "0.4"
 
+
+[dev-dependencies]
+tempfile = "3"
