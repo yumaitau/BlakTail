@@ -38,3 +38,45 @@ Two independent org profiles with overlapping private CIDRs never cross-route or
 - Profiles, split tunnelling, block-inbound and connect-on-startup design and
   implementation were not started; the two-org overlapping-CIDR test remains
   open.
+
+## Status (2 October 2026) — round 2: mobile relay
+
+**Done:**
+- Relay protocol, AU-only ordered selection with back-off/fail-back, the
+  UDP → WSS link ladder and per-peer direct/relay hysteresis moved into a new
+  dependency-free crate `blaktail-relay-proto`, used by `blaktail-relay`,
+  `blaktaild` (selection now wraps it) and the mobile core.
+- `blaktail-ios-wg` exposes it over the C ABI (`blaktail_relay_*`, header
+  updated) and JNI (`NativeTunnel.relay*`). No retained buffers; a few hundred
+  bytes per peer, for the Network Extension memory limit.
+- iPhone: `TunnelSession` passes `relay_endpoints`/token/expiry and peer node
+  ids on every poll, keeps one `NWUDPSession` per relay and a
+  `URLSessionWebSocketTask` for the approved WSS fallback (redirects refused),
+  feeds direct-path receipts back for hysteresis, and answers a provider
+  message with the observed transport. *This iPhone* shows **Path**: Direct,
+  Australian relay, or Australian relay over HTTPS, with peer counts.
+- Android: `TunnelService` refreshes relay settings from the coordinator, runs
+  a protected relay UDP socket and the same Rust decisions; the notification
+  shows the path. UDP relay only (no platform WebSocket client).
+- Profiles, split tunnelling, block-inbound and connect-on-startup were not
+  started in this round.
+
+**Proven by tests:** `blaktail-relay-proto` mobile tests (registration, SEND
+wrapping, FORWARDED only from the active relay and known peers, UDP→WSS and
+back, Android never leaving UDP, failover after silence and probe-gated
+fail-back, token refresh, WSS re-registration stopping once UDP answers);
+`blaktail-ios-wg` C ABI tests; `swift test` for BlakTailCore (relay endpoint
+decoding) and BlakTailPhone (transport status decoding, cleared when
+disconnected); `cargo build -p blaktail-ios-wg --target aarch64-apple-ios-sim`
+and an `xcodebuild` simulator build of the app plus packet tunnel. The JNI
+code passes `cargo clippy --features jni` on the host.
+
+**Still needs live/field proof or a decision:**
+- No physical iPhone or Android run: forced direct-UDP failure across
+  independent NATs, background wake, capability rotation and extension
+  restart are unproven, so there is still no parity claim.
+- Android was **not built**: no Android Rust target or Kotlin/Gradle toolchain
+  on this machine; the Kotlin changes are reviewed, not compiled.
+- Phones do not report a reflexive address or hole-punch, and fail back to a
+  higher-priority relay only via UDP probes.
+- The two-org overlapping-CIDR profile test remains open.

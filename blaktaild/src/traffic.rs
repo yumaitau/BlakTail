@@ -263,10 +263,19 @@ pub fn linux_counts(
     counts
 }
 
+/// Flow-record transport of relayed peers: the relay's current link.
+pub fn relay_transport_label(over_https: bool) -> &'static str {
+    if over_https {
+        "https_relay"
+    } else {
+        "udp_relay"
+    }
+}
+
 /// Flow-record transport for the device-level path summary.
-pub fn transport_label(summary: Option<&str>) -> &'static str {
+pub fn transport_label(summary: Option<&str>, over_https: bool) -> &'static str {
     match summary {
-        Some("relay") => "udp_relay",
+        Some("relay") => relay_transport_label(over_https),
         _ => "direct",
     }
 }
@@ -407,6 +416,7 @@ mod tests {
                 end: 60,
                 transport: "direct",
                 relayed_peers: &[],
+                relay_transport: "udp_relay",
                 sampling_rate: 1.0,
             },
             &counts,
@@ -420,8 +430,10 @@ mod tests {
 
     #[test]
     fn transport_labels_match_the_coordinator() {
-        assert_eq!(transport_label(Some("relay")), "udp_relay");
-        assert_eq!(transport_label(Some("mixed")), "direct");
-        assert_eq!(transport_label(None), "direct");
+        assert_eq!(transport_label(Some("relay"), false), "udp_relay");
+        assert_eq!(transport_label(Some("relay"), true), "https_relay");
+        assert_eq!(transport_label(Some("mixed"), true), "direct");
+        assert_eq!(transport_label(None, false), "direct");
+        assert_eq!(relay_transport_label(true), "https_relay");
     }
 }

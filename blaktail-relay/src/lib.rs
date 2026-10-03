@@ -13,28 +13,13 @@ use tokio::{
     time::interval,
 };
 
-/// Frame types.
-pub const REGISTER: u8 = 1;
-pub const SEND: u8 = 2;
-pub const FORWARDED: u8 = 3;
-/// Reflexive-address probe: [PING][id]; reply is [OBSERVED][id][sockaddr].
-pub const PING: u8 = 4;
-pub const OBSERVED: u8 = 5;
+pub use blaktail_relay_proto::{
+    is_australian_region, observed_frame, parse_observed, EXPIRY_LEN, FORWARDED, HEADER, ID_LEN,
+    MAX_PAYLOAD, MAX_SEND_FRAME, OBSERVED, OBSERVED_FRAME, PING, REGISTER, REGISTER_FRAME, SEND,
+    TOKEN_LEN,
+};
 
-/// OBSERVED reply header: type + id + family(u8) + ip(16) + port(u16 BE).
-pub const OBSERVED_FRAME: usize = 1 + ID_LEN + 1 + 16 + 2;
-
-pub const ID_LEN: usize = 16;
-pub const TOKEN_LEN: usize = 32;
-pub const EXPIRY_LEN: usize = 8;
-/// REGISTER frame: type + node id + token expiry (unix seconds, BE) + HMAC-SHA256 over (id || expiry).
-pub const REGISTER_FRAME: usize = 1 + ID_LEN + EXPIRY_LEN + TOKEN_LEN;
-/// SEND frame header: type + destination id.
-pub const HEADER: usize = 1 + ID_LEN;
-/// Encrypted WireGuard datagram ceiling; covers normal 1,500-byte underlays
-/// while rejecting jumbo or amplification-oriented frames.
-pub const MAX_PAYLOAD: usize = 2_048;
-pub const MAX_SEND_FRAME: usize = HEADER + MAX_PAYLOAD;
+pub mod wss;
 
 const DEFAULT_IDLE_SECS: u64 = 120;
 const DEFAULT_RATE_PER_SEC: u32 = 100;
@@ -43,17 +28,6 @@ const MAX_RATE_BUCKETS: usize = 65_536;
 const SOURCE_RATE_MULTIPLIER: u32 = 10;
 
 type HmacSha256 = Hmac<Sha256>;
-
-pub fn is_australian_region(region: &str) -> bool {
-    matches!(
-        region.trim().to_ascii_lowercase().as_str(),
-        "ap-southeast-2"
-            | "australiaeast"
-            | "australiasoutheast"
-            | "australia-southeast1"
-            | "australia-southeast2"
-    )
-}
 
 #[derive(Clone)]
 pub struct RelayConfig {
@@ -115,22 +89,6 @@ fn verify_token(auth_secret: &[u8], node_id: &[u8], expires_at_unix: u64, token:
     mac.verify_slice(token).is_ok()
 }
 
-/// Parses an OBSERVED reply addressed to `node_id`.
-pub fn parse_observed(frame: &[u8], node_id: &[u8; ID_LEN]) -> Option<SocketAddr> {
-    if frame.len() != OBSERVED_FRAME || frame[0] != OBSERVED || frame[1..HEADER] != node_id[..] {
-        return None;
-    }
-    let octets: [u8; 16] = frame[HEADER + 1..HEADER + 17].try_into().ok()?;
-    let v6 = std::net::Ipv6Addr::from(octets);
-    let ip = match frame[HEADER] {
-        4 => IpAddr::V4(v6.to_ipv4_mapped()?),
-        6 => IpAddr::V6(v6),
-        _ => return None,
-    };
-    let port = u16::from_be_bytes(frame[HEADER + 17..OBSERVED_FRAME].try_into().ok()?);
-    (port != 0).then(|| SocketAddr::new(ip, port))
-}
-
 /// Authenticated reachability probe: REGISTER then PING from a fresh socket,
 /// returning the reflexive address the relay reports. A relay only answers a
 /// PING from a live registration, so a reply proves the relay is up, accepts
@@ -189,8 +147,16 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Where a registered client is reached: a UDP source address, or one
+/// WebSocket connection (the HTTPS fallback, ADR 0004).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PeerAddr {
+    Udp(SocketAddr),
+    Stream(u64),
+}
+
 struct Client {
-    addr: SocketAddr,
+    addr: PeerAddr,
     /// Capability expiry (unix seconds) from the REGISTER token.
     expires_at: u64,
     last_seen: Instant,
@@ -210,6 +176,12 @@ pub struct Metrics {
     pub unknown_destination: std::sync::atomic::AtomicU64,
     pub rate_limited: std::sync::atomic::AtomicU64,
     pub oversized: std::sync::atomic::AtomicU64,
+    /// Frames dropped because a WebSocket client's bounded queue was full.
+    pub stream_queue_full: std::sync::atomic::AtomicU64,
+    /// Open WebSocket relay connections.
+    pub wss_connections: std::sync::atomic::AtomicI64,
+    /// WebSocket connections refused (capacity, bad path, handshake timeout).
+    pub wss_rejected: std::sync::atomic::AtomicU64,
 }
 
 impl Metrics {
@@ -226,7 +198,12 @@ impl Metrics {
              # TYPE blaktail_relay_dropped_total counter\n\
              blaktail_relay_dropped_total{{reason=\"unknown_destination\"}} {}\n\
              blaktail_relay_dropped_total{{reason=\"rate_limited\"}} {}\n\
-             blaktail_relay_dropped_total{{reason=\"oversized\"}} {}\n",
+             blaktail_relay_dropped_total{{reason=\"oversized\"}} {}\n\
+             blaktail_relay_dropped_total{{reason=\"stream_queue_full\"}} {}\n\
+             # TYPE blaktail_relay_wss_connections gauge\n\
+             blaktail_relay_wss_connections {}\n\
+             # TYPE blaktail_relay_wss_rejected_total counter\n\
+             blaktail_relay_wss_rejected_total {}\n",
             self.registers_ok.load(Relaxed),
             self.registers_rejected.load(Relaxed),
             self.forwards.load(Relaxed),
@@ -234,6 +211,9 @@ impl Metrics {
             self.unknown_destination.load(Relaxed),
             self.rate_limited.load(Relaxed),
             self.oversized.load(Relaxed),
+            self.stream_queue_full.load(Relaxed),
+            self.wss_connections.load(Relaxed),
+            self.wss_rejected.load(Relaxed),
         )
     }
 }
@@ -390,6 +370,220 @@ pub async fn serve_with_metrics(
     config: RelayConfig,
     metrics: std::sync::Arc<Metrics>,
 ) -> io::Result<()> {
+    // No stream listener: the sender is dropped, so the channel only closes.
+    let (_, events) = stream_channel();
+    serve_with_streams(socket, config, metrics, events).await
+}
+
+/// Events from WebSocket connections into the single relay task, so UDP and
+/// WSS clients share one registration table and can relay to each other.
+pub enum StreamEvent {
+    Open {
+        id: u64,
+        remote: SocketAddr,
+        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    },
+    Frame {
+        id: u64,
+        frame: Vec<u8>,
+    },
+    Closed {
+        id: u64,
+    },
+}
+
+/// Bounded: a flood of WebSocket frames back-pressures the connection tasks
+/// instead of growing memory.
+pub fn stream_channel() -> (
+    tokio::sync::mpsc::Sender<StreamEvent>,
+    tokio::sync::mpsc::Receiver<StreamEvent>,
+) {
+    tokio::sync::mpsc::channel(1_024)
+}
+
+struct Hub {
+    config: RelayConfig,
+    metrics: std::sync::Arc<Metrics>,
+    clients: HashMap<[u8; ID_LEN], Client>,
+    source_buckets: HashMap<IpAddr, Bucket>,
+    node_buckets: HashMap<[u8; ID_LEN], Bucket>,
+    streams: HashMap<u64, (SocketAddr, tokio::sync::mpsc::Sender<Vec<u8>>)>,
+}
+
+impl Hub {
+    fn remote(&self, peer: PeerAddr) -> Option<SocketAddr> {
+        match peer {
+            PeerAddr::Udp(address) => Some(address),
+            PeerAddr::Stream(id) => self.streams.get(&id).map(|(remote, _)| *remote),
+        }
+    }
+
+    /// Applies one frame from `source`; returns a packet to deliver.
+    fn handle(&mut self, data: &[u8], source: PeerAddr) -> Option<(PeerAddr, Vec<u8>)> {
+        use std::sync::atomic::Ordering::*;
+        let metrics = self.metrics.clone();
+        let source_addr = self.remote(source)?;
+        if !admit(
+            &mut self.source_buckets,
+            source_addr.ip(),
+            self.config
+                .rate_per_sec
+                .saturating_mul(SOURCE_RATE_MULTIPLIER),
+            self.config
+                .rate_burst
+                .saturating_mul(SOURCE_RATE_MULTIPLIER),
+        ) {
+            metrics.rate_limited.fetch_add(1, Relaxed);
+            return None;
+        }
+        let len = data.len();
+        if len < HEADER {
+            metrics.oversized.fetch_add(1, Relaxed);
+            return None;
+        }
+        let mut id = [0u8; ID_LEN];
+        id.copy_from_slice(&data[1..HEADER]);
+        match data[0] {
+            REGISTER => {
+                if len != REGISTER_FRAME {
+                    metrics.registers_rejected.fetch_add(1, Relaxed);
+                    return None;
+                }
+                let mut expiry_bytes = [0u8; EXPIRY_LEN];
+                expiry_bytes.copy_from_slice(&data[HEADER..HEADER + EXPIRY_LEN]);
+                let expires_at = u64::from_be_bytes(expiry_bytes);
+                let token_start = HEADER + EXPIRY_LEN;
+                if !verify_token(
+                    &self.config.auth_secret,
+                    &id,
+                    expires_at,
+                    &data[token_start..len],
+                ) {
+                    metrics.registers_rejected.fetch_add(1, Relaxed);
+                    return None;
+                }
+                // Tokens must still be live at registration time.
+                if expires_at <= unix_now() {
+                    metrics.registers_rejected.fetch_add(1, Relaxed);
+                    return None;
+                }
+                // One UDP source address (or one WebSocket) represents one
+                // enrolled node. Re-registration replaces stale identity there.
+                self.clients
+                    .retain(|known_id, client| *known_id == id || client.addr != source);
+                self.clients.insert(
+                    id,
+                    Client {
+                        addr: source,
+                        expires_at,
+                        last_seen: Instant::now(),
+                    },
+                );
+                metrics.registers_ok.fetch_add(1, Relaxed);
+                None
+            }
+            SEND => {
+                if len > MAX_SEND_FRAME {
+                    metrics.oversized.fetch_add(1, Relaxed);
+                    return None;
+                }
+                // The sender must itself be a live registration.
+                let Some(source_id) = self
+                    .clients
+                    .iter()
+                    .find_map(|(known_id, client)| (client.addr == source).then_some(*known_id))
+                else {
+                    metrics.unknown_destination.fetch_add(1, Relaxed);
+                    return None;
+                };
+                let now = unix_now();
+                if self
+                    .clients
+                    .get(&source_id)
+                    .is_some_and(|client| client.expires_at <= now)
+                {
+                    self.clients.remove(&source_id);
+                    metrics.unknown_destination.fetch_add(1, Relaxed);
+                    return None;
+                }
+                if let Some(client) = self.clients.get_mut(&source_id) {
+                    client.last_seen = Instant::now();
+                }
+                if !admit(
+                    &mut self.node_buckets,
+                    source_id,
+                    self.config.rate_per_sec,
+                    self.config.rate_burst,
+                ) {
+                    metrics.rate_limited.fetch_add(1, Relaxed);
+                    return None;
+                }
+                let Some(destination) = self.clients.get(&id) else {
+                    metrics.unknown_destination.fetch_add(1, Relaxed);
+                    return None;
+                };
+                if destination.expires_at <= now {
+                    self.clients.remove(&id);
+                    metrics.unknown_destination.fetch_add(1, Relaxed);
+                    return None;
+                }
+                let mut packet = Vec::with_capacity(len);
+                packet.push(FORWARDED);
+                packet.extend_from_slice(&source_id);
+                packet.extend_from_slice(&data[HEADER..len]);
+                Some((destination.addr, packet))
+            }
+            PING => {
+                if len != HEADER {
+                    return None;
+                }
+                let registered_source = self
+                    .clients
+                    .get(&id)
+                    .is_some_and(|client| client.addr == source && client.expires_at > unix_now());
+                if !registered_source {
+                    metrics.unknown_destination.fetch_add(1, Relaxed);
+                    return None;
+                }
+                if let Some(client) = self.clients.get_mut(&id) {
+                    client.last_seen = Instant::now();
+                }
+                if !admit(
+                    &mut self.node_buckets,
+                    id,
+                    self.config.rate_per_sec,
+                    self.config.rate_burst,
+                ) {
+                    metrics.rate_limited.fetch_add(1, Relaxed);
+                    return None;
+                }
+                Some((source, observed_frame(&id, source_addr)))
+            }
+            _ => None,
+        }
+    }
+
+    fn reap(&mut self) {
+        let now = unix_now();
+        let idle = Duration::from_secs(self.config.idle_secs);
+        self.clients
+            .retain(|_, client| client.expires_at > now && client.last_seen.elapsed() < idle);
+        let bucket_idle = Duration::from_secs(self.config.idle_secs.max(60));
+        self.source_buckets
+            .retain(|_, bucket| bucket.last_refill.elapsed() < bucket_idle);
+        self.node_buckets
+            .retain(|_, bucket| bucket.last_refill.elapsed() < bucket_idle);
+    }
+}
+
+/// Like [`serve_with_metrics`], also accepting WebSocket clients through
+/// `events` (see [`wss::serve_wss`]).
+pub async fn serve_with_streams(
+    socket: UdpSocket,
+    config: RelayConfig,
+    metrics: std::sync::Arc<Metrics>,
+    mut events: tokio::sync::mpsc::Receiver<StreamEvent>,
+) -> io::Result<()> {
     if config.auth_secret.is_empty() {
         return Err(io::Error::other(
             "refusing to run an unauthenticated relay; set BLAKTAIL_RELAY_AUTH_SECRET",
@@ -401,173 +595,69 @@ pub async fn serve_with_metrics(
         ));
     }
     use std::sync::atomic::Ordering::*;
-    let mut clients: HashMap<[u8; ID_LEN], Client> = HashMap::new();
-    let mut source_buckets: HashMap<IpAddr, Bucket> = HashMap::new();
-    let mut node_buckets: HashMap<[u8; ID_LEN], Bucket> = HashMap::new();
+    let mut reap = interval(Duration::from_secs(config.idle_secs.max(1)));
+    reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut hub = Hub {
+        config,
+        metrics: metrics.clone(),
+        clients: HashMap::new(),
+        source_buckets: HashMap::new(),
+        node_buckets: HashMap::new(),
+        streams: HashMap::new(),
+    };
+    let mut events_open = true;
     // Full-size receive buffer: a smaller buffer would truncate oversize
     // datagrams and let them masquerade as valid frames.
     let mut buf = vec![0u8; 65_535];
-    let mut reap = interval(Duration::from_secs(config.idle_secs.max(1)));
-    reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
+        let outgoing = tokio::select! {
             received = socket.recv_from(&mut buf) => {
                 let (len, source_addr) = received?;
-                if !admit(
-                    &mut source_buckets,
-                    source_addr.ip(),
-                    config.rate_per_sec.saturating_mul(SOURCE_RATE_MULTIPLIER),
-                    config.rate_burst.saturating_mul(SOURCE_RATE_MULTIPLIER),
-                ) {
-                    metrics.rate_limited.fetch_add(1, Relaxed);
-                    continue;
-                }
-                if len < HEADER {
-                    metrics.oversized.fetch_add(1, Relaxed);
-                    continue;
-                }
-                let mut id = [0u8; ID_LEN];
-                id.copy_from_slice(&buf[1..HEADER]);
-                match buf[0] {
-                    REGISTER => {
-                        if len != REGISTER_FRAME {
-                            metrics.registers_rejected.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        let mut expiry_bytes = [0u8; EXPIRY_LEN];
-                        expiry_bytes.copy_from_slice(&buf[HEADER..HEADER + EXPIRY_LEN]);
-                        let expires_at = u64::from_be_bytes(expiry_bytes);
-                        let token_start = HEADER + EXPIRY_LEN;
-                        if !verify_token(&config.auth_secret, &id, expires_at, &buf[token_start..len]) {
-                            metrics.registers_rejected.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        // Tokens must still be live at registration time.
-                        if expires_at <= unix_now() {
-                            metrics.registers_rejected.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        // One UDP source address represents one enrolled node.
-                        // Re-registration replaces stale identity at that address.
-                        clients.retain(|known_id, client| {
-                            *known_id == id || client.addr != source_addr
-                        });
-                        clients.insert(
-                            id,
-                            Client {
-                                addr: source_addr,
-                                expires_at,
-                                last_seen: Instant::now(),
-                            },
-                        );
-                        metrics.registers_ok.fetch_add(1, Relaxed);
-                    }
-                    SEND => {
-                        if len > MAX_SEND_FRAME {
-                            metrics.oversized.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        // The sender must itself be a live registration.
-                        let Some(source_id) = clients
-                            .iter()
-                            .find_map(|(known_id, client)| {
-                                (client.addr == source_addr).then_some(*known_id)
-                            })
-                        else {
-                            metrics.unknown_destination.fetch_add(1, Relaxed);
-                            continue;
-                        };
-                        let now = unix_now();
-                        if clients
-                            .get(&source_id)
-                            .is_some_and(|source| source.expires_at <= now)
-                        {
-                            clients.remove(&source_id);
-                            metrics.unknown_destination.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        if let Some(source) = clients.get_mut(&source_id) {
-                            source.last_seen = Instant::now();
-                        }
-                        if !admit(
-                            &mut node_buckets,
-                            source_id,
-                            config.rate_per_sec,
-                            config.rate_burst,
-                        ) {
-                            metrics.rate_limited.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        let Some(destination) = clients.get(&id) else {
-                            metrics.unknown_destination.fetch_add(1, Relaxed);
-                            continue;
-                        };
-                        if destination.expires_at <= now {
-                            clients.remove(&id);
-                            metrics.unknown_destination.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        let mut packet = Vec::with_capacity(len);
-                        packet.push(FORWARDED);
-                        packet.extend_from_slice(&source_id);
-                        packet.extend_from_slice(&buf[HEADER..len]);
-                        if socket.send_to(&packet, destination.addr).await? == packet.len() {
-                            metrics.forwards.fetch_add(1, Relaxed);
-                            metrics.bytes_relayed.fetch_add(packet.len() as u64, Relaxed);
-                        }
-                    }
-                    PING => {
-                        if len != HEADER {
-                            continue;
-                        }
-                        let registered_source = clients.get(&id).is_some_and(|client| {
-                            client.addr == source_addr && client.expires_at > unix_now()
-                        });
-                        if !registered_source {
-                            metrics.unknown_destination.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        if let Some(client) = clients.get_mut(&id) {
-                            client.last_seen = Instant::now();
-                        }
-                        if !admit(
-                            &mut node_buckets,
-                            id,
-                            config.rate_per_sec,
-                            config.rate_burst,
-                        ) {
-                            metrics.rate_limited.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        let mut packet = Vec::with_capacity(OBSERVED_FRAME);
-                        packet.push(OBSERVED);
-                        packet.extend_from_slice(&id);
-                        match source_addr.ip() {
-                            IpAddr::V4(v4) => {
-                                packet.push(4);
-                                packet.extend_from_slice(&v4.to_ipv6_mapped().octets());
-                            }
-                            IpAddr::V6(v6) => {
-                                packet.push(6);
-                                packet.extend_from_slice(&v6.octets());
-                            }
-                        }
-                        packet.extend_from_slice(&source_addr.port().to_be_bytes());
-                        let _ = socket.send_to(&packet, source_addr).await;
-                    }
-                    _ => {}
-                }
+                hub.handle(&buf[..len], PeerAddr::Udp(source_addr))
             }
+            event = events.recv(), if events_open => match event {
+                Some(StreamEvent::Open { id, remote, tx }) => {
+                    hub.streams.insert(id, (remote, tx));
+                    None
+                }
+                Some(StreamEvent::Frame { id, frame }) => hub.handle(&frame, PeerAddr::Stream(id)),
+                Some(StreamEvent::Closed { id }) => {
+                    hub.streams.remove(&id);
+                    hub.clients.retain(|_, client| client.addr != PeerAddr::Stream(id));
+                    None
+                }
+                None => {
+                    events_open = false;
+                    None
+                }
+            },
             _ = reap.tick() => {
-                let now = unix_now();
-                clients.retain(|_, client| {
-                    client.expires_at > now
-                        && client.last_seen.elapsed() < Duration::from_secs(config.idle_secs)
-                });
-                let bucket_idle = Duration::from_secs(config.idle_secs.max(60));
-                source_buckets.retain(|_, bucket| bucket.last_refill.elapsed() < bucket_idle);
-                node_buckets.retain(|_, bucket| bucket.last_refill.elapsed() < bucket_idle);
+                hub.reap();
+                None
             }
+        };
+        let Some((destination, packet)) = outgoing else {
+            continue;
+        };
+        let is_forward = packet[0] == FORWARDED;
+        let packet_len = packet.len();
+        let delivered = match destination {
+            PeerAddr::Udp(address) => socket.send_to(&packet, address).await? == packet_len,
+            PeerAddr::Stream(id) => match hub.streams.get(&id) {
+                Some((_, tx)) => match tx.try_send(packet) {
+                    Ok(()) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        metrics.stream_queue_full.fetch_add(1, Relaxed);
+                        false
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                },
+                None => false,
+            },
+        };
+        if delivered && is_forward {
+            metrics.forwards.fetch_add(1, Relaxed);
+            metrics.bytes_relayed.fetch_add(packet_len as u64, Relaxed);
         }
     }
 }

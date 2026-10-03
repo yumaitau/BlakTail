@@ -56,3 +56,49 @@ the health-view relay probe assertions.
 - Relay region is the operator's declaration; physical placement cannot be
   verified by software. Relay capacity, draining and per-org quotas beyond the
   existing per-source/per-node rate limits are not designed yet.
+
+## Status (2 October 2026) — round 2: HTTPS fallback and lab proof
+
+**Done:**
+- ADR 0004 accepted and built: `blaktail-relay` serves the same frames as
+  binary WebSocket messages over TLS (`blaktail_relay::wss`), sharing the UDP
+  registration table, capability tokens and rate limits. Bounded frames,
+  64-frame per-connection queue, 10 s handshake/write timeouts, 50 s idle
+  close with 20 s pings (ALB-compatible), 4,096-connection cap, path check,
+  text frames refused; plain-WebSocket mode only behind a TLS-terminating
+  balancer. New metrics for WSS connections, rejections and queue drops.
+- Coordinator: relay entries take `;wss=wss://…`; the URL is advertised only
+  if `https_fallback::approved_endpoint` accepts it (`.au`, TLS, no
+  credentials). Config validation rejects other suffixes.
+- Clients (`blaktaild`, iPhone): UDP → WSS after three silent UDP probe rounds,
+  back after three answered rounds; redirects never followed; optional HTTP
+  CONNECT proxy with credentials from env/file only (never argv or logs);
+  private CA via `BLAKTAIL_RELAY_WSS_CA_FILE`. `status --json` reports
+  `relay_link` (`udp`/`wss`); the coordinator heartbeat keeps the `relay`
+  vocabulary.
+- Relay health window shortened from 75 s to 50 s (probe rounds are 25 s, 5 s
+  after a miss).
+- Self-contained lab harness `deploy/homelab/relay-lab.sh`; `prove-relay-nat.sh`
+  and `prove-relay-failover.sh` rewritten onto it (they depended on the
+  homelab stack and SSH) and new `prove-relay-wss.sh`. All three passed on
+  `m3-max`; results in `docs/relay.md`.
+
+**Proven by tests:** relay `wss::tests` (UDP↔WSS over TLS, untrusted cert
+refused, WSS↔WSS with forged token refused and registration dropped on
+close, oversized/text frames close, slowloris/wrong path/connection cap,
+idle close, full queue drops, redirect not followed, CONNECT proxy 407 then
+success with credentials, proxy settings from env/file, URL policy);
+`blaktaild` `blocked_udp_falls_back_to_wss_relay`; proto ladder/selection
+tests; config and coordinator WSS-URL approval tests. Lab: direct UDP dropped
+→ relay in 54 s; all UDP dropped → WSS in 52–55 s with only TLS/443 on the
+wire, promotion back in 111–124 s; failover with first ping after 71 s and
+fail-back in 48 s.
+
+**Still needs live/field proof or a decision:**
+- Independent-ISP, symmetric-NAT, mobile-switch and IPv6 runs (#24); a real
+  inspecting corporate proxy; an ALB-fronted WSS relay; packet-capture
+  no-leak review by someone other than the author.
+- Failover interruption is ~70 s on one host; whether that is acceptable, or
+  needs a faster health signal, is a product decision.
+- Relay capacity, draining and per-org quotas are still not designed; behind
+  an ALB the per-source limit sees the balancer address.

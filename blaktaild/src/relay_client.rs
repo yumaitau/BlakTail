@@ -3,36 +3,42 @@
 //! socket; encrypted datagrams are then carried through the BlakTail relay
 //! inside REGISTER/SEND/FORWARDED frames. WireGuard sees an ordinary localhost
 //! endpoint, so the tunnel layer does not change.
+//!
+//! Relay frames normally travel over UDP. When the relay advertises a
+//! coordinator-approved `wss://` endpoint and UDP probes go unanswered for
+//! three rounds, the same frames move to a WebSocket over TLS (ADR 0004);
+//! UDP probing continues and three answered rounds promote back to UDP.
 
+use blaktail_relay::wss::{ClientOptions, WssLink};
+pub use blaktail_relay_proto::{
+    hex_decode, DIRECT, FORWARDED, ID_LEN, OBSERVED, PING, PUNCH, PUNCH_ACK, REGISTER, SEND,
+    TOKEN_LEN,
+};
+use blaktail_relay_proto::{
+    ladder::{Link, LinkLadder},
+    parse_observed, HEADER, MAX_PAYLOAD,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{net::UdpSocket, sync::Notify, task::AbortHandle};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, Notify},
+    task::AbortHandle,
+};
 use uuid::Uuid;
 
-pub const REGISTER: u8 = 1;
-pub const SEND: u8 = 2;
-pub const FORWARDED: u8 = 3;
-pub const PING: u8 = 4;
-pub const OBSERVED: u8 = 5;
-pub const DIRECT: u8 = 6;
-pub const PUNCH: u8 = 7;
-pub const PUNCH_ACK: u8 = 8;
-pub const ID_LEN: usize = 16;
-pub const TOKEN_LEN: usize = 32;
-const HEADER: usize = 1 + ID_LEN;
-const OBSERVED_FRAME: usize = HEADER + 1 + 16 + 2;
-const MAX_PAYLOAD: usize = 2_048;
-/// Must stay below relay's default 120-second idle timeout.
-const KEEPALIVE_SECS: u64 = 30;
 const DIRECT_REACHABLE_SECS: u64 = 5;
 const RELAY_STARTUP_GRACE_SECS: u64 = 10;
-const RELAY_HEALTH_SECS: u64 = 75;
+/// With a WSS fallback the relay may need three silent UDP rounds plus a
+/// TLS connect before it first answers.
+const RELAY_STARTUP_GRACE_WITH_WSS_SECS: u64 = 35;
+const RELAY_HEALTH_SECS: u64 = blaktail_relay_proto::ladder::RELAY_HEALTH.as_secs();
 
 struct Creds {
     token_raw: Vec<u8>,
@@ -62,6 +68,19 @@ impl Transport {
     }
 }
 
+/// The optional HTTPS fallback for this relay.
+#[derive(Clone)]
+pub struct WssFallback {
+    pub url: String,
+    pub options: ClientOptions,
+}
+
+struct LinkState {
+    ladder: LinkLadder,
+    wss: Option<WssLink>,
+    connecting: bool,
+}
+
 struct Shared {
     relay_addr: SocketAddr,
     /// The address our WireGuard implementation listens on; incoming relayed
@@ -74,10 +93,43 @@ struct Shared {
     /// endpoint. Outgoing WG datagrams arrive here; we wrap and forward them.
     forwarders: Mutex<HashMap<Uuid, Forwarder>>,
     relay_socket: Arc<UdpSocket>,
-    observed_endpoint: Mutex<Option<(SocketAddr, std::time::Instant)>>,
-    started_at: std::time::Instant,
+    /// Reflexive UDP address reported by the relay (never a WSS/TCP one).
+    observed_endpoint: Mutex<Option<(SocketAddr, Instant)>>,
+    /// Last authenticated OBSERVED reply over any link.
+    relay_seen: Mutex<Option<Instant>>,
+    fallback: Option<WssFallback>,
+    link: Mutex<LinkState>,
+    wss_inbound: mpsc::Sender<Vec<u8>>,
+    started_at: Instant,
     stopped: AtomicBool,
     stop_notify: Notify,
+}
+
+impl Shared {
+    fn link(&self) -> Link {
+        self.link
+            .lock()
+            .map(|state| state.ladder.link())
+            .unwrap_or(Link::Udp)
+    }
+
+    /// Sends one relay frame over the current link. On WSS the frame is
+    /// queued (bounded; dropped when full, as UDP would drop it).
+    async fn send_to_relay(&self, frame: Vec<u8>) -> io::Result<()> {
+        let frame = match self.link.lock() {
+            Ok(state) if state.ladder.link() == Link::Wss => {
+                if let Some(wss) = state.wss.as_ref().filter(|wss| !wss.is_closed()) {
+                    wss.send(frame);
+                }
+                return Ok(());
+            }
+            _ => frame,
+        };
+        self.relay_socket
+            .send_to(&frame, self.relay_addr)
+            .await
+            .map(|_| ())
+    }
 }
 
 #[derive(Clone)]
@@ -96,6 +148,26 @@ impl RelayMesh {
         relay_expires_at_unix: u64,
         fwmark: Option<u32>,
     ) -> io::Result<Self> {
+        Self::spawn_with_fallback(
+            relay_addr,
+            wg_listen,
+            self_id,
+            relay_token_hex,
+            relay_expires_at_unix,
+            fwmark,
+            None,
+        )
+    }
+
+    pub fn spawn_with_fallback(
+        relay_addr: SocketAddr,
+        wg_listen: SocketAddr,
+        self_id: Uuid,
+        relay_token_hex: &str,
+        relay_expires_at_unix: u64,
+        fwmark: Option<u32>,
+        fallback: Option<WssFallback>,
+    ) -> io::Result<Self> {
         let token_raw = hex_decode(relay_token_hex)
             .ok_or_else(|| io::Error::other("relay token is not valid hex"))?;
         if token_raw.len() != TOKEN_LEN {
@@ -110,6 +182,7 @@ impl RelayMesh {
         set_fwmark(&std_socket, fwmark)?;
         std_socket.set_nonblocking(true)?;
         let relay_socket = Arc::new(UdpSocket::from_std(std_socket)?);
+        let (wss_inbound, wss_frames) = mpsc::channel(256);
         let shared = Arc::new(Shared {
             relay_addr,
             wg_listen,
@@ -121,30 +194,110 @@ impl RelayMesh {
             forwarders: Mutex::new(HashMap::new()),
             relay_socket,
             observed_endpoint: Mutex::new(None),
-            started_at: std::time::Instant::now(),
+            relay_seen: Mutex::new(None),
+            link: Mutex::new(LinkState {
+                ladder: LinkLadder::new(fallback.is_some()),
+                wss: None,
+                connecting: false,
+            }),
+            fallback,
+            wss_inbound,
+            started_at: Instant::now(),
             stopped: AtomicBool::new(false),
             stop_notify: Notify::new(),
         });
         let mesh = Self { shared };
-        tokio::spawn(mesh.clone().run());
+        tokio::spawn(mesh.clone().run(wss_frames));
         Ok(mesh)
     }
 
-    async fn run(self) {
-        if let Some(frame) = self.register_frame() {
+    /// Sends REGISTER + PING: always over UDP (the probe that drives the
+    /// ladder), and over the WebSocket too while it carries traffic and UDP
+    /// is still unanswered (see `LinkLadder::udp_proven`).
+    async fn register_and_ping(&self) {
+        let frames = [self.register_frame(), Some(self.ping_frame())];
+        for frame in frames.iter().flatten() {
             let _ = self
                 .shared
                 .relay_socket
-                .send_to(&frame, self.shared.relay_addr)
+                .send_to(frame, self.shared.relay_addr)
                 .await;
         }
-        let _ = self
-            .shared
-            .relay_socket
-            .send_to(&self.ping_frame(), self.shared.relay_addr)
-            .await;
-        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
-        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        if let Ok(state) = self.shared.link.lock() {
+            if state.ladder.link() == Link::Wss && !state.ladder.udp_proven() {
+                if let Some(wss) = state.wss.as_ref() {
+                    for frame in frames.iter().flatten() {
+                        wss.send(frame.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closes a probe round; opens or drops the WebSocket to match the
+    /// ladder. Returns how long the next round lasts.
+    fn end_round(&self) -> Duration {
+        let Ok(mut state) = self.shared.link.lock() else {
+            return blaktail_relay_proto::ladder::STEADY_ROUND;
+        };
+        let before = state.ladder.link();
+        let link = state.ladder.end_round();
+        if before != link {
+            tracing::info!(
+                relay = %self.shared.relay_addr,
+                transport = link.transport_label(),
+                "relay link changed"
+            );
+        }
+        match link {
+            Link::Udp => state.wss = None,
+            Link::Wss => {
+                let needs_connect =
+                    state.wss.as_ref().is_none_or(WssLink::is_closed) && !state.connecting;
+                if needs_connect {
+                    if let Some(fallback) = self.shared.fallback.clone() {
+                        state.connecting = true;
+                        let mesh = self.clone();
+                        tokio::spawn(async move { mesh.connect_wss(fallback).await });
+                    }
+                }
+            }
+        }
+        state.ladder.round_length()
+    }
+
+    async fn connect_wss(self, fallback: WssFallback) {
+        let connected = blaktail_relay::wss::connect(&fallback.url, &fallback.options).await;
+        let link = match connected {
+            Ok(ws) => Some(WssLink::spawn(ws, self.shared.wss_inbound.clone())),
+            Err(error) => {
+                tracing::warn!(%error, "relay WebSocket fallback connect failed");
+                None
+            }
+        };
+        let connected = link.is_some();
+        if let Ok(mut state) = self.shared.link.lock() {
+            state.connecting = false;
+            if state.ladder.link() == Link::Wss {
+                state.wss = link;
+            }
+        }
+        if connected {
+            self.register_and_ping().await;
+        }
+    }
+
+    async fn run(self, mut wss_frames: mpsc::Receiver<Vec<u8>>) {
+        self.register_and_ping().await;
+        let round = tokio::time::sleep(
+            self.shared
+                .link
+                .lock()
+                .map_or(blaktail_relay_proto::ladder::FAST_ROUND, |state| {
+                    state.ladder.round_length()
+                }),
+        );
+        tokio::pin!(round);
         let mut buf = vec![0u8; 65_535];
         loop {
             if self
@@ -157,119 +310,115 @@ impl RelayMesh {
             tokio::select! {
                 received = self.shared.relay_socket.recv_from(&mut buf) => {
                     let (len, source) = match received { Ok(r) => r, Err(_) => return };
-                    if len < HEADER {
-                        continue;
-                    }
-                    let mut source_id = [0u8; ID_LEN];
-                    source_id.copy_from_slice(&buf[1..HEADER]);
-                    if source == self.shared.relay_addr && buf[0] == OBSERVED {
-                        if let Some(endpoint) = self.parse_observed(&buf[..len]) {
-                            if let Ok(mut observed) = self.shared.observed_endpoint.lock() {
-                                *observed = Some((endpoint, std::time::Instant::now()));
-                            }
-                        }
-                        continue;
-                    }
-                    let Ok(source_peer) = Uuid::from_slice(&source_id) else { continue };
-                    let Some((socket, transport, punch_nonce, last_punch_ack)) = self.shared.forwarders.lock().ok()
-                        .and_then(|forwarders| forwarders.get(&source_peer).map(|forwarder| {
-                            (
-                                forwarder.socket.clone(),
-                                forwarder.transport.clone(),
-                                forwarder.punch_nonce,
-                                forwarder.last_punch_ack.clone(),
-                            )
-                        })) else {
-                        continue;
-                    };
-                    let payload = if source == self.shared.relay_addr
-                        && buf[0] == FORWARDED
-                        && len <= HEADER + MAX_PAYLOAD
-                    {
-                        Some(&buf[HEADER..len])
-                    } else if matches!(buf[0], DIRECT | PUNCH | PUNCH_ACK) {
-                        let expected = transport.lock().ok().and_then(|mode| mode.candidate());
-                        if expected != Some(source) {
-                            continue;
-                        }
-                        match buf[0] {
-                            DIRECT if len <= HEADER + MAX_PAYLOAD => Some(&buf[HEADER..len]),
-                            PUNCH if len == HEADER + 8 => {
-                                let mut ack = vec![PUNCH_ACK];
-                                ack.extend_from_slice(&self.shared.self_id);
-                                ack.extend_from_slice(&buf[HEADER..len]);
-                                let _ = self.shared.relay_socket.send_to(&ack, source).await;
-                                None
-                            }
-                            PUNCH_ACK if len == HEADER + 8 => {
-                                let received_nonce = u64::from_be_bytes(
-                                    buf[HEADER..len].try_into().expect("length checked")
-                                );
-                                if received_nonce == punch_nonce {
-                                    if let Ok(mut last_ack) = last_punch_ack.lock() {
-                                        *last_ack = Some((source, std::time::Instant::now()));
-                                    }
-                                }
-                                None
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(payload) = payload {
-                        // Inject with forwarder socket as source so WireGuard
-                        // sees the configured localhost peer endpoint.
-                        let _ = socket.send_to(payload, self.shared.wg_listen).await;
-                    }
+                    let from_relay = source == self.shared.relay_addr;
+                    self.handle_frame(&buf[..len], source, from_relay, Link::Udp).await;
                 }
-                _ = keepalive.tick() => {
-                    if let Some(frame) = self.register_frame() {
-                        let _ = self.shared.relay_socket.send_to(&frame, self.shared.relay_addr).await;
-                    }
-                    let _ = self.shared.relay_socket.send_to(&self.ping_frame(), self.shared.relay_addr).await;
+                frame = wss_frames.recv() => {
+                    let Some(frame) = frame else { continue };
+                    // WSS frames come only from the relay over TLS.
+                    self.handle_frame(&frame, self.shared.relay_addr, true, Link::Wss).await;
+                }
+                _ = &mut round => {
+                    let next = self.end_round();
+                    round.as_mut().reset(tokio::time::Instant::now() + next);
+                    self.register_and_ping().await;
                 }
                 _ = self.shared.stop_notify.notified() => return,
             }
         }
     }
 
+    async fn handle_frame(&self, frame: &[u8], source: SocketAddr, from_relay: bool, link: Link) {
+        let len = frame.len();
+        if len < HEADER {
+            return;
+        }
+        if from_relay && frame[0] == OBSERVED {
+            if let Some(endpoint) = parse_observed(frame, &self.shared.self_id) {
+                let now = Instant::now();
+                if let Ok(mut seen) = self.shared.relay_seen.lock() {
+                    *seen = Some(now);
+                }
+                if link == Link::Udp {
+                    if let Ok(mut observed) = self.shared.observed_endpoint.lock() {
+                        *observed = Some((endpoint, now));
+                    }
+                    if let Ok(mut state) = self.shared.link.lock() {
+                        state.ladder.udp_answered();
+                    }
+                }
+            }
+            return;
+        }
+        let mut source_id = [0u8; ID_LEN];
+        source_id.copy_from_slice(&frame[1..HEADER]);
+        let Ok(source_peer) = Uuid::from_slice(&source_id) else {
+            return;
+        };
+        let Some((socket, transport, punch_nonce, last_punch_ack)) =
+            self.shared.forwarders.lock().ok().and_then(|forwarders| {
+                forwarders.get(&source_peer).map(|forwarder| {
+                    (
+                        forwarder.socket.clone(),
+                        forwarder.transport.clone(),
+                        forwarder.punch_nonce,
+                        forwarder.last_punch_ack.clone(),
+                    )
+                })
+            })
+        else {
+            return;
+        };
+        let payload = if from_relay && frame[0] == FORWARDED && len <= HEADER + MAX_PAYLOAD {
+            Some(&frame[HEADER..len])
+        } else if link == Link::Udp && matches!(frame[0], DIRECT | PUNCH | PUNCH_ACK) {
+            let expected = transport.lock().ok().and_then(|mode| mode.candidate());
+            if expected != Some(source) {
+                return;
+            }
+            match frame[0] {
+                DIRECT if len <= HEADER + MAX_PAYLOAD => Some(&frame[HEADER..len]),
+                PUNCH if len == HEADER + 8 => {
+                    let mut ack = vec![PUNCH_ACK];
+                    ack.extend_from_slice(&self.shared.self_id);
+                    ack.extend_from_slice(&frame[HEADER..len]);
+                    let _ = self.shared.relay_socket.send_to(&ack, source).await;
+                    None
+                }
+                PUNCH_ACK if len == HEADER + 8 => {
+                    let received_nonce =
+                        u64::from_be_bytes(frame[HEADER..len].try_into().expect("length checked"));
+                    if received_nonce == punch_nonce {
+                        if let Ok(mut last_ack) = last_punch_ack.lock() {
+                            *last_ack = Some((source, Instant::now()));
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(payload) = payload {
+            // Inject with forwarder socket as source so WireGuard sees the
+            // configured localhost peer endpoint.
+            let _ = socket.send_to(payload, self.shared.wg_listen).await;
+        }
+    }
+
     fn register_frame(&self) -> Option<Vec<u8>> {
         let creds = self.shared.creds.lock().ok()?;
-        let expiry = creds.expires_at_unix;
-        let mut frame = vec![REGISTER];
-        frame.extend_from_slice(&self.shared.self_id);
-        frame.extend_from_slice(&expiry.to_be_bytes());
-        frame.extend_from_slice(&creds.token_raw);
-        Some(frame)
+        let token: [u8; TOKEN_LEN] = creds.token_raw.as_slice().try_into().ok()?;
+        Some(blaktail_relay_proto::register_frame(
+            &self.shared.self_id,
+            creds.expires_at_unix,
+            &token,
+        ))
     }
 
     fn ping_frame(&self) -> Vec<u8> {
-        let mut frame = vec![PING];
-        frame.extend_from_slice(&self.shared.self_id);
-        frame
-    }
-
-    fn parse_observed(&self, frame: &[u8]) -> Option<SocketAddr> {
-        if frame.len() != OBSERVED_FRAME
-            || frame[0] != OBSERVED
-            || frame[1..HEADER] != self.shared.self_id
-        {
-            return None;
-        }
-        let ip_bytes: [u8; 16] = frame[HEADER + 1..HEADER + 17].try_into().ok()?;
-        let ip = match frame[HEADER] {
-            4 => IpAddr::V4(Ipv4Addr::new(
-                ip_bytes[12],
-                ip_bytes[13],
-                ip_bytes[14],
-                ip_bytes[15],
-            )),
-            6 => IpAddr::V6(Ipv6Addr::from(ip_bytes)),
-            _ => return None,
-        };
-        let port = u16::from_be_bytes(frame[HEADER + 17..OBSERVED_FRAME].try_into().ok()?);
-        (port != 0).then(|| SocketAddr::new(ip, port))
+        blaktail_relay_proto::ping_frame(&self.shared.self_id)
     }
 
     pub fn observed_endpoint(&self) -> Option<SocketAddr> {
@@ -285,14 +434,24 @@ impl RelayMesh {
         self.shared.relay_addr
     }
 
+    /// `relay` or `relay-wss`: the link currently carrying relay frames.
+    pub fn transport_label(&self) -> &'static str {
+        self.shared.link().transport_label()
+    }
+
     pub fn relay_healthy(&self) -> bool {
+        let grace = if self.shared.fallback.is_some() {
+            RELAY_STARTUP_GRACE_WITH_WSS_SECS
+        } else {
+            RELAY_STARTUP_GRACE_SECS
+        };
         self.shared
-            .observed_endpoint
+            .relay_seen
             .lock()
             .ok()
-            .and_then(|observed| *observed)
-            .is_some_and(|(_, seen)| seen.elapsed() < Duration::from_secs(RELAY_HEALTH_SECS))
-            || self.shared.started_at.elapsed() < Duration::from_secs(RELAY_STARTUP_GRACE_SECS)
+            .and_then(|seen| *seen)
+            .is_some_and(|seen| seen.elapsed() < Duration::from_secs(RELAY_HEALTH_SECS))
+            || self.shared.started_at.elapsed() < Duration::from_secs(grace)
     }
 
     /// Ensures a localhost forwarder exists for `peer_id`; returns the local
@@ -333,17 +492,23 @@ impl RelayMesh {
                             Ok(mode) => *mode,
                             Err(_) => return,
                         };
-                        let (opcode, id, destination) = match mode {
-                            Transport::Relay(_) => (SEND, *peer_id.as_bytes(), shared.relay_addr),
-                            Transport::Direct(candidate) => {
-                                (DIRECT, shared.self_id, candidate)
-                            }
+                        let (opcode, id) = match mode {
+                            Transport::Relay(_) => (SEND, *peer_id.as_bytes()),
+                            Transport::Direct(_) => (DIRECT, shared.self_id),
                         };
                         let mut frame = Vec::with_capacity(HEADER + len);
                         frame.push(opcode);
                         frame.extend_from_slice(&id);
                         frame.extend_from_slice(&buf[..len]);
-                        if shared.relay_socket.send_to(&frame, destination).await.is_err() {
+                        let sent = match mode {
+                            Transport::Relay(_) => shared.send_to_relay(frame).await,
+                            Transport::Direct(candidate) => shared
+                                .relay_socket
+                                .send_to(&frame, candidate)
+                                .await
+                                .map(|_| ()),
+                        };
+                        if sent.is_err() {
                             return;
                         }
                     }
@@ -521,16 +686,6 @@ fn set_fwmark(_socket: &std::net::UdpSocket, _fwmark: Option<u32>) -> io::Result
     Ok(())
 }
 
-pub fn hex_decode(input: &str) -> Option<Vec<u8>> {
-    if !input.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..input.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&input[i..i + 2], 16).ok())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +704,97 @@ mod tests {
             node.as_bytes(),
             expires_at,
         ))
+    }
+
+    /// UDP to the relay is black-holed (as behind a firewall that drops
+    /// UDP): after three silent probe rounds both meshes move to the WSS
+    /// fallback of the same relay process and traffic flows again.
+    #[tokio::test]
+    async fn blocked_udp_falls_back_to_wss_relay() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_port = listener.local_addr().unwrap().port();
+        let metrics = Arc::new(blaktail_relay::Metrics::default());
+        let (events_tx, events_rx) = blaktail_relay::stream_channel();
+        let relay_task = tokio::spawn(blaktail_relay::serve_with_streams(
+            relay,
+            blaktail_relay::RelayConfig {
+                auth_secret: secret(),
+                ..blaktail_relay::RelayConfig::default()
+            },
+            metrics.clone(),
+            events_rx,
+        ));
+        let wss_task = tokio::spawn(blaktail_relay::wss::serve_wss(
+            listener,
+            blaktail_relay::wss::WssServerConfig::default(),
+            events_tx,
+            metrics.clone(),
+        ));
+        // Swallows every UDP datagram: the relay never answers over UDP.
+        let black_hole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let blocked_addr = black_hole.local_addr().unwrap();
+        let fallback = WssFallback {
+            url: format!("ws://127.0.0.1:{ws_port}/v1/relay"),
+            options: ClientOptions::default(),
+        };
+        let node_a = Uuid::from_u128(1);
+        let node_b = Uuid::from_u128(2);
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let wg_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let wg_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let spawn = |node: Uuid, wg: SocketAddr| {
+            RelayMesh::spawn_with_fallback(
+                blocked_addr,
+                wg,
+                node,
+                &capability(node, expires, &secret()),
+                expires,
+                None,
+                Some(fallback.clone()),
+            )
+            .unwrap()
+        };
+        let mesh_a = spawn(node_a, wg_a.local_addr().unwrap());
+        let mesh_b = spawn(node_b, wg_b.local_addr().unwrap());
+        assert_eq!(mesh_a.transport_label(), "relay");
+        assert!(mesh_a.relay_healthy(), "startup grace covers the ladder");
+        let port_b = mesh_a.ensure_forwarder(node_b).await.unwrap();
+        let port_a = mesh_b.ensure_forwarder(node_a).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let mut buf = [0u8; 128];
+        let delivered = loop {
+            assert!(tokio::time::Instant::now() < deadline, "no WSS fallback");
+            wg_a.send_to(b"over-wss", format!("127.0.0.1:{port_b}"))
+                .await
+                .unwrap();
+            if let Ok(Ok((len, source))) =
+                tokio::time::timeout(Duration::from_millis(500), wg_b.recv_from(&mut buf)).await
+            {
+                break (buf[..len].to_vec(), source);
+            }
+        };
+        assert_eq!(delivered.0, b"over-wss");
+        assert_eq!(delivered.1.port(), port_a);
+        assert_eq!(mesh_a.transport_label(), "relay-wss");
+        assert_eq!(mesh_b.transport_label(), "relay-wss");
+        assert!(mesh_a.relay_healthy());
+        // A WSS (TCP) observation is never reported as a UDP reflexive endpoint.
+        assert_eq!(mesh_a.observed_endpoint(), None);
+        assert!(metrics
+            .render()
+            .contains("blaktail_relay_wss_connections 2"));
+
+        mesh_a.stop();
+        mesh_b.stop();
+        relay_task.abort();
+        wss_task.abort();
+        drop(black_hole);
     }
 
     #[tokio::test]
@@ -753,7 +999,12 @@ mod tests {
 
     #[test]
     fn registration_keepalive_precedes_default_idle_reap() {
-        assert!(KEEPALIVE_SECS < blaktail_relay::RelayConfig::default().idle_secs);
+        assert!(
+            blaktail_relay_proto::ladder::STEADY_ROUND.as_secs()
+                < blaktail_relay::RelayConfig::default().idle_secs
+        );
+        // Also below the 60-second idle timeout of an ALB in front of WSS.
+        assert!(blaktail_relay_proto::ladder::STEADY_ROUND.as_secs() < 60);
         assert_eq!(MAX_PAYLOAD, blaktail_relay::MAX_PAYLOAD);
     }
 

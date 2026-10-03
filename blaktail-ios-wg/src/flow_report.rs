@@ -128,9 +128,12 @@ pub struct Bucket<'a> {
     pub end: i64,
     /// `direct`, `udp_relay` or `https_relay`.
     pub transport: &'a str,
-    /// Peers currently reached through a UDP relay; their records say
-    /// `udp_relay` whatever `transport` is.
+    /// Peers currently reached through a relay; their records say
+    /// `relay_transport` whatever `transport` is.
     pub relayed_peers: &'a [String],
+    /// `udp_relay`, or `https_relay` while the relay link is the WebSocket
+    /// fallback.
+    pub relay_transport: &'a str,
     pub sampling_rate: f64,
 }
 
@@ -181,7 +184,7 @@ pub fn build(bucket: &Bucket<'_>, counts: &[FlowCount]) -> Upload {
                     .as_ref()
                     .is_some_and(|peer| bucket.relayed_peers.contains(peer))
                 {
-                    "udp_relay".to_owned()
+                    bucket.relay_transport.to_owned()
                 } else {
                     bucket.transport.to_owned()
                 },
@@ -222,6 +225,7 @@ mod tests {
             end: 1_060,
             transport: "direct",
             relayed_peers: &[],
+            relay_transport: "udp_relay",
             sampling_rate: rate,
         }
     }
@@ -279,6 +283,27 @@ mod tests {
                 assert!(allowed.contains(&key.as_str()), "unexpected field {key}");
             }
         }
+    }
+
+    #[test]
+    fn relayed_peers_carry_the_relay_link() {
+        let relayed = ["11111111-1111-1111-1111-111111111111".to_owned()];
+        let mut over_https = bucket(1.0);
+        over_https.relayed_peers = &relayed;
+        over_https.relay_transport = "https_relay";
+        let mut other = count("tcp", 22, true);
+        other.peer_id = Some("22222222-2222-2222-2222-222222222222".into());
+        let upload = build(&over_https, &[count("tcp", 22, true), other]);
+        let transport = |peer: &str| {
+            upload
+                .records
+                .iter()
+                .find(|r| r.peer_id.as_deref() == Some(peer))
+                .map(|r| r.transport.clone())
+                .unwrap()
+        };
+        assert_eq!(transport(&relayed[0]), "https_relay");
+        assert_eq!(transport("22222222-2222-2222-2222-222222222222"), "direct");
     }
 
     #[test]

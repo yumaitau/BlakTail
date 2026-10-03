@@ -8,6 +8,8 @@ public final class PhoneModel {
     public var preferences: Preferences
     public var session: DesktopSession?
     public var connectionState: ConnectionState = .disconnected
+    /// Path the running tunnel measured (direct, Australian relay, HTTPS fallback).
+    public var observedTransport: TunnelTransportStatus?
     public var enrollment: NodeEnrollment?
     public var devices: [EndpointDevice] = []
     public var inventoryErrors: [String] = []

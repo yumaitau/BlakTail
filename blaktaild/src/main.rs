@@ -1,5 +1,5 @@
 use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
-use blaktaild::relay_select::{eligible_relays, RelaySelector};
+use blaktaild::relay_select::{eligible_relays, wss_for, RelaySelector};
 use blaktaild::{
     apply_peer_map, configure_system_dns,
     connector::{self, ConnectorRuntime},
@@ -500,12 +500,19 @@ async fn sync_loop(
             state,
             transport,
             &relayed,
+            mesh.as_ref()
+                .is_some_and(|active| relay_link(active) == "wss"),
         )
         .await;
         let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
-        if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
+        let relay_link = mesh.as_ref().map(|active| relay_link(active).to_owned());
+        if state.active_relay != active_relay
+            || state.relay_failovers != relays.failovers()
+            || state.relay_link != relay_link
+        {
             state.active_relay = active_relay;
             state.relay_failovers = relays.failovers();
+            state.relay_link = relay_link;
             if let Err(error) = write_state(state_dir, state) {
                 warn!(%error, "could not persist relay selection");
             }
@@ -575,6 +582,7 @@ async fn manage_traffic(
     state: &mut blaktaild::NodeState,
     transport: Option<&'static str>,
     relayed: &[String],
+    relay_over_https: bool,
 ) {
     use blaktaild::flow_report;
     let interface = state.interface.clone();
@@ -608,8 +616,9 @@ async fn manage_traffic(
                     device_id: &device,
                     start,
                     end,
-                    transport: blaktaild::traffic::transport_label(transport),
+                    transport: blaktaild::traffic::transport_label(transport, relay_over_https),
                     relayed_peers: relayed,
+                    relay_transport: blaktaild::traffic::relay_transport_label(relay_over_https),
                     sampling_rate: settings.sampling_rate,
                 },
                 &counts,
@@ -983,13 +992,15 @@ async fn manage_paths(
                 return None;
             }
         };
-        match RelayMesh::spawn(
+        let fallback = relay_fallback(selector, relay_addr, state);
+        match RelayMesh::spawn_with_fallback(
             relay_addr,
             listen,
             state.node_id,
             &state.relay_token,
             state.relay_expires_at,
             state.exit_node.as_ref().map(|_| 51_820),
+            fallback,
         ) {
             Ok(created) => *mesh = Some(created),
             Err(error) => warn!(%error, "could not start relay client; direct paths only"),
@@ -1125,6 +1136,36 @@ async fn manage_paths(
         }
     }
     transport_summary(direct, relayed)
+}
+
+/// `udp` or `wss` (the HTTPS fallback) for status output.
+fn relay_link(mesh: &RelayMesh) -> &'static str {
+    if mesh.transport_label() == "relay-wss" {
+        "wss"
+    } else {
+        "udp"
+    }
+}
+
+/// The coordinator-approved WSS fallback for the chosen relay, with proxy
+/// settings and an optional private CA from the environment (never argv).
+fn relay_fallback(
+    selector: &RelaySelector,
+    relay_addr: std::net::SocketAddr,
+    state: &blaktaild::NodeState,
+) -> Option<blaktaild::relay_client::WssFallback> {
+    let endpoint = selector.endpoint_name(relay_addr)?;
+    let url = wss_for(endpoint, &state.relay_endpoints)?;
+    match blaktail_relay::wss::ClientOptions::from_env() {
+        Ok(options) => Some(blaktaild::relay_client::WssFallback {
+            url: url.to_owned(),
+            options,
+        }),
+        Err(error) => {
+            warn!(%error, "relay WSS fallback disabled: invalid proxy or CA settings");
+            None
+        }
+    }
 }
 
 async fn switch_to_relay(
@@ -1861,6 +1902,7 @@ fn status_json(state: &blaktaild::NodeState, now: i64) -> serde_json::Value {
         "relays": eligible_relays(&state.relays, &state.relay_endpoints),
         "active_relay": state.active_relay,
         "relay_failovers": state.relay_failovers,
+        "relay_link": state.relay_link,
         "peers": state.peers.iter().map(|peer| serde_json::json!({
             "name": peer.name,
             "endpoint": peer.endpoint,

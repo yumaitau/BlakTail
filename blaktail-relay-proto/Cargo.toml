@@ -1,0 +1,11 @@
+[package]
+name = "blaktail-relay-proto"
+description = "Sans-IO BlakTail relay framing, AU-only relay selection and path hysteresis shared by the relay, blaktaild and the mobile core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately dependency-free: it is linked into the iOS Network Extension,
+# where memory is tight, and into the Android JNI library.
+[dependencies]

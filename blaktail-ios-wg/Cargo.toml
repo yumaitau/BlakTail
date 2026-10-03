@@ -15,6 +15,7 @@ default = []
 jni = ["dep:jni"]
 
 [dependencies]
+blaktail-relay-proto = { path = "../blaktail-relay-proto" }
 boringtun = "0.7.1"
 jni = { version = "0.21", optional = true }
 serde = { version = "1", features = ["derive"] }

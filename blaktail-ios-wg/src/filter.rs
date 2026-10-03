@@ -1190,7 +1190,8 @@ pub unsafe extern "C" fn blaktail_tunnel_set_traffic(
 /// Writes the coordinator upload body (`{"records":[...]}`) for the counters
 /// since the last successful call and resets them. Sampling uses the
 /// coordinator's own draw. `transport` is `direct`, `udp_relay` or
-/// `https_relay`. When `dst_cap` is too small, sets `dst_len` to the size
+/// `https_relay`; once the relay is configured its own state decides
+/// (relayed peers report `udp_relay`, or `https_relay` over WebSocket). When `dst_cap` is too small, sets `dst_len` to the size
 /// needed, keeps the counters and returns -1. With counting off, writes an
 /// empty batch.
 ///
@@ -1229,14 +1230,16 @@ pub unsafe extern "C" fn blaktail_tunnel_take_flow_upload(
             return RESULT_ERR;
         };
         let end = unix_seconds();
+        let relay = crate::relay::flow_transport(&inner);
         let upload = crate::flow_report::build(
             &crate::flow_report::Bucket {
                 org_id,
                 device_id,
                 start: inner.filter.bucket_started,
                 end,
-                transport,
-                relayed_peers: &[],
+                transport: relay.device.unwrap_or(transport),
+                relayed_peers: &relay.relayed_peers,
+                relay_transport: relay.relay_transport,
                 sampling_rate,
             },
             &inner.filter.traffic_report().flow_counts(),
