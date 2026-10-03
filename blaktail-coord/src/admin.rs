@@ -183,6 +183,10 @@ pub(crate) fn api_routes() -> Router<AppState> {
         .route("/api/v1/audit/export", get(crate::audit_log::api_export))
         .route("/api/v1/audit/verify", get(crate::audit_log::api_verify))
         .route(
+            "/api/v1/traffic/events",
+            get(crate::flow_events::api_list_events),
+        )
+        .route(
             "/api/v1/events/catalogue",
             get(crate::notifications::api_catalogue),
         )

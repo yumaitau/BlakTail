@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 pub(crate) const MIN_SAMPLING_RATE: f64 = 0.01;
 pub(crate) const MAX_RETENTION_DAYS: i64 = 30;
-const DEFAULT_RETENTION_DAYS: i64 = 7;
+pub(crate) const DEFAULT_RETENTION_DAYS: i64 = 7;
 /// Storage bound per organisation; uploads beyond it are refused.
 pub(crate) const MAX_RECORDS_PER_ORG: i64 = 200_000;
 const MAX_UPLOAD_BYTES: usize = 256 * 1024;
@@ -56,7 +56,15 @@ pub(crate) struct TrafficSettings {
     pub(crate) updated_by: String,
 }
 
-async fn load_settings(
+pub(crate) async fn load_settings_pool(
+    pool: &sqlx::AnyPool,
+    org_id: &str,
+) -> Result<TrafficSettings, ApiError> {
+    let mut connection = pool.acquire().await?;
+    load_settings(&mut connection, org_id).await
+}
+
+pub(crate) async fn load_settings(
     connection: &mut sqlx::AnyConnection,
     org_id: &str,
 ) -> Result<TrafficSettings, ApiError> {
@@ -211,6 +219,11 @@ async fn delete_records(
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    let deleted_events = sqlx::query("DELETE FROM flow_events WHERE org_id=$1")
+        .bind(org_id.to_string())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
     append_audit(
         &mut tx,
         org_id,
@@ -218,11 +231,13 @@ async fn delete_records(
         "traffic.records_deleted",
         "traffic_records",
         Some(&org_id.to_string()),
-        &serde_json::json!({"count": deleted}),
+        &serde_json::json!({"count": deleted, "events": deleted_events}),
     )
     .await?;
     tx.commit().await?;
-    Ok(Json(serde_json::json!({"deleted": deleted})))
+    Ok(Json(
+        serde_json::json!({"deleted": deleted, "deleted_events": deleted_events}),
+    ))
 }
 
 // ---------------------------------------------------------------------------

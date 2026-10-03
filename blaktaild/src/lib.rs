@@ -18,6 +18,11 @@ use zeroize::Zeroize;
 pub mod acl_filter;
 pub mod connector;
 pub mod dns;
+pub mod flow_capture;
+/// Shared per-flow event shape, sampling and bounds.
+#[cfg(not(target_os = "windows"))]
+#[path = "../../blaktail-ios-wg/src/flow_events.rs"]
+pub mod flow_events;
 /// Shared with the iOS/Android/Windows dataplane crate so every platform
 /// builds identical traffic records.
 #[cfg(not(target_os = "windows"))]
@@ -33,6 +38,8 @@ pub mod services;
 pub mod share;
 pub mod sshd;
 pub mod traffic;
+#[cfg(target_os = "windows")]
+pub use blaktail_ios_wg::flow_events;
 #[cfg(target_os = "windows")]
 pub use blaktail_ios_wg::flow_report;
 pub use dns::{
@@ -1003,6 +1010,39 @@ impl Coordinator {
             "traffic upload rejected: {message}"
         )))
     }
+    /// Uploads one batch of per-flow events. `Ok(false)` means the
+    /// coordinator says reporting is off for the organisation.
+    pub async fn upload_flow_events(
+        &self,
+        state: &NodeState,
+        upload: &flow_events::Upload,
+    ) -> Result<bool, Error> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/v1/nodes/{}/flow-events",
+                self.base, state.node_id
+            ))
+            .bearer_auth(&state.node_token)
+            .json(upload)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        let message = response
+            .json::<ApiErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| format!("coordinator returned {status}"));
+        if status == reqwest::StatusCode::CONFLICT && message.contains("turned off") {
+            return Ok(false);
+        }
+        Err(Error::Message(format!(
+            "flow event upload rejected: {message}"
+        )))
+    }
     pub async fn report_relay_endpoint(
         &self,
         state: &NodeState,
@@ -1275,6 +1315,20 @@ pub trait Network {
     }
     /// Starts or stops traffic counting; stopping discards counters at once.
     fn set_traffic(&mut self, _interface: &str, _enabled: bool) {}
+    /// Per-flow events since the previous call (connection starts, ends and
+    /// drops), while traffic reporting is on.
+    fn flow_events(
+        &mut self,
+        _interface: &str,
+        _scope: &flow_capture::Scope,
+    ) -> Vec<flow_events::FlowEvent> {
+        Vec::new()
+    }
+    /// True where only per-rule counters exist (macOS pf): the agent then
+    /// uploads honest `aggregated` events built from those counters.
+    fn aggregated_flow_events(&self) -> bool {
+        false
+    }
     /// Counts since the previous call (or since counting started).
     fn traffic_counts(
         &mut self,
@@ -1359,6 +1413,9 @@ pub struct LinuxNetwork {
     forward_filter: Option<forward_filter::ForwardFilter>,
     /// Counter baselines while traffic reporting is on.
     traffic: Option<traffic::Deltas>,
+    /// conntrack and NFLOG readers while traffic reporting is on.
+    #[cfg(target_os = "linux")]
+    capture: Option<flow_capture::Capture>,
 }
 impl LinuxNetwork {
     fn run(program: &str, args: &[&str]) -> Result<(), Error> {
@@ -1821,6 +1878,18 @@ impl LinuxNetwork {
             let args: Vec<&str> = rule.iter().map(String::as_str).collect();
             Self::run(bin, &args)?;
         }
+        // Rate-limited NFLOG copies of rejected packets for per-flow drop
+        // events. Best-effort: without NFLOG the chain enforces the same.
+        let bodies: Vec<Vec<String>> = rules
+            .iter()
+            .map(|rule| rule.iter().skip(2).cloned().collect())
+            .collect();
+        for insert in flow_capture::drop_log_inserts(acl_filter::ACL_CHAIN, &bodies, false) {
+            let args: Vec<&str> = insert.iter().map(String::as_str).collect();
+            if Self::run(bin, &args).is_err() {
+                break;
+            }
+        }
         Ok(())
     }
 }
@@ -1926,6 +1995,12 @@ impl Network for LinuxNetwork {
     fn set_traffic(&mut self, interface: &str, enabled: bool) {
         if !enabled {
             self.traffic = None;
+            #[cfg(target_os = "linux")]
+            {
+                // Dropping the capture kills conntrack, closes the NFLOG
+                // socket and discards anything not yet uploaded.
+                self.capture = None;
+            }
             return;
         }
         if self.traffic.is_none() {
@@ -1933,6 +2008,25 @@ impl Network for LinuxNetwork {
             // Baseline: the first bucket covers only what follows opt-in.
             let _ = self.traffic_counts(interface, &[]);
         }
+        #[cfg(target_os = "linux")]
+        if self.capture.is_none() {
+            self.capture = Some(flow_capture::Capture::start());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn flow_events(
+        &mut self,
+        _interface: &str,
+        scope: &flow_capture::Scope,
+    ) -> Vec<flow_events::FlowEvent> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0);
+        self.capture
+            .as_mut()
+            .map(|capture| capture.drain(scope, now))
+            .unwrap_or_default()
     }
     fn traffic_counts(
         &mut self,
@@ -2586,6 +2680,10 @@ impl Network for MacOsNetwork {
     }
     fn inbound_filter_active(&self) -> bool {
         self.pf_verified
+    }
+    fn aggregated_flow_events(&self) -> bool {
+        // pf rule counters only: no per-connection addresses or ports.
+        true
     }
     fn set_traffic(&mut self, interface: &str, enabled: bool) {
         if !enabled {

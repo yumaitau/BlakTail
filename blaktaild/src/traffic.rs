@@ -94,6 +94,43 @@ impl Reporter {
     }
 }
 
+/// Per-flow event windows: one upload about every
+/// [`crate::flow_events::UPLOAD_EVERY_SECS`] while reporting is on, plus
+/// aggregated events (macOS) waiting for the next upload.
+#[derive(Debug, Default)]
+pub struct EventWindow {
+    since: Option<i64>,
+    pending: Vec<crate::flow_events::FlowEvent>,
+}
+
+impl EventWindow {
+    pub fn start(&mut self, now: i64) {
+        self.since = Some(now);
+        self.pending.clear();
+    }
+
+    pub fn stop(&mut self) {
+        self.since = None;
+        self.pending.clear();
+    }
+
+    /// Aggregated events to send with the next upload (bounded).
+    pub fn hold(&mut self, events: Vec<crate::flow_events::FlowEvent>) {
+        let room = crate::flow_events::MAX_BATCH.saturating_sub(self.pending.len());
+        self.pending.extend(events.into_iter().take(room));
+    }
+
+    /// The window to upload now, if one is due; held events come with it.
+    pub fn due(&mut self, now: i64) -> Option<(i64, Vec<crate::flow_events::FlowEvent>)> {
+        let since = self.since?;
+        if now - since < crate::flow_events::UPLOAD_EVERY_SECS {
+            return None;
+        }
+        self.since = Some(now);
+        Some((since, std::mem::take(&mut self.pending)))
+    }
+}
+
 /// Cumulative kernel counters to per-interval deltas. A counter that went
 /// down (chain or anchor rebuilt) counts from zero.
 #[derive(Debug, Default)]
@@ -426,6 +463,19 @@ mod tests {
         for forbidden in ["100.64", "fd7a", "cGVlcmtleQ", "server", "0.0.0.0"] {
             assert!(!text.contains(forbidden), "{forbidden} in {text}");
         }
+    }
+
+    #[test]
+    fn event_windows_are_due_every_thirty_seconds_and_stop_at_once() {
+        let mut window = EventWindow::default();
+        assert!(window.due(100).is_none(), "not started");
+        window.start(100);
+        assert!(window.due(120).is_none());
+        let (since, held) = window.due(131).unwrap();
+        assert_eq!((since, held.len()), (100, 0));
+        assert!(window.due(150).is_none());
+        window.stop();
+        assert!(window.due(1_000).is_none());
     }
 
     #[test]

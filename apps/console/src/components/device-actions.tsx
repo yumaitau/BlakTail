@@ -11,7 +11,7 @@ import {
 } from "@/app/actions";
 import type { AclPerson } from "@/lib/acl";
 import type { NetworkNode } from "@/lib/coord";
-import { can } from "@/lib/roles";
+import { can, isOrgRole, roleLabel } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
 
 type StatusFilter = "all" | "online" | "offline" | "attention";
@@ -55,7 +55,8 @@ function formatSeen(value: number | null | undefined): string {
 function ownerLabel(node: NetworkNode, people: AclPerson[]): string {
   const person = people.find((candidate) => candidate.userId === node.user_id);
   if (person) return person.name || person.email;
-  return node.user_role;
+  // Devices enrolled by a key or a service user have no person; name the role.
+  return isOrgRole(node.user_role) ? `Enrolled by ${roleLabel(node.user_role).toLowerCase()}` : node.user_role;
 }
 
 export function DeviceActions({

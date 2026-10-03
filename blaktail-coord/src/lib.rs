@@ -8,6 +8,7 @@ mod change_drafts;
 pub mod connectors;
 mod designations;
 mod dns_workspace;
+mod flow_events;
 pub mod flows;
 mod forwarding;
 pub mod https_fallback;
@@ -99,7 +100,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const SCHEMA: &str = include_str!("../schema.sql");
-pub const CURRENT_SCHEMA_VERSION: i64 = 40;
+pub const CURRENT_SCHEMA_VERSION: i64 = 41;
 const MAX_CONTROL_UPDATE_WAIT_SECS: u64 = 25;
 const MAX_CONTROL_VIEWS: usize = 10_000;
 type ControlViewMap = HashMap<Uuid, (i64, BTreeSet<Uuid>)>;
@@ -414,6 +415,12 @@ const MIGRATIONS: &[Migration] = &[
             "../migrations/sqlite/0040_node_designations.sql"
         )),
     },
+    Migration {
+        version: 41,
+        name: "per-flow traffic events",
+        postgres_sql: include_str!("../migrations/postgres/0041_flow_events.sql"),
+        sqlite_sql: Some(include_str!("../migrations/sqlite/0041_flow_events.sql")),
+    },
 ];
 
 impl Store {
@@ -623,7 +630,7 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             16 => migrate_sqlite_to_v16(&mut tx).await?,
             17 => migrate_sqlite_to_v17(&mut tx).await?,
             18 => migrate_sqlite_to_v18(&mut tx).await?,
-            19..=40 => {
+            19..=41 => {
                 let sql = migration
                     .sqlite_sql
                     .ok_or(StoreError::InvalidMigrationPlan {
@@ -677,6 +684,7 @@ async fn apply_sqlite_migrations_to(pool: &AnyPool, target: i64) -> Result<(), S
             38 => "PRAGMA user_version=38",
             39 => "PRAGMA user_version=39",
             40 => "PRAGMA user_version=40",
+            41 => "PRAGMA user_version=41",
             found => {
                 return Err(StoreError::InvalidMigrationPlan { expected, found });
             }
@@ -1562,6 +1570,7 @@ pub fn app_with_relays_console_and_metrics(
         .merge(operations::routes())
         .merge(audit_log::routes())
         .merge(traffic::routes())
+        .merge(flow_events::routes())
         .merge(notifications::routes())
         .merge(notify_channels::routes())
         .merge(post_quantum::routes())
@@ -6286,6 +6295,7 @@ mod tests {
     const TEST_SECRET: &[u8] = b"test-only-hmac-secret-at-least-32-bytes";
     const TEST_RELAY_SECRET: &[u8] = b"separate-test-relay-secret-32-bytes";
     mod events_audit;
+    mod flow_events;
     mod forwarding;
     mod ipv6_renumber;
     mod notify_channels;
@@ -10189,8 +10199,8 @@ mod tests {
         ));
         let pool = connect_sqlite(&path, true).await.unwrap();
         // Must stay one past CURRENT_SCHEMA_VERSION so open() rejects a future database.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 40);
-        sqlx::raw_sql("PRAGMA user_version=41")
+        assert_eq!(CURRENT_SCHEMA_VERSION, 41);
+        sqlx::raw_sql("PRAGMA user_version=42")
             .execute(&pool)
             .await
             .unwrap();

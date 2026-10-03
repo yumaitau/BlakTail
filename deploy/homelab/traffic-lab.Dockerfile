@@ -12,7 +12,7 @@ RUN --mount=type=cache,id=trafficlab-registry,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates iproute2 iptables iputils-ping netcat-openbsd openssl procps python3 wireguard-tools \
+      ca-certificates conntrack iproute2 iptables iputils-ping netcat-openbsd openssl procps python3 wireguard-tools \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/lib/blaktail /data /certs \
  && chmod 0700 /var/lib/blaktail

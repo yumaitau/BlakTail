@@ -36,6 +36,7 @@ final class TunnelSession {
     private var dns: MagicDNSResponder
     private var traffic: TrafficReporting?
     private var lastTrafficUpload = Date()
+    private var lastFlowEventUpload = Date()
     /// The dataplane filters inbound packets, so the coordinator may report
     /// this phone's ports as enforced.
     private static let capabilities = ["wireguard", "magicdns", "acl-filter"]
@@ -128,12 +129,14 @@ final class TunnelSession {
         let active = setting.flatMap { $0.enabled && $0.samplingRate > 0 ? $0 : nil }
         if active != nil && traffic == nil {
             lastTrafficUpload = Date()
+            lastFlowEventUpload = Date()
         }
         traffic = active
         engine.setTraffic(active != nil)
     }
 
     private func uploadTraffic() async {
+        await uploadFlowEvents()
         guard let traffic, Date().timeIntervalSince(lastTrafficUpload) >= 60 else { return }
         lastTrafficUpload = Date()
         guard let body = engine.takeFlowUpload(
@@ -149,6 +152,26 @@ final class TunnelSession {
             }
         } catch {
             // Counters for this bucket are dropped; reporting is best effort.
+        }
+    }
+
+    /// Per-flow events (connection starts, ends and drops) about every 30 s.
+    private func uploadFlowEvents() async {
+        guard let traffic, Date().timeIntervalSince(lastFlowEventUpload) >= 25 else { return }
+        lastFlowEventUpload = Date()
+        guard let body = engine.takeFlowEvents(
+            organisationID: traffic.organisationID,
+            deviceID: enrollment.nodeID,
+            samplingRate: traffic.samplingRate
+        ), !body.isEmpty, !body.contains(Data(#""events":[]"#.utf8)) else { return }
+        do {
+            let accepted = try await CoordinatorClient(coordinator: enrollment.coordinatorURL)
+                .uploadFlowEvents(enrollment: enrollment, body: body)
+            if !accepted {
+                applyTraffic(nil)
+            }
+        } catch {
+            // Events for this window are dropped; reporting is best effort.
         }
     }
 

@@ -2,7 +2,7 @@
 
 BlakTail keeps two separate records. The **audit log** records administrative
 changes: who changed what, and when. **Traffic diagnostics** are optional
-aggregate counters about network use. One never stands in for the other: an
+per-connection events and aggregate counters about network use. One never stands in for the other: an
 empty traffic view says nothing about admin activity, and the audit log never
 contains traffic.
 
@@ -158,7 +158,132 @@ Counter sources (all counters the kernel or dataplane keeps anyway):
 Counts are lower bounds: Linux rule counters reset when the chain is
 rebuilt, counter keys are capped (1,024 on userspace platforms; extra keys
 are counted as overflow and dropped) and uploads that fail are not retried.
-Traffic export is not offered.
+The aggregate counters are not exported; per-flow events are (below).
+
+### Per-flow traffic events
+
+While diagnostics are on, agents also report **one event per connection
+start, end and drop** they see, like a flow log. The same owner switch,
+sampling rate and retention apply; there is no separate opt-in.
+
+**What an event holds** (`POST /v1/nodes/{node_id}/flow-events`, node
+token, `blaktail-coord/src/flow_events.rs`): the reporter's flow id;
+`start`, `end` or `drop`; the time the device saw it and the upload's
+aggregation window (at most an hour); direction from the reporter's view
+(`inbound`, `outbound`); protocol (`tcp`, `udp`, `icmp`, `icmpv6`, or
+`other` with its number) with ICMP type and code; overlay source and
+destination address and port; the WireGuard peer that carried it;
+received and sent bytes and packets (on `end` and `drop`); connection type
+(`p2p`, `relay`, `routed`); an optional short label for the local filter
+rule that decided (`acl:deny-rule`, `acl:default`, `fwd:deny-rule`,
+`fwd:default`); and `aggregated` when the device can only see rule counters
+(below). Unknown fields and URL/DNS/host/payload-shaped keys are refused,
+as for aggregates.
+
+**What the coordinator adds** at ingest: the identity behind each address
+(the device, network resource or approved route of the same organisation,
+or *unknown*), the device owner, the routing peer (the reporter when it
+forwarded the connection, otherwise the peer that carried a connection to a
+resource or route), and the **matched rule**, evaluated with the same
+policy engine the peer maps are compiled from, against the policy published
+when the batch arrived: the first deny rule or allow rule that matches
+(`Rule 3: deny tag:office → tag:store (tcp port 3389)`), the policy default,
+or the network resource that grants it (`Network resource Billing DB`, or
+*default deny* when the resource does not grant that port). A drop the
+current policy would allow is labelled as such (the device enforced an
+older policy) instead of claiming an allow rule.
+
+**Checks and bounds.** Uploads are refused while the organisation is opted
+out (re-checked inside the write), for another organisation, for an address
+that is not the reporter's own (outbound source or inbound destination)
+unless the reporter is a routing peer reporting forwarded traffic, and for a
+peer outside the organisation. Batches are capped at 1,000 events and 1 MiB,
+uploads at 6 a minute per device, storage at 500,000 events per organisation;
+windows older than two days or in the future are refused. Sampling is per
+flow (a hash of organisation, reporter and flow id), so a flow's start and
+end are kept or dropped together; agents apply the same draw before upload.
+Events past retention are deleted on upload and every 15 minutes, and
+**Delete stored records** removes events too. Migration 41
+(`0041_flow_events.sql`, SQLite and PostgreSQL) adds the table.
+
+**Reading them.** `GET /v1/orgs/{org}/traffic/flows` groups events by
+reporter and flow (newest activity first, each flow with all of its events
+oldest first) and `GET /v1/orgs/{org}/traffic/events` lists them flat; both
+page with a cursor and filter by time range (default 24 hours), source or
+destination (device id, resource id or route), user, reporter, IP, port,
+protocol, direction, event type, connection type and free text (names,
+addresses, rule labels; a number also matches ports). Both need
+`view_audit`. `GET /v1/orgs/{org}/traffic/events/export?format=csv|json`
+needs `export_audit`, takes the same filters, stops at 50,000 rows (header
+`x-blaktail-export-truncated`) and is audited as `traffic.events_exported`.
+API clients with `audit:read` can list events at `GET /api/v1/traffic/events`.
+
+**Console.** `/traffic` (**Traffic events**) shows one row per flow: time;
+an event sentence ("Device **alice-laptop** requested a direct connection to
+device **server**", "Routing peer **router-1** blocked a connection to
+resource **Billing DB** (10.242.1.10:8080) from **alice-laptop** – blocked by
+default deny"); source and destination with OS or resource icon, name and
+address:port; protocol and port (or ICMP type) chips; received and sent
+bytes; and the routing peer. Expanding a row shows the flow's timeline:
+start, the policy step (linked to the rule in `/acls` or the resource in
+`/networks`), then end or drop, each with its time, plus path, reporter,
+packets and flow id. The toolbar has search, time range (1 h, 24 h, 2 days,
+7 days, custom), source and destination pickers, a filter popover (protocol,
+port, IP, direction, event, connection type), rows per page, refresh and
+**Export CSV** (shown only with `export_audit`). The aggregate summary stays
+as a small header card. Off, no-data and stale states are shown as such.
+
+**Where events come from:**
+
+| Platform | Connections (start/end) | Drops |
+| --- | --- | --- |
+| Linux | `conntrack -E -e NEW,DESTROY -o timestamp,extended` (conntrack-tools, one process per address family) while reporting is on; `end` carries the conntrack entry's counters (`net.netfilter.nf_conntrack_acct` is turned on while reporting and restored afterwards). Kept: connections from or to the device's overlay addresses, and connections a routing peer forwards for an overlay peer; everything else (underlay, LAN, the coordinator) is ignored. Ends are reported only for connections whose start was seen | A rate-limited (50/s, burst 100) `NFLOG` rule (group 7841) before every `REJECT` in `BLAKTAIL-ACL` and `BLAKTAIL-FWD`, installed best-effort after the chain so a kernel without NFLOG keeps full enforcement; the agent binds the group only while reporting and reads the first 128 bytes (IP and transport headers) of each rejected packet. Repeats of one connection in a window are merged into one drop with packet counts |
+| Windows, iOS | The shared userspace filter's connection table (`blaktail-ios-wg/src/filter.rs`): start when a flow is created, end with per-flow counters when it expires, is evicted or a policy change ends it | Every packet the filter drops, merged per connection per window, with `acl:deny-rule` or `acl:default` |
+| macOS | pf counts per rule only, so the agent uploads honest **aggregated** events: one per peer, protocol, port and verdict per minute, from the peer's overlay address (source port unknown) | Same, as aggregated drops |
+| Android | Not reported (its native bridge does not expose the filter yet) | — |
+
+Agents buffer at most 4,096 events (Linux: 8,192 raw records per source,
+16,384 open connections, 1,024 distinct drops per window; userspace: 512
+pending drops), upload about every 30 seconds, drop rather than retry a
+failed upload, and stop and discard everything as soon as the peer map
+drops `traffic` or the coordinator answers `409 … turned off`. The Linux
+agent needs the `conntrack` package (a `Recommends` of the deb and rpm, and
+present in the BlakTail agent images); without it, drops are still reported.
+Matched rules are named only for device-to-device and device-to-resource
+flows; the coordinator cannot name a rule for traffic from an unknown
+source.
+
+### Lab proof: per-flow events (3 October 2026)
+
+`deploy/homelab/prove-traffic-events.sh` (Docker context `m3-max`):
+PostgreSQL 16, a coordinator on PostgreSQL (migrated to schema 41), and
+three privileged Linux agents on kernel WireGuard: `alice-laptop` (tag
+office), `server` (store) and `router-1` (store, routing peer for
+10.242.1.0/24, carrying the network resource **Billing DB** 10.242.1.10/32,
+TCP 5432, for office). Policy: office → store TCP 22/443/8080 and ICMP,
+an explicit deny for TCP 3389, everything else default deny. With
+diagnostics on, every expected event arrived (208 s, bounded by TCP
+TIME_WAIT before conntrack destroys a closed connection):
+
+- allowed TCP alice → server:8080: start from both ends and an end with
+  bytes both ways, source `alice-laptop 100.64.0.1:<port>`, rule
+  `Rule 1: allow tag:office → tag:store (tcp port 22,443,8080)`, `p2p`;
+- allowed ping: `icmp` type Echo, rule 2, start and end with packets;
+- denied ports: drops reported by `server` for 3389 (rule 3, hint
+  `acl:deny-rule`) and 9000 (`Default deny`, hint `acl:default`);
+- routed: alice's request and router-1's forwarded connection to
+  **Billing DB** 10.242.1.10:5432, connection type `routed`, router
+  `router-1`, rule `Network resource Billing DB`; alice → 10.242.1.10:8080
+  was a drop on router-1 (`fwd:default`) and alice's own start/end for it
+  said `Default deny: network resource Billing DB does not grant this port`;
+- no Docker bridge (underlay) address was stored; CSV export returned 172
+  rows;
+- off: no event arrived in the next 90 s of traffic; every agent logged the
+  stop and no `conntrack` process remained.
+
+Not covered live: Windows, iOS and macOS event reporting (unit-tested only;
+the iOS host change was not built in this lab), Android, IPv6 conntrack
+events, load or throughput with capture on.
 
 ### Lab proof (3 October 2026)
 
@@ -188,11 +313,17 @@ or storage-bound load.
 
 ### Privacy
 
-Records never contain payloads, URLs, DNS questions, host names or IP
-addresses; agent tests check the serialised upload for addresses, keys and
-names. They do
-reveal which device moved how much data over which service class and port in
-which hour, which is still personal information about the device's user.
+Aggregate records never contain IP addresses. **Per-flow events do**: while
+diagnostics are on, each event stores the overlay (and, for routed
+traffic, the destination's private or public) source and destination
+address and port, the resolved device, resource and owner, and byte
+counts. That shows who connected to what and when, which is personal
+information about the device's user. Neither ever contains payloads, URLs,
+DNS questions or names, TLS SNI or HTTP data. Any role with `view_audit`
+(including members) can read events, and `export_audit` roles can export
+them; exports are audited.
+Aggregate records reveal which device moved how much data over which
+service class and port in which hour.
 Turn collection on only with a stated purpose, keep retention short, and
 include it in the organisation's privacy notice. To answer an access or
 deletion request, an owner can delete all stored records from `/traffic`;

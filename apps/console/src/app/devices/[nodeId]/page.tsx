@@ -11,6 +11,7 @@ import {
 } from "@/lib/coord-peers";
 import { getPqOverview } from "@/lib/coord-pq";
 import { listMemberships } from "@/lib/oidc";
+import { isOrgRole, roleLabel } from "@/lib/roles";
 import {
   organisationContext,
   requirePersonSessionContext,
@@ -170,7 +171,7 @@ export default async function DeviceDetailPage({
               <dt>Owner</dt>
               <dd>
                 {owner ? owner.name || owner.email : node.user_id || "Unknown"}
-                <div className="muted">Enrolled as {node.user_role}</div>
+                <div className="muted">Enrolled as {isOrgRole(node.user_role) ? roleLabel(node.user_role) : node.user_role}</div>
               </dd>
             </div>
             <div>

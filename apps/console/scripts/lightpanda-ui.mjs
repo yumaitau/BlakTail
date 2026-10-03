@@ -285,6 +285,14 @@ async function runUi(page, baseUrl, email, password) {
     },
     { nextEmail: email, nextPassword: password },
   );
+  // Sign-in lands on the Control Center; Devices is one nav step away.
+  await page.waitForFunction(
+    () => document.querySelector("h1")?.textContent?.trim() === "Control Center",
+    undefined,
+    { timeout: 20_000 },
+  );
+  console.log("ok signed in and landed on Control Center");
+  await clickFirst(page, "[data-testid='nav-devices']", "Devices");
   await page.waitForFunction(
     () => document.querySelector("h1")?.textContent?.trim() === "Devices",
     undefined,
@@ -293,7 +301,7 @@ async function runUi(page, baseUrl, email, password) {
   const body = (await page.locator("body").innerText()) ?? "";
   assert(body.includes("No devices yet") || body.includes("Search devices"), body.slice(0, 400));
   assert(body.includes("Access"), "Devices page is missing the Access nav item");
-  console.log("ok signed in and opened Devices");
+  console.log("ok opened Devices");
 
   await clickFirst(
     page,

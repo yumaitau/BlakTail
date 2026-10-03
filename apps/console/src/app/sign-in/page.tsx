@@ -5,7 +5,7 @@ import { auth } from "@/lib/auth";
 
 function safeNext(value: string | string[] | undefined): string {
   const path = Array.isArray(value) ? value[0] : value;
-  return path?.startsWith("/enroll?code=") ? path : "/devices";
+  return path?.startsWith("/enroll?code=") ? path : "/control-center";
 }
 
 export default async function SignInPage({

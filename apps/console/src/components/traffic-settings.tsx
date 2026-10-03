@@ -40,10 +40,10 @@ export function TrafficSettingsForm({
       >
         <label className="row">
           <input type="checkbox" name="enabled" defaultChecked={settings.enabled} disabled={locked} />
-          Collect aggregate traffic counters for this organisation
+          Collect per-flow traffic events and aggregate counters for this organisation
         </label>
         <label>
-          Sampling (per cent of records kept)
+          Sampling (per cent of connections kept)
           <input
             type="number"
             name="sampling_percent"
@@ -75,7 +75,7 @@ export function TrafficSettingsForm({
             className="danger"
             disabled={locked}
             onClick={() => {
-              if (!window.confirm("Delete every stored traffic record for this organisation?")) {
+              if (!window.confirm("Delete every stored traffic event and record for this organisation?")) {
                 return;
               }
               setError(null);

@@ -41,7 +41,7 @@ export async function saveTrafficSettingsAction(formData: FormData): Promise<Tra
     return {
       ok: true,
       message: enabled
-        ? "Traffic diagnostics are on. Devices that report counters will appear here."
+        ? "Traffic diagnostics are on. Devices start reporting per-flow events within about a minute."
         : "Traffic diagnostics are off. New uploads are refused from now on.",
     };
   } catch (error) {
@@ -52,9 +52,12 @@ export async function saveTrafficSettingsAction(formData: FormData): Promise<Tra
 export async function deleteTrafficRecordsAction(): Promise<TrafficActionResult> {
   try {
     const ctx = await ownerContext();
-    const { deleted } = await deleteTrafficRecords(ctx);
+    const { deleted, deleted_events: events = 0 } = await deleteTrafficRecords(ctx);
     revalidatePath("/traffic");
-    return { ok: true, message: `Deleted ${deleted} stored traffic records.` };
+    return {
+      ok: true,
+      message: `Deleted ${deleted} aggregate records and ${events} traffic events.`,
+    };
   } catch (error) {
     return failure(error, "Could not delete traffic records.");
   }

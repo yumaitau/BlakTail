@@ -18,7 +18,7 @@ RUN --mount=type=cache,id=labs-registry,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl dnsutils iproute2 iptables iputils-ping netcat-openbsd \
+      ca-certificates conntrack curl dnsutils iproute2 iptables iputils-ping netcat-openbsd \
       openssh-client openssh-server openssl procps python3 tcpdump wireguard-tools \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/lib/blaktail /data /certs /run/sshd \

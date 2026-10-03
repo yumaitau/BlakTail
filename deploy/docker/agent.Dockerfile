@@ -19,7 +19,7 @@ FROM debian:bookworm-slim
 # unconfined containers, so keys outside /etc/wireguard get EACCES.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates iproute2 iptables iputils-ping wget wireguard-tools \
+      ca-certificates conntrack iproute2 iptables iputils-ping wget wireguard-tools \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/lib/blaktail \
  && chmod 0700 /var/lib/blaktail \

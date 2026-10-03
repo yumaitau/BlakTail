@@ -228,6 +228,14 @@ pub fn install(
             args.extend(rule.iter().map(String::as_str));
             must(runner, bin, &args)?;
         }
+        // Rate-limited NFLOG copies of rejected packets for per-flow drop
+        // events; best-effort, enforcement does not depend on them.
+        for insert in crate::flow_capture::drop_log_inserts(STAGING_CHAIN, rules, true) {
+            let args: Vec<&str> = insert.iter().map(String::as_str).collect();
+            if !matches!(runner.run(bin, &args), Some((true, _))) {
+                break;
+            }
+        }
         must(runner, bin, &jump(interface, STAGING_CHAIN, "-I"))
     })();
     if let Err(error) = staged {

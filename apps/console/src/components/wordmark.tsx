@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-export function Wordmark({ href = "/devices" }: { href?: string }) {
+export function Wordmark({ href = "/control-center" }: { href?: string }) {
   return (
     <Link className="wordmark" href={href} aria-label="BlakTail home">
       <svg

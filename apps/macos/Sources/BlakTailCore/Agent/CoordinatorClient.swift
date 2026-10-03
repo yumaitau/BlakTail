@@ -141,6 +141,23 @@ public struct CoordinatorClient: Sendable {
         return true
     }
 
+    /// Uploads one batch of per-flow events built by the native dataplane.
+    /// Returns false when the coordinator says diagnostics are off.
+    public func uploadFlowEvents(enrollment: NodeEnrollment, body: Data) async throws -> Bool {
+        let (data, response) = try await request(
+            path: "/v1/nodes/\(enrollment.nodeID)/flow-events",
+            method: "POST",
+            body: body,
+            bearer: enrollment.nodeToken
+        )
+        if let http = response as? HTTPURLResponse, http.statusCode == 409,
+           sanitizedErrorBody(data).contains("turned off") {
+            return false
+        }
+        try validate(response: response, data: data)
+        return true
+    }
+
     public func revoke(enrollment: NodeEnrollment) async throws {
         let (data, response) = try await request(
             path: "/v1/nodes/\(enrollment.nodeID)",
