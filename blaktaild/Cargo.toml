@@ -46,4 +46,7 @@ wintun = "0.4"
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+# Shared filter test vectors: the Linux chain must decide like the
+# userspace filter.
+blaktail-ios-wg = { path = "../blaktail-ios-wg" }
 tempfile = "3"

@@ -48,6 +48,49 @@ final class WireGuardEngine {
         }
     }
 
+    /// Inbound filter policy: the coordinator's raw `peers` array. The filter
+    /// runs inside `decapsulate`, between decrypt and the packet-flow write.
+    func setPolicy(_ policyJSON: Data) {
+        policyJSON.withUnsafeBytes { bytes in
+            _ = blaktail_tunnel_set_policy(
+                tunnel,
+                bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                policyJSON.count
+            )
+        }
+    }
+
+    func setTraffic(_ enabled: Bool) {
+        _ = blaktail_tunnel_set_traffic(tunnel, enabled ? 1 : 0)
+    }
+
+    /// Coordinator upload body for the counters since the last call, or nil.
+    func takeFlowUpload(organisationID: String, deviceID: String, samplingRate: Double) -> Data? {
+        var capacity = 64 * 1024
+        for _ in 0..<2 {
+            var output = [UInt8](repeating: 0, count: capacity)
+            var length = 0
+            let status = organisationID.withCString { org in
+                deviceID.withCString { device in
+                    "direct".withCString { transport in
+                        output.withUnsafeMutableBufferPointer { buffer in
+                            blaktail_tunnel_take_flow_upload(
+                                tunnel, org, device, transport, samplingRate,
+                                buffer.baseAddress!, capacity, &length
+                            )
+                        }
+                    }
+                }
+            }
+            if status == Int32(BLAKTAIL_WG_DONE) {
+                return Data(output.prefix(length))
+            }
+            guard length > capacity else { return nil }
+            capacity = length
+        }
+        return nil
+    }
+
     func encapsulate(_ packet: Data) -> WireGuardOutput {
         invoke { dst, dstLen, peer in
             packet.withUnsafeBytes { bytes in

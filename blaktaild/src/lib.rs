@@ -18,7 +18,13 @@ use zeroize::Zeroize;
 pub mod acl_filter;
 pub mod connector;
 pub mod dns;
+/// Shared with the iOS/Android/Windows dataplane crate so every platform
+/// builds identical traffic records.
+#[cfg(not(target_os = "windows"))]
+#[path = "../../blaktail-ios-wg/src/flow_report.rs"]
+pub mod flow_report;
 pub mod forward_filter;
+pub mod pf_filter;
 pub mod pq;
 pub mod relay_client;
 pub mod relay_select;
@@ -26,6 +32,9 @@ pub mod remote;
 pub mod services;
 pub mod share;
 pub mod sshd;
+pub mod traffic;
+#[cfg(target_os = "windows")]
+pub use blaktail_ios_wg::flow_report;
 pub use dns::{
     configure_system_dns, dns_domain, organisation_dns_managed, organisation_resolver_suffixes,
     published_resolver_suffixes, remove_system_dns, MagicDns,
@@ -310,6 +319,13 @@ pub struct NodeState {
     /// Published private service names this node may resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_records: Vec<services::ServiceRecord>,
+    /// Traffic reporting settings from the last peer map; `None` is off.
+    #[serde(default)]
+    pub traffic: Option<traffic::Settings>,
+    /// Last apply proved this platform's inbound filter is in force (macOS
+    /// pf anchor verified, Windows userspace filter installed).
+    #[serde(default)]
+    pub acl_filter_enforced: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -483,6 +499,8 @@ struct PeersResponse {
     service_access: Vec<services::ServiceAccess>,
     #[serde(default)]
     service_records: Vec<services::ServiceRecord>,
+    #[serde(default)]
+    traffic: Option<traffic::Settings>,
 }
 
 #[derive(Serialize)]
@@ -624,7 +642,8 @@ impl Coordinator {
                 os_version: &os_version(),
                 agent_version: env!("CARGO_PKG_VERSION"),
                 hostname: registration.name,
-                capabilities: agent_capabilities(false),
+                // The Windows dataplane filters from its first packet.
+                capabilities: agent_capabilities(false, cfg!(target_os = "windows")),
                 ephemeral: registration.ephemeral,
             })
             .send()
@@ -669,6 +688,8 @@ impl Coordinator {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            acl_filter_enforced: false,
+            traffic: None,
             forward_filter: None,
             app_connector: false,
             agent_gateway: false,
@@ -769,6 +790,8 @@ impl Coordinator {
         state.remote.view = body.remote_access;
         state.service_access = body.service_access;
         state.service_records = body.service_records;
+        // Absent means off: reporting stops on this very update.
+        state.traffic = body.traffic;
         Ok(peers)
     }
 
@@ -882,6 +905,36 @@ impl Coordinator {
             .error_for_status()?;
         Ok(())
     }
+    /// Uploads one traffic batch. `Ok(false)` means the coordinator says
+    /// reporting is off for the organisation.
+    pub async fn upload_flows(
+        &self,
+        state: &NodeState,
+        upload: &flow_report::Upload,
+    ) -> Result<bool, Error> {
+        let response = self
+            .client
+            .post(format!("{}/v1/nodes/{}/flows", self.base, state.node_id))
+            .bearer_auth(&state.node_token)
+            .json(upload)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        let message = response
+            .json::<ApiErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| format!("coordinator returned {status}"));
+        if status == reqwest::StatusCode::CONFLICT && message.contains("turned off") {
+            return Ok(false);
+        }
+        Err(Error::Message(format!(
+            "traffic upload rejected: {message}"
+        )))
+    }
     pub async fn report_relay_endpoint(
         &self,
         state: &NodeState,
@@ -949,12 +1002,29 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// Reported while `blaktaild up --public-ingress` is in effect.
 pub const PUBLIC_INGRESS_CAPABILITY: &str = "public-ingress";
 
+/// Stdout of a successful command, for counter reads.
+fn capture(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Capabilities this build provides. `ssh-users` is only claimed after the
-/// last apply verified the sshd drop-in.
-pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
+/// last apply verified the sshd drop-in; outside Linux, `acl-filter` only
+/// once the platform filter is in force (`acl_filter_enforced`).
+pub fn agent_capabilities(ssh_users_enforced: bool, acl_filter_enforced: bool) -> Vec<String> {
     let mut capabilities = vec!["wireguard".to_string(), "magicdns".to_string()];
     if pq::locally_capable() {
         capabilities.push(pq::CAPABILITY.into());
+    }
+    if acl_filter_enforced && !cfg!(target_os = "linux") {
+        capabilities.push("acl-filter".into());
     }
     if cfg!(target_os = "linux") {
         capabilities.push("acl-filter".into());
@@ -967,7 +1037,7 @@ pub fn agent_capabilities(ssh_users_enforced: bool) -> Vec<String> {
 }
 
 fn inventory_query(state: &NodeState) -> [(&'static str, String); 5] {
-    let mut capabilities = agent_capabilities(state.ssh_users_enforced);
+    let mut capabilities = agent_capabilities(state.ssh_users_enforced, state.acl_filter_enforced);
     if cfg!(target_os = "linux") && state.app_connector {
         capabilities.push(connector::CAPABILITY.into());
     }
@@ -1131,6 +1201,21 @@ pub trait Network {
     fn apply_ingress(&mut self, _interface: &str, _peers: &[Peer]) -> Result<(), Error> {
         Ok(())
     }
+    /// Whether the last `apply_ingress` left this platform's inbound filter
+    /// in force (Linux reports `acl-filter` unconditionally).
+    fn inbound_filter_active(&self) -> bool {
+        false
+    }
+    /// Starts or stops traffic counting; stopping discards counters at once.
+    fn set_traffic(&mut self, _interface: &str, _enabled: bool) {}
+    /// Counts since the previous call (or since counting started).
+    fn traffic_counts(
+        &mut self,
+        _interface: &str,
+        _peers: &[Peer],
+    ) -> Result<Vec<flow_report::FlowCount>, Error> {
+        Ok(Vec::new())
+    }
     /// Where post-quantum PSKs are installed, if this platform supports it.
     fn psk_device(&self, _interface: &str) -> Option<std::sync::Arc<dyn pq::PskDevice>> {
         None
@@ -1201,6 +1286,8 @@ pub struct LinuxNetwork {
     /// Routes this node currently forwards for (from `configure_router`).
     router_routes: Vec<String>,
     forward_filter: Option<forward_filter::ForwardFilter>,
+    /// Counter baselines while traffic reporting is on.
+    traffic: Option<traffic::Deltas>,
 }
 impl LinuxNetwork {
     fn run(program: &str, args: &[&str]) -> Result<(), Error> {
@@ -1717,6 +1804,40 @@ impl Network for LinuxNetwork {
         }
         Ok(())
     }
+    fn inbound_filter_active(&self) -> bool {
+        true
+    }
+    fn set_traffic(&mut self, interface: &str, enabled: bool) {
+        if !enabled {
+            self.traffic = None;
+            return;
+        }
+        if self.traffic.is_none() {
+            self.traffic = Some(traffic::Deltas::default());
+            // Baseline: the first bucket covers only what follows opt-in.
+            let _ = self.traffic_counts(interface, &[]);
+        }
+    }
+    fn traffic_counts(
+        &mut self,
+        interface: &str,
+        peers: &[Peer],
+    ) -> Result<Vec<flow_report::FlowCount>, Error> {
+        let Some(deltas) = self.traffic.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let listing = |bin: &str| {
+            capture(bin, &["-L", acl_filter::ACL_CHAIN, "-n", "-v", "-x"]).unwrap_or_default()
+        };
+        let (ipv4, ipv6) = (listing("iptables"), listing("ip6tables"));
+        let transfer = capture("wg", &["show", interface, "transfer"]).unwrap_or_default();
+        Ok(traffic::linux_counts(
+            &[("ipv4", &ipv4), ("ipv6", &ipv6)],
+            &transfer,
+            peers,
+            deltas,
+        ))
+    }
     fn psk_device(&self, interface: &str) -> Option<std::sync::Arc<dyn pq::PskDevice>> {
         Some(std::sync::Arc::new(pq::WgCommandDevice {
             interface: interface.to_owned(),
@@ -1987,6 +2108,12 @@ pub struct MacOsNetwork {
     installed_routes: HashSet<String>,
     /// Post-quantum PSKs, re-sent on every `replace_peers` push.
     psks: std::sync::Arc<std::sync::Mutex<HashMap<String, pq::Psk>>>,
+    /// Inbound filter anchor currently loaded, and whether it was verified.
+    pf_plan: Option<pf_filter::PfPlan>,
+    pf_verified: bool,
+    /// Our `pfctl -E` reference, released on `down`.
+    pf_token: Option<String>,
+    traffic: Option<traffic::Deltas>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1999,7 +2126,58 @@ impl MacOsNetwork {
             peers: vec![],
             installed_routes: HashSet::new(),
             psks: Default::default(),
+            pf_plan: None,
+            pf_verified: false,
+            pf_token: None,
+            traffic: None,
         }
+    }
+
+    fn pfctl(args: &[&str], stdin: Option<&str>) -> Result<String, Error> {
+        use std::io::Write as _;
+        let mut child = Command::new("/sbin/pfctl")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::Message(format!("could not execute pfctl: {e}")))?;
+        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            pipe.write_all(input.as_bytes())?;
+        }
+        let out = child.wait_with_output()?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() {
+            Ok(text)
+        } else {
+            Err(Error::Message(format!("pfctl failed: {}", text.trim())))
+        }
+    }
+
+    fn clear_pf(&mut self) {
+        Self::run_ignore("/sbin/pfctl", &["-a", pf_filter::ANCHOR, "-F", "all"]);
+        if let Some(token) = self.pf_token.take() {
+            Self::run_ignore("/sbin/pfctl", &["-X", &token]);
+        }
+        self.pf_plan = None;
+        self.pf_verified = false;
+    }
+
+    /// Loads the anchor, takes a pf enable reference and proves the rules
+    /// are evaluated.
+    fn install_pf(&mut self, plan: &pf_filter::PfPlan) -> Result<bool, Error> {
+        Self::pfctl(&["-a", pf_filter::ANCHOR, "-f", "-"], Some(&plan.ruleset()))?;
+        if self.pf_token.is_none() {
+            self.pf_token = pf_filter::enable_token(&Self::pfctl(&["-E"], None)?);
+        }
+        let info = Self::pfctl(&["-s", "info"], None)?;
+        let main_rules = Self::pfctl(&["-s", "rules"], None)?;
+        let anchor_rules = Self::pfctl(&["-a", pf_filter::ANCHOR, "-s", "rules"], None)?;
+        Ok(pf_filter::verified(&info, &main_rules, &anchor_rules, plan))
     }
 
     fn utun_name(&self) -> Result<&str, Error> {
@@ -2237,7 +2415,60 @@ impl Network for MacOsNetwork {
         }
         self.push_config_and_routes()
     }
+    fn apply_ingress(&mut self, _interface: &str, peers: &[Peer]) -> Result<(), Error> {
+        let name = self.utun_name()?.to_owned();
+        let plan = pf_filter::plan(&name, peers)
+            .ok_or_else(|| Error::Message(format!("unexpected tunnel interface {name}")))?;
+        if !plan.enforce {
+            self.clear_pf();
+            return Ok(());
+        }
+        // A pf failure must not take the tunnel down: the capability is
+        // withheld instead, so policy explain reports the Mac as unfiltered.
+        match self.install_pf(&plan) {
+            Ok(verified) => {
+                if !verified {
+                    tracing::warn!("pf anchor loaded but not evaluated (pf disabled or com.apple anchor missing); inbound policy is not enforced");
+                }
+                self.pf_verified = verified;
+                self.pf_plan = Some(plan);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not install the pf inbound filter; inbound policy is not enforced");
+                self.clear_pf();
+            }
+        }
+        Ok(())
+    }
+    fn inbound_filter_active(&self) -> bool {
+        self.pf_verified
+    }
+    fn set_traffic(&mut self, interface: &str, enabled: bool) {
+        if !enabled {
+            self.traffic = None;
+        } else if self.traffic.is_none() {
+            self.traffic = Some(traffic::Deltas::default());
+            let _ = self.traffic_counts(interface, &[]);
+        }
+    }
+    fn traffic_counts(
+        &mut self,
+        _interface: &str,
+        _peers: &[Peer],
+    ) -> Result<Vec<flow_report::FlowCount>, Error> {
+        let (Some(deltas), Some(plan)) = (self.traffic.as_mut(), self.pf_plan.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        let listing = Self::pfctl(&["-a", pf_filter::ANCHOR, "-v", "-s", "rules"], None)?;
+        Ok(pf_filter::counts(
+            plan,
+            &pf_filter::parse_rule_counters(&listing),
+            deltas,
+        ))
+    }
     fn down(&mut self, _interface: &str) -> Result<(), Error> {
+        self.clear_pf();
+        self.traffic = None;
         if let Some(name) = &self.name {
             for route in &self.installed_routes {
                 let _ = Self::remove_route(name, route);
@@ -2377,6 +2608,7 @@ pub fn apply_peer_map(
         &installed,
         state.remote.view.as_ref(),
     )?;
+    state.acl_filter_enforced = network.inbound_filter_active();
     network.apply_forward_filter(&state.interface, state.forward_filter.as_ref())?;
     state.peers = installed;
     write_state(dir, state)?;
@@ -2870,6 +3102,8 @@ mod tests {
             control_revision: 0,
             published_shares: vec![],
             ssh_users_enforced: false,
+            acl_filter_enforced: false,
+            traffic: None,
             forward_filter: Some(forward_filter::ForwardFilter::default()),
             app_connector: false,
             agent_gateway: false,
@@ -2952,6 +3186,8 @@ mod tests {
             control_revision: 3,
             published_shares: vec![],
             ssh_users_enforced: false,
+            acl_filter_enforced: false,
+            traffic: None,
             forward_filter: None,
             app_connector: false,
             agent_gateway: false,
@@ -3060,6 +3296,7 @@ mod tests {
             remote_access: None,
             service_access: vec![],
             service_records: vec![],
+            traffic: None,
         };
         let merged = Coordinator::apply_control_peers(&current, &body);
         assert_eq!(

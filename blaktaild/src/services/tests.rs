@@ -151,6 +151,8 @@ fn state(listen: u16, allowed: &[&str], id: Uuid) -> NodeState {
         agent_gateway: false,
         remote: Default::default(),
         public_ingress: false,
+        traffic: None,
+        acl_filter_enforced: false,
         connector_routes: vec![],
         serve_services: true,
         service_listen_port: Some(listen),

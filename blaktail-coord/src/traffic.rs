@@ -84,6 +84,28 @@ async fn load_settings(
     })
 }
 
+/// What a device's peer map says about reporting. Absent means off.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct AgentTraffic {
+    pub(crate) enabled: bool,
+    pub(crate) sampling_rate: f64,
+    /// Uploads must name the device's own organisation.
+    pub(crate) org_id: String,
+}
+
+pub(crate) async fn agent_view(
+    pool: &sqlx::AnyPool,
+    org_id: &str,
+) -> Result<Option<AgentTraffic>, ApiError> {
+    let mut connection = pool.acquire().await?;
+    let settings = load_settings(&mut connection, org_id).await?;
+    Ok(settings.enabled.then(|| AgentTraffic {
+        enabled: true,
+        sampling_rate: settings.sampling_rate,
+        org_id: org_id.to_owned(),
+    }))
+}
+
 async fn get_settings(
     State(s): State<AppState>,
     UrlPath(org_id): UrlPath<Uuid>,
@@ -144,6 +166,13 @@ async fn put_settings(
     .bind(&session.user_id)
     .execute(&mut *tx)
     .await?;
+    if input.enabled != previous.enabled
+        || (input.enabled && sampling_rate != previous.sampling_rate)
+    {
+        // Agents learn the change on their next control update; the bump
+        // wakes long-polls so reporting starts or stops within seconds.
+        crate::bump_control_revision(&mut tx, &org).await?;
+    }
     append_audit(
         &mut tx,
         org_id,
@@ -215,6 +244,10 @@ struct UploadRecord {
     packets: u64,
     transport: crate::flows::FlowTransport,
     decision: crate::flows::FlowDecision,
+    #[serde(default)]
+    peer_id: Option<String>,
+    #[serde(default)]
+    direction: Option<crate::flows::FlowDirection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +349,8 @@ async fn ingest(
             packets: record.packets,
             transport: record.transport,
             decision: record.decision,
+            peer_id: record.peer_id,
+            direction: record.direction,
         })
         .collect();
     validate_batch(&records).map_err(|error| ApiError::BadRequest(error.to_string()))?;
@@ -326,6 +361,23 @@ async fn ingest(
     {
         // A device may only report its own counters in its own organisation.
         return Err(ApiError::Forbidden);
+    }
+    let peers: std::collections::BTreeSet<&str> = records
+        .iter()
+        .filter_map(|record| record.peer_id.as_deref())
+        .collect();
+    for peer in peers {
+        // A peer must be a device of the same organisation (deleted or
+        // revoked ones still count: their history stays attributable).
+        let known: Option<String> =
+            sqlx::query_scalar("SELECT id FROM nodes WHERE id=$1 AND org_id=$2")
+                .bind(peer)
+                .bind(&org_id)
+                .fetch_optional(&s.store.pool)
+                .await?;
+        if known.is_none() {
+            return Err(ApiError::Forbidden);
+        }
     }
 
     let mut tx = s.store.pool.begin().await?;
@@ -356,7 +408,7 @@ async fn ingest(
     }
     for record in &sampled {
         sqlx::query(
-            "INSERT INTO flow_records(id,org_id,device_id,service,start_bucket,end_bucket,proto,port,bytes,packets,transport,decision,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            "INSERT INTO flow_records(id,org_id,device_id,service,start_bucket,end_bucket,proto,port,bytes,packets,transport,decision,created_at,peer_id,direction) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&org_id)
@@ -371,6 +423,8 @@ async fn ingest(
         .bind(label(&record.transport))
         .bind(label(&record.decision))
         .bind(at)
+        .bind(record.peer_id.as_deref())
+        .bind(record.direction.as_ref().map(label))
         .execute(&mut *tx)
         .await?;
     }
@@ -456,6 +510,10 @@ pub(crate) struct TrafficSummary {
     pub(crate) denied: Counter,
     pub(crate) by_transport: BTreeMap<String, Counter>,
     pub(crate) by_service: BTreeMap<String, Counter>,
+    /// `inbound` (a peer started the flow), `outbound`, or `unknown` for
+    /// records that do not say.
+    #[serde(default)]
+    pub(crate) by_direction: BTreeMap<String, Counter>,
     pub(crate) buckets: Vec<Bucket>,
     pub(crate) confidence: Confidence,
 }
@@ -480,7 +538,7 @@ fn confidence(rate: f64, reporting: i64, active: i64) -> Confidence {
         "low"
     };
     let detail = if reporting == 0 {
-        "No device has reported traffic in this window. Current BlakTail agents do not send traffic records, so an empty view does not mean there was no traffic.".to_owned()
+        "No device has reported traffic in this window. Agents report only while diagnostics are on, about once a minute; Android phones and agents older than this release do not report, so an empty view does not mean there was no traffic.".to_owned()
     } else {
         format!(
             "{reporting} of {active} active devices reported. Counts are device-reported aggregates sampled at {:.0}%, so totals are a lower bound.",
@@ -519,7 +577,7 @@ async fn summary(
         load_settings(&mut connection, &org).await?
     };
     let rows = sqlx::query(
-        "SELECT (start_bucket/3600)*3600,decision,transport,service,CAST(COALESCE(SUM(bytes),0) AS BIGINT),CAST(COALESCE(SUM(packets),0) AS BIGINT),COUNT(*) FROM flow_records WHERE org_id=$1 AND start_bucket>=$2 GROUP BY (start_bucket/3600)*3600,decision,transport,service",
+        "SELECT (start_bucket/3600)*3600,decision,transport,service,CAST(COALESCE(SUM(bytes),0) AS BIGINT),CAST(COALESCE(SUM(packets),0) AS BIGINT),COUNT(*),COALESCE(direction,'unknown') FROM flow_records WHERE org_id=$1 AND start_bucket>=$2 GROUP BY (start_bucket/3600)*3600,decision,transport,service,COALESCE(direction,'unknown')",
     )
     .bind(&org)
     .bind(since)
@@ -529,6 +587,7 @@ async fn summary(
     let mut denied = Counter::default();
     let mut by_transport: BTreeMap<String, Counter> = BTreeMap::new();
     let mut by_service: BTreeMap<String, Counter> = BTreeMap::new();
+    let mut by_direction: BTreeMap<String, Counter> = BTreeMap::new();
     let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
     for row in rows {
         let start: i64 = row.try_get(0)?;
@@ -538,6 +597,7 @@ async fn summary(
         let bytes: i64 = row.try_get(4)?;
         let packets: i64 = row.try_get(5)?;
         let records: i64 = row.try_get(6)?;
+        let direction: String = row.try_get(7)?;
         let bucket = buckets.entry(start).or_insert_with(|| Bucket {
             start,
             ..Bucket::default()
@@ -555,6 +615,10 @@ async fn summary(
             .add(bytes, packets, records);
         by_service
             .entry(service)
+            .or_default()
+            .add(bytes, packets, records);
+        by_direction
+            .entry(direction)
             .or_default()
             .add(bytes, packets, records);
     }
@@ -584,6 +648,7 @@ async fn summary(
         denied,
         by_transport,
         by_service,
+        by_direction,
         buckets: buckets.into_values().collect(),
     }))
 }

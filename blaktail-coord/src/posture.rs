@@ -720,7 +720,7 @@ pub(crate) fn enforcement_profile(os: Option<&str>, capabilities: &[String]) -> 
                 "The agent filters inbound overlay traffic and has verified sshd per-user limits."
                     .into()
             } else {
-                "The agent filters inbound overlay traffic. Per-user SSH limits are not verified, so user-limited SSH stays closed.".into()
+                "The agent filters inbound overlay traffic. Per-user SSH limits are not verified (only the Linux agent with a verified sshd drop-in can), so user-limited SSH stays closed.".into()
             },
         };
     }
@@ -1235,5 +1235,12 @@ mod tests {
             enforcement_profile(Some("macos"), &[CAP_SSH_USERS.into()]).packet_filter,
             "not_enforced"
         );
+        // Userspace dataplanes report the filter once their hook is active;
+        // the OS alone never decides it.
+        for os in ["ios", "android", "windows", "macos"] {
+            let profile = enforcement_profile(Some(os), &[CAP_ACL_FILTER.into()]);
+            assert_eq!(profile.packet_filter, "enforced", "{os}");
+            assert!(!profile.ssh_users);
+        }
     }
 }

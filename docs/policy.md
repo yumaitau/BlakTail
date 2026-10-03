@@ -132,7 +132,7 @@ Destination capabilities, reported by the agent on every poll:
 
 | Capability | Meaning | Reported by |
 | --- | --- | --- |
-| `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild` |
+| `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild`; macOS `blaktaild` once its pf anchor is verified; Windows `blaktaild`; the iOS packet tunnel; the Android app |
 | `ssh-users` | Verified sshd per-source `AllowUsers`/`DenyUsers` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` set and verified |
 | `forward-filter` | Routing peer forwards only its compiled `forward_filter` allow-list | Linux `blaktaild` |
 | `remote-ssh-ca` | Trusts the organisation SSH user CA, from the remote-access gateway only, verified with `sshd -T` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` and `BLAKTAIL_SSH_USER_CA` ([remote-access.md](remote-access.md)) |
@@ -141,9 +141,52 @@ Destination capabilities, reported by the agent on every poll:
 An agent that predates these capabilities reports neither, so user-limited
 SSH stays closed at port level (fail closed); it never widens access. The
 Linux agent also closes TCP 22 itself for user-limited sources whenever its
-own sshd verification has not succeeded. macOS, iOS, Android and Windows
-clients do not install an inbound filter: SSH and port rules are **not
-enforced** on those destinations, and Explain access says so.
+own sshd verification has not succeeded.
+
+### Inbound filtering outside Linux
+
+The same `ingress` grants are enforced on every client, in the Linux chain's
+order (replies to the device's own flows, per-source rejects, accepts, reject
+the rest):
+
+- **iOS, Android, Windows**: the shared userspace filter in
+  `blaktail-ios-wg/src/filter.rs` runs inside the boringtun dataplane,
+  between decrypt and the tunnel write. It tracks connections (bounded at
+  16,384 flows, oldest evicted; TCP 2 h established, UDP 60/180 s, ICMP
+  30 s), lets ICMP errors through only when they quote one of the device's
+  own flows, follows a fragment's first fragment (orphan fragments are
+  dropped), walks at most 8 IPv6 extension headers and drops malformed
+  packets. Denied packets are dropped silently rather than answered with a
+  reset. Unlike Linux, a policy change also ends inbound flows the new policy
+  no longer allows. Invalid policy input installs deny-all.
+- **macOS**: boringtun's device writes decrypted packets straight to the
+  utun interface with no hook, so the agent compiles the grants into a `pf`
+  anchor (`com.apple/blaktail`, evaluated by the stock `/etc/pf.conf`) on
+  that interface and takes a `pfctl -E` reference. `acl-filter` is reported
+  only after the agent verifies pf is enabled, the main ruleset still
+  evaluates `com.apple/*` and the anchor holds every rule; otherwise the Mac
+  is reported unfiltered. `blaktaild down` flushes the anchor and releases
+  the reference.
+
+Shared test vectors (`blaktail-ios-wg/src/filter_vectors.json`) drive both
+the userspace filter tests and a walk of the generated Linux chain, so the
+two decide every vector the same way; the pf ruleset is syntax-checked with
+`pfctl -n`.
+
+Per-user SSH limits stay **Linux-only**: only the Linux agent can verify an
+sshd drop-in and report `ssh-users`. Every other client closes TCP 22 to
+sources whose SSH grant is user-limited (the coordinator does too), so a
+user-limited SSH rule never widens access there.
+
+Linux lab (`deploy/homelab/prove-traffic.sh`, 3 October 2026, `m3-max`): with
+office granted only TCP 8080 and ICMP to store, 8080 connects while 8081
+(office → store) and 9000 (store → office) are rejected. The chain also ends
+each source's rules with a per-source reject, which takes the same action as
+the final rejects, so denied attempts are counted per peer.
+
+Limits: Android takes its peer map (and so its policy) only at enrolment;
+the iOS tunnel refreshes every 30 seconds. Neither has been proven on a
+physical device in this change.
 
 `sshd_blaktail.conf` in the state directory is still written for
 inspection. To enforce per-user limits, see

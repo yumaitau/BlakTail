@@ -1,8 +1,6 @@
 //! Windows userspace tunnel. WinTun carries plaintext packets. boringtun, via
 //! the shared C ABI, turns them into WireGuard ciphertext on a UDP socket.
 
-use blaktail_ios_wg as _;
-
 use crate::{peer_key_hex, Error, Network, Peer, PeerChange};
 use base64::Engine;
 use std::collections::HashMap;
@@ -252,6 +250,39 @@ impl Network for WindowsNetwork {
             out.entry(key.clone()).or_insert(*stamp);
         }
         Ok(out)
+    }
+
+    /// Inbound policy for the shared userspace filter, which sits between
+    /// decrypt and the WinTun write inside the dataplane.
+    fn apply_ingress(&mut self, _interface: &str, peers: &[Peer]) -> Result<(), Error> {
+        let raw = self.raw()?;
+        let policy_peers: Vec<blaktail_ios_wg::filter::PolicyPeer> = serde_json::to_value(peers)
+            .and_then(serde_json::from_value)
+            .map_err(|error| Error::Message(format!("filter policy: {error}")))?;
+        let policy = blaktail_ios_wg::filter::Policy::compile(&policy_peers, None);
+        unsafe { blaktail_ios_wg::filter::set_policy(raw.cast(), policy) };
+        Ok(())
+    }
+
+    fn inbound_filter_active(&self) -> bool {
+        self.raw().is_ok()
+    }
+
+    fn set_traffic(&mut self, _interface: &str, enabled: bool) {
+        if let Ok(raw) = self.raw() {
+            unsafe { blaktail_ios_wg::filter::set_traffic(raw.cast(), enabled) };
+        }
+    }
+
+    fn traffic_counts(
+        &mut self,
+        _interface: &str,
+        _peers: &[Peer],
+    ) -> Result<Vec<crate::flow_report::FlowCount>, Error> {
+        let raw = self.raw()?;
+        Ok(unsafe { blaktail_ios_wg::filter::take_report(raw.cast()) }
+            .map(|report| report.flow_counts())
+            .unwrap_or_default())
     }
 
     fn listen_endpoint(&mut self, _interface: &str) -> Result<Option<SocketAddr>, Error> {

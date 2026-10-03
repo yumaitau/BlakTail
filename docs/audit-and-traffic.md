@@ -100,7 +100,11 @@ the uploading device's own), a service class label (`ssh`, `https`, …; at
 most 32 lowercase letters, digits, `-`, `_` — never a host name), a time
 bucket of at most one hour, protocol and port, byte and packet counts,
 transport (`direct`, `udp_relay`, `https_relay`) and decision (`allowed`,
-`denied`).
+`denied`). Optional: `peer_id` (the other device, which must belong to the
+same organisation) and `direction` (`inbound`: a peer started the flow;
+`outbound`: this device did). Protocol is `tcp`, `udp`, `icmp`, `other`
+(another IP protocol) or `all` (counters not split by protocol); the last
+three carry port 0.
 
 Refused outright: uploads while the organisation is opted out (`409`,
 checked again inside the write so turning it off stops the very next
@@ -121,19 +125,64 @@ reporting devices out of active devices). States: **disabled**, **no data**
 (on but nothing received), **stale** (newest record older than two hours) and
 **current**.
 
-### Not collected today
+### How agents report
 
-Current BlakTail agents (Linux, macOS, Windows, iOS, Android) do **not**
-send traffic records. The endpoint and page exist so an operator can opt in
-and so a future agent release can report; until then an opted-in
-organisation will see **no data**, and the page says why. macOS and iOS run
-WireGuard through boringtun inside the app or Network Extension, so any
-future collection there is limited to what that process observes (tunnel
-bytes per peer), not per-connection decisions. Traffic export is not offered.
+While diagnostics are on, the peer map carries `traffic`
+(`enabled`, `sampling_rate`, `org_id`). Turning them on or off, or changing
+the sampling rate, bumps the control revision, so long-polling agents start
+or stop within seconds; turning off discards the agent's counters at once,
+and a `409 … turned off` answer also stops it. Agents upload one aggregate
+bucket roughly every minute, built by the shared
+`blaktail-ios-wg/src/flow_report.rs`: one record per peer, direction,
+protocol, port class and decision. Ports at or above 49152 are reported as
+49152 (`dynamic`). Agents apply the coordinator's own deterministic sampling
+draw before upload, so sampled-out records are never sent.
+
+Counter sources (all counters the kernel or dataplane keeps anyway):
+
+| Platform | Source | What it measures |
+| --- | --- | --- |
+| Linux | `iptables -L BLAKTAIL-ACL -v -x` per-rule counters, `wg show <if> transfer` | Allowed/denied **new inbound flow attempts** by peer, protocol and port (accept/reject rules sit after the established rule, so they count first packets); per-peer tunnel bytes as service `tunnel`, proto `all`, direction = byte direction |
+| macOS | per-rule counters of the pf anchor (`pfctl -a com.apple/blaktail -v -s rules`) | Whole flows (pf counts state traffic to the rule that created it): inbound by peer/protocol/port and decision, outbound per peer |
+| Windows, iOS | shared userspace filter counters | Whole flows by peer, initiator direction, protocol, service port and decision |
+| Android | — | Not reported (the app has no peer-map polling, so it cannot learn the setting) |
+
+Counts are lower bounds: Linux rule counters reset when the chain is
+rebuilt, counter keys are capped (1,024 on userspace platforms; extra keys
+are counted as overflow and dropped) and uploads that fail are not retried.
+Traffic export is not offered.
+
+### Lab proof (3 October 2026)
+
+`deploy/homelab/prove-traffic.sh` (Docker context `m3-max`): a coordinator on
+SQLite and two privileged Linux agents on kernel WireGuard, tagged `office`
+and `store`. The policy lets office reach store only on TCP 8080 and ICMP.
+Result:
+
+- Enforcement: 8080 office → store connects; 8081 office → store and 9000
+  store → office are rejected.
+- Off: after 70 s of traffic, 0 rows were stored and the summary state was
+  `disabled`.
+- On: rows arrived 108 s after opt-in. The summary was `current`, with one
+  hourly bucket (6 allowed records / 12 packets, 2 denied records / 18
+  packets), `by_service` `http-alt` 1, `icmp` 1, `tunnel` 4, `any` 2,
+  `by_direction` inbound 6 / outbound 2, and confidence `high` (2 of 2
+  devices).
+- Stored rows had only ids, classes and counters: no `100.64.*`, `172.*`
+  or `fd7a` address anywhere. Denials carried the peer's device id (service
+  `any`, proto `all`, port 0: Linux attributes a denied attempt to a peer but
+  not to the port it tried, unless a deny rule names that port).
+- Off again: no row arrived in the next 90 s, and both agents logged
+  "traffic diagnostics off".
+
+Not covered: macOS, Windows or iOS reporting, Android, throughput impact
+or storage-bound load.
 
 ### Privacy
 
-Records never contain payloads, URLs, DNS questions or host names. They do
+Records never contain payloads, URLs, DNS questions, host names or IP
+addresses; agent tests check the serialised upload for addresses, keys and
+names. They do
 reveal which device moved how much data over which service class and port in
 which hour, which is still personal information about the device's user.
 Turn collection on only with a stated purpose, keep retention short, and

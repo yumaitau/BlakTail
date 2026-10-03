@@ -61,6 +61,9 @@ class TunnelService : VpnService() {
             val key = android.util.Base64.decode(parts[0], android.util.Base64.DEFAULT)
             NativeTunnel.addPeer(tunnel, key, parts[1].toByteArray())
         }
+        // Inbound filter between decrypt and the TUN write. A phone enrolled
+        // before policies were stored has none, which leaves it unfiltered.
+        intent.getStringExtra(EXTRA_POLICY)?.let { NativeTunnel.setPolicy(tunnel, it.toByteArray()) }
         val udp = DatagramSocket()
         protect(udp)
         udp.soTimeout = 50
@@ -149,6 +152,7 @@ class TunnelService : VpnService() {
         const val EXTRA_ADDRESS = "address"
         const val EXTRA_PRIVATE_KEY = "privateKey"
         const val EXTRA_PEERS = "peers"
+        const val EXTRA_POLICY = "policy"
         private const val CHANNEL = "blaktail"
     }
 }

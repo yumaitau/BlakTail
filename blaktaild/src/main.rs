@@ -463,6 +463,7 @@ async fn sync_loop(
     let mut pq = PqRuntime::new(&own_key, state_dir, network.psk_device(&state.interface));
     let mut pq_reported: Option<(Vec<pq::PeerReport>, Instant)> = None;
     let mut serving = ServiceRuntime::default();
+    let mut traffic = blaktaild::traffic::Reporter::default();
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -482,6 +483,25 @@ async fn sync_loop(
         let transport = manage_paths(network, &mut mesh, &mut relays, state, &mut paths).await;
         coordinator.set_transport(transport);
         manage_pq(&mut pq, coordinator, state, &mut pq_reported).await;
+        let relayed: Vec<String> = paths
+            .iter()
+            .filter(|(_, path)| {
+                matches!(
+                    path,
+                    PeerPath::Relayed { .. } | PeerPath::DirectProbe { .. }
+                )
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
+        manage_traffic(
+            &mut traffic,
+            coordinator,
+            network,
+            state,
+            transport,
+            &relayed,
+        )
+        .await;
         let active_relay = mesh.as_ref().map(|active| active.relay_addr().to_string());
         if state.active_relay != active_relay || state.relay_failovers != relays.failovers() {
             state.active_relay = active_relay;
@@ -544,6 +564,71 @@ async fn sync_loop(
     serving.stop();
     shutdown_magic_dns(&mut dns, state, state_dir);
     Ok(())
+}
+
+/// Opt-in traffic reporting: starts and stops counting with the peer map's
+/// `traffic` setting and uploads one aggregate bucket about once a minute.
+async fn manage_traffic(
+    reporter: &mut blaktaild::traffic::Reporter,
+    coordinator: &Coordinator,
+    network: &mut dyn Network,
+    state: &mut blaktaild::NodeState,
+    transport: Option<&'static str>,
+    relayed: &[String],
+) {
+    use blaktaild::flow_report;
+    let interface = state.interface.clone();
+    match reporter.step(state.traffic.as_ref(), blaktaild_now() as i64) {
+        blaktaild::traffic::Step::Idle => {}
+        blaktaild::traffic::Step::Start => {
+            info!("traffic diagnostics on: counting aggregate flows");
+            network.set_traffic(&interface, true);
+        }
+        blaktaild::traffic::Step::Stop => {
+            info!("traffic diagnostics off: counters discarded");
+            network.set_traffic(&interface, false);
+        }
+        blaktaild::traffic::Step::Report { start, end } => {
+            let Some(settings) =
+                blaktaild::traffic::Settings::active(state.traffic.as_ref()).cloned()
+            else {
+                return;
+            };
+            let counts = match network.traffic_counts(&interface, &state.peers) {
+                Ok(counts) => counts,
+                Err(error) => {
+                    warn!(%error, "could not read traffic counters");
+                    return;
+                }
+            };
+            let device = state.node_id.to_string();
+            let upload = flow_report::build(
+                &flow_report::Bucket {
+                    org_id: &settings.org_id,
+                    device_id: &device,
+                    start,
+                    end,
+                    transport: blaktaild::traffic::transport_label(transport),
+                    relayed_peers: relayed,
+                    sampling_rate: settings.sampling_rate,
+                },
+                &counts,
+            );
+            if upload.records.is_empty() {
+                return;
+            }
+            match coordinator.upload_flows(state, &upload).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!("coordinator reports traffic diagnostics are off; stopping");
+                    reporter.halt();
+                    state.traffic = None;
+                    network.set_traffic(&interface, false);
+                }
+                Err(error) => warn!(%error, "could not upload traffic records"),
+            }
+        }
+    }
 }
 
 /// Feeds the peer map to the post-quantum PSK runtime and reports the

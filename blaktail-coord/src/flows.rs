@@ -44,7 +44,7 @@ pub enum FlowError {
     BucketRange { start: i64, end: i64 },
     #[error("bucket spans {spanned}s, max is {MAX_BUCKET_SECS}s")]
     BucketTooWide { spanned: i64 },
-    #[error("unsupported protocol '{0}' (want tcp, udp or icmp)")]
+    #[error("unsupported protocol '{0}' (want tcp, udp, icmp, other or all)")]
     BadProtocol(String),
     #[error("port {0} invalid for protocol '{1}'")]
     BadPort(u16, String),
@@ -52,6 +52,8 @@ pub enum FlowError {
     PayloadField(String),
     #[error("service must be a short lowercase class label such as ssh or https")]
     BadService,
+    #[error("peer_id must be a device id")]
+    BadPeer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,14 @@ pub enum FlowTransport {
     Direct,
     UdpRelay,
     HttpsRelay,
+}
+
+/// Which side started the flow, as seen by the reporting device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowDirection {
+    Inbound,
+    Outbound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +92,11 @@ pub struct FlowRecord {
     pub packets: u64,
     pub transport: FlowTransport,
     pub decision: FlowDecision,
+    /// The other device in the flow (a device id in the same organisation).
+    #[serde(default)]
+    pub peer_id: Option<String>,
+    #[serde(default)]
+    pub direction: Option<FlowDirection>,
 }
 
 impl FlowRecord {
@@ -120,12 +135,19 @@ impl FlowRecord {
                     return Err(FlowError::BadPort(self.port, self.proto.clone()));
                 }
             }
-            "icmp" => {
+            // `other`: another IP protocol; `all`: counters not split by
+            // protocol (WireGuard per-peer transfer, catch-all filter rules).
+            "icmp" | "other" | "all" => {
                 if self.port != 0 {
                     return Err(FlowError::BadPort(self.port, self.proto.clone()));
                 }
             }
             other => return Err(FlowError::BadProtocol(other.to_owned())),
+        }
+        if let Some(peer) = &self.peer_id {
+            if uuid::Uuid::parse_str(peer).is_err() {
+                return Err(FlowError::BadPeer);
+            }
         }
         Ok(())
     }
@@ -195,6 +217,8 @@ mod tests {
             packets: 8,
             transport: FlowTransport::Direct,
             decision: FlowDecision::Allowed,
+            peer_id: None,
+            direction: None,
         }
     }
 
@@ -249,6 +273,23 @@ mod tests {
             assert_eq!(rec.validate(), Err(FlowError::BadService), "{bad}");
         }
         rec.service = "https-alt_2".into();
+        assert!(rec.validate().is_ok());
+    }
+
+    #[test]
+    fn aggregate_protocols_need_port_zero_and_peer_must_be_an_id() {
+        let mut rec = record();
+        rec.proto = "all".into();
+        rec.port = 0;
+        assert!(rec.validate().is_ok());
+        rec.port = 22;
+        assert!(matches!(rec.validate(), Err(FlowError::BadPort(..))));
+        rec.proto = "gre".into();
+        assert!(matches!(rec.validate(), Err(FlowError::BadProtocol(_))));
+        let mut rec = record();
+        rec.peer_id = Some("100.64.0.2".into());
+        assert_eq!(rec.validate(), Err(FlowError::BadPeer));
+        rec.peer_id = Some(uuid::Uuid::nil().to_string());
         assert!(rec.validate().is_ok());
     }
 

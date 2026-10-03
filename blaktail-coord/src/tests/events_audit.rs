@@ -1372,3 +1372,174 @@ async fn automation_api_shares_console_permissions_and_validation() {
         StatusCode::NO_CONTENT
     );
 }
+
+#[tokio::test]
+async fn agents_learn_traffic_settings_and_report_peer_and_direction() {
+    let store = Store::memory().await.unwrap();
+    let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+    let org = create_test_org(&router, "agent-traffic").await;
+    let other = create_test_org(&router, "agent-traffic-other").await;
+    let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+    let auditor = signed_session(org.id, "auditor-1", Role::Auditor, now() + 60);
+    let other_owner = signed_session(other.id, "owner-2", Role::Owner, now() + 60);
+    let node = register_test_node(&router, org.id, &owner, "laptop", "agent-traffic-a", &[]).await;
+    let peer = register_test_node(&router, org.id, &owner, "server", "agent-traffic-b", &[]).await;
+    let foreign = register_test_node(
+        &router,
+        other.id,
+        &other_owner,
+        "foreign",
+        "agent-traffic-c",
+        &[],
+    )
+    .await;
+    let settings_uri = format!("/v1/orgs/{}/traffic/settings", org.id);
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT control_revision FROM orgs WHERE id=$1")
+            .bind(org.id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+    };
+    let peer_map = |node: &RegisterResponse| {
+        let uri = format!("/v1/nodes/{}/peers", node.id);
+        let token = node.node_token.clone();
+        let router = router.clone();
+        async move {
+            body::<serde_json::Value>(
+                call(
+                    &router,
+                    Method::GET,
+                    &uri,
+                    serde_json::Value::Null,
+                    Some(&token),
+                )
+                .await,
+            )
+            .await
+        }
+    };
+
+    // Off: the peer map says nothing, so agents do not count or report.
+    assert!(peer_map(&node).await.get("traffic").is_none());
+    let before = revision().await;
+    call(
+        &router,
+        Method::PUT,
+        &settings_uri,
+        serde_json::json!({"enabled":true,"sampling_rate":0.5}),
+        Some(&owner),
+    )
+    .await;
+    assert!(revision().await > before, "opt-in must wake agents");
+    let map = peer_map(&node).await;
+    assert_eq!(map["traffic"]["enabled"], true);
+    assert_eq!(map["traffic"]["sampling_rate"], 0.5);
+    assert_eq!(map["traffic"]["org_id"], org.id.to_string());
+    // Changing retention alone does not wake every agent.
+    let before = revision().await;
+    call(
+        &router,
+        Method::PUT,
+        &settings_uri,
+        serde_json::json!({"enabled":true,"retention_days":2}),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(revision().await, before);
+    call(
+        &router,
+        Method::PUT,
+        &settings_uri,
+        serde_json::json!({"enabled":true,"sampling_rate":1}),
+        Some(&owner),
+    )
+    .await;
+
+    let mut inbound = flow_record(org.id, node.id);
+    inbound["peer_id"] = serde_json::json!(peer.id);
+    inbound["direction"] = serde_json::json!("inbound");
+    let mut outbound = flow_record(org.id, node.id);
+    outbound["peer_id"] = serde_json::json!(peer.id);
+    outbound["direction"] = serde_json::json!("outbound");
+    outbound["proto"] = serde_json::json!("all");
+    outbound["port"] = serde_json::json!(0);
+    outbound["service"] = serde_json::json!("tunnel");
+    let mut denied = flow_record(org.id, node.id);
+    denied["decision"] = serde_json::json!("denied");
+    denied["direction"] = serde_json::json!("inbound");
+    denied["port"] = serde_json::json!(3389);
+    denied["service"] = serde_json::json!("rdp");
+    let accepted: crate::traffic::UploadResult = body(
+        upload(
+            &router,
+            &node,
+            serde_json::json!({"records":[inbound, outbound, denied]}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(accepted.accepted, 3);
+
+    // A peer from another organisation, or an address, is refused.
+    let mut foreign_peer = flow_record(org.id, node.id);
+    foreign_peer["peer_id"] = serde_json::json!(foreign.id);
+    assert_eq!(
+        upload(
+            &router,
+            &node,
+            serde_json::json!({"records":[foreign_peer]})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut address_peer = flow_record(org.id, node.id);
+    address_peer["peer_id"] = serde_json::json!("100.64.0.2");
+    let mut bad_direction = flow_record(org.id, node.id);
+    bad_direction["direction"] = serde_json::json!("sideways");
+    for bad in [address_peer, bad_direction] {
+        assert_eq!(
+            upload(&router, &node, serde_json::json!({"records":[bad]}))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    let summary: crate::traffic::TrafficSummary = body(
+        call(
+            &router,
+            Method::GET,
+            &format!("/v1/orgs/{}/traffic/summary", org.id),
+            serde_json::Value::Null,
+            Some(&auditor),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(summary.state, "current");
+    assert_eq!(summary.by_direction["inbound"].records, 2);
+    assert_eq!(summary.by_direction["outbound"].records, 1);
+    assert_eq!(summary.denied.records, 1);
+    assert_eq!(summary.by_service["tunnel"].records, 1);
+    let stored: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT peer_id,direction FROM flow_records ORDER BY direction")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+    assert!(stored.contains(&(Some(peer.id.to_string()), Some("outbound".into()))));
+
+    // Off again: the next peer map tells agents to stop.
+    let before = revision().await;
+    call(
+        &router,
+        Method::PUT,
+        &settings_uri,
+        serde_json::json!({"enabled":false}),
+        Some(&owner),
+    )
+    .await;
+    assert!(revision().await > before);
+    assert!(peer_map(&node).await.get("traffic").is_none());
+}
