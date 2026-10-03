@@ -239,7 +239,7 @@ impl Gateway {
         &self,
         path: &str,
         body: &impl Serialize,
-    ) -> Result<T, String> {
+    ) -> Result<T, CoordError> {
         let response = self
             .coord_client
             .post(format!(
@@ -250,18 +250,18 @@ impl Gateway {
             .json(body)
             .send()
             .await
-            .map_err(|_| "coordinator unreachable".to_string())?;
+            .map_err(|_| CoordError::Unreachable)?;
         let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(CoordError::NotAuthorised);
+        }
         if !status.is_success() {
-            return Err(format!("coordinator refused the gateway ({status})"));
+            return Err(CoordError::Unreachable);
         }
         if status == reqwest::StatusCode::NO_CONTENT {
-            return serde_json::from_value(Value::Null).map_err(|_| "unexpected reply".into());
+            return serde_json::from_value(Value::Null).map_err(|_| CoordError::Unreachable);
         }
-        response
-            .json()
-            .await
-            .map_err(|_| "coordinator sent an unreadable reply".to_string())
+        response.json().await.map_err(|_| CoordError::Unreachable)
     }
 }
 
@@ -369,11 +369,42 @@ fn denied(denial: &Denial) -> Response {
     )
 }
 
+/// Why the coordinator could not answer for a request. Both fail closed.
+#[derive(Debug)]
+enum CoordError {
+    /// The coordinator was unreachable or sent an unusable reply.
+    Unreachable,
+    /// The coordinator refused this gateway node: it is not designated as an
+    /// AI gateway, or its credential was revoked or suspended.
+    NotAuthorised,
+}
+
+impl std::fmt::Display for CoordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable => "coordinator unreachable",
+            Self::NotAuthorised => "coordinator refused this gateway",
+        })
+    }
+}
+
 fn unavailable() -> Response {
+    unavailable_for(&CoordError::Unreachable)
+}
+
+fn unavailable_for(error: &CoordError) -> Response {
+    let message = match error {
+        CoordError::Unreachable => {
+            "the gateway cannot reach the BlakTail coordinator; requests fail closed"
+        }
+        CoordError::NotAuthorised => {
+            "this gateway is not authorised by the BlakTail coordinator (not designated as an AI gateway, or its credential was revoked); requests fail closed"
+        }
+    };
     openai_error(
         StatusCode::SERVICE_UNAVAILABLE,
         "gateway_unavailable",
-        "the gateway cannot reach the BlakTail coordinator; requests fail closed",
+        message,
     )
 }
 
@@ -397,7 +428,7 @@ async fn list_models(
         .await
     {
         Ok(list) => list,
-        Err(_) => return unavailable(),
+        Err(error) => return unavailable_for(&error),
     };
     if let Some(denial) = &list.denial {
         return denied(denial);
@@ -587,7 +618,7 @@ async fn chat_completions(
         .await
     {
         Ok(decision) => decision,
-        Err(_) => return unavailable(),
+        Err(error) => return unavailable_for(&error),
     };
     let grant = match (decision.grant, decision.denial) {
         (Some(grant), _) => grant,
@@ -905,6 +936,18 @@ impl Drop for Finisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refused_gateway_says_it_is_not_authorised() {
+        let response = unavailable_for(&CoordError::NotAuthorised);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("not designated"), "{body}");
+        assert!(!body.contains("cannot reach"), "{body}");
+    }
 
     #[test]
     fn secrets_never_debug_print() {

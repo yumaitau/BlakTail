@@ -2,11 +2,11 @@
 # Live proof for the agent network gateway: a TLS coordinator, the gateway and
 # a real Ollama, each in its own container on a private Docker network. Run
 # with DOCKER_CONTEXT pointing at a lab Docker host. Everything this starts is
-# named agentgw-lab-* and removed on exit.
+# named $LAB_PREFIX-* (default agentgw-lab-*) and removed on exit.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-P=agentgw-lab
+P="${LAB_PREFIX:-agentgw-lab}"
 MODEL="${AGENTGW_LAB_MODEL:-qwen2.5:0.5b}"
 RUST_IMAGE="${AGENTGW_LAB_RUST_IMAGE:-rust:1-bookworm}"
 RUN_IMAGE=debian:bookworm-slim
@@ -27,7 +27,7 @@ docker network create "$P-net" >/dev/null
 for volume in bin lab cargo target ollama-models; do docker volume create "$P-$volume" >/dev/null; done
 
 echo "== start ollama and pull $MODEL"
-docker run -d --name "$P-ollama" --network "$P-net" -v "$P-ollama-models:/root/.ollama" ollama/ollama >/dev/null
+docker run -d --name "$P-ollama" --network "$P-net" --network-alias ollama.internal -v "$P-ollama-models:/root/.ollama" ollama/ollama >/dev/null
 for _ in $(seq 1 30); do docker exec "$P-ollama" ollama list >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$P-ollama" ollama pull "$MODEL" >/dev/null 2>&1
 
@@ -39,12 +39,12 @@ docker run --rm -i -v "$P-bin:/out" -v "$P-cargo:/usr/local/cargo/registry" -v "
 
 echo "== lab CA, coordinator certificate and HMAC secret"
 docker run -d --name "$P-driver" --network "$P-net" -v "$P-lab:/lab" "$RUST_IMAGE" sleep infinity >/dev/null
-docker exec "$P-driver" bash -ceu '
+docker exec -e P="$P" "$P-driver" bash -ceu '
   apt-get -qq update >/dev/null && apt-get -qq install -y jq >/dev/null
   cd /lab && umask 077
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.crt -days 1 -subj /CN=agentgw-lab-ca 2>/dev/null
-  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout coord.key -out coord.csr -subj /CN=agentgw-lab-coord 2>/dev/null
-  printf "subjectAltName=DNS:agentgw-lab-coord\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" > ext
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.crt -days 1 -subj "/CN=$P-ca" 2>/dev/null
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout coord.key -out coord.csr -subj "/CN=$P-coord" 2>/dev/null
+  printf "subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" "$P-coord" > ext
   openssl x509 -req -in coord.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 -extfile ext -out coord.crt 2>/dev/null
   openssl rand -hex 32 | tr -d "\n" > hmac
   openssl rand -hex 32 | tr -d "\n" > relay
@@ -63,12 +63,12 @@ echo "== migrate and start the coordinator"
 docker run --rm -v "$P-bin:/opt/bt:ro" -v "$P-lab:/lab" "${COORD_ENV[@]}" "$RUN_IMAGE" /opt/bt/blaktail-coord migrate >/dev/null
 docker run -d --name "$P-coord" --network "$P-net" -v "$P-bin:/opt/bt:ro" -v "$P-lab:/lab" "${COORD_ENV[@]}" "$RUN_IMAGE" /opt/bt/blaktail-coord serve >/dev/null
 for _ in $(seq 1 30); do
-  docker exec "$P-driver" curl -fsS --cacert /lab/ca.crt https://agentgw-lab-coord:8443/readyz >/dev/null 2>&1 && break
+  docker exec "$P-driver" curl -fsS --cacert /lab/ca.crt https://$P-coord:8443/readyz >/dev/null 2>&1 && break
   sleep 1
 done
 
 echo "== organisation, gateway node, providers and agent key"
-docker exec -e AGENTGW_LAB_MODEL="$MODEL" "$P-driver" bash /driver.sh setup
+docker exec -e AGENTGW_LAB_MODEL="$MODEL" -e LAB_PREFIX="$P" "$P-driver" bash /driver.sh setup
 
 echo "== the gateway refuses a public bind"
 if out="$(docker run --rm -v "$P-bin:/opt/bt:ro" -v "$P-lab:/lab:ro" "$RUN_IMAGE" /opt/bt/blaktail-agentgw --state-file /lab/state.json --listen 0.0.0.0:8686 2>&1)"; then
@@ -80,12 +80,12 @@ echo "== start the gateway on its container address (lab stand-in for the overla
 docker run -d --name "$P-gateway" --network "$P-net" -v "$P-bin:/opt/bt:ro" -v "$P-lab:/lab:ro" "$RUN_IMAGE" \
   sh -c 'exec /opt/bt/blaktail-agentgw --state-file /lab/state.json --coord-ca /lab/ca.crt --allow-private-listen --listen "$(hostname -i | cut -d" " -f1):8686"' >/dev/null
 for _ in $(seq 1 30); do
-  docker exec "$P-driver" curl -fsS http://agentgw-lab-gateway:8686/healthz >/dev/null 2>&1 && break
+  docker exec "$P-driver" curl -fsS http://$P-gateway:8686/healthz >/dev/null 2>&1 && break
   sleep 1
 done
 
 echo "== requests through the gateway"
-docker exec -e AGENTGW_LAB_MODEL="$MODEL" "$P-driver" bash /driver.sh prove
+docker exec -e AGENTGW_LAB_MODEL="$MODEL" -e LAB_PREFIX="$P" "$P-driver" bash /driver.sh prove
 
 echo "== gateway log check"
 logs="$(docker logs "$P-gateway" 2>&1)"

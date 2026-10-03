@@ -102,6 +102,11 @@ def main(argv):
         route = {"fqdn": fqdn, "confirm_fqdn": fqdn, "target_node_id": node_id, "target_port": port, "tls_mode": tls_mode}
         body = expect(*call("POST", f"/v1/orgs/{org()}/public-ingress/routes", org(), body=route), 201)
         print(body["id"])
+    elif command == "designate":
+        # designate <node_id> <true|false> [role]: prints the HTTP status only.
+        role = argv[3] if len(argv) > 3 else "owner"
+        status, _ = call("PUT", f"/v1/orgs/{org()}/public-ingress/nodes/{argv[1]}", org(), role, {"designated": argv[2] == "true"})
+        print(status)
     elif command == "as-role":
         # as-role <role> <METHOD> <path> [json]: prints the HTTP status only.
         status, _ = call(argv[2], argv[3].replace("{org}", org()), org(), argv[1], json.loads(argv[4]) if len(argv) > 4 else None)

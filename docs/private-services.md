@@ -50,7 +50,7 @@ services yet.
 | `target_unavailable` | The target device was revoked or removed. |
 | `awaiting_certificate` | No live certificate: the target has not run `--serve-services`, is suspended, or its request failed. |
 | `certificate_issued` | A live certificate exists but no report in the last 120 seconds names it with a running listener. Not published. |
-| `target_unhealthy` | The listener is up with the live certificate but the local target failed its check. Not published. |
+| `target_unhealthy` | A report from the last 120 seconds says the local target failed its check, with the device's reason (refused connection, not HTTP, or the port is not in `--serve-services-ports`). Shown whether or not a certificate or listener exists, because the agent stops routing a failing target. Not published. |
 | `serving` | Fresh report: listener up, live certificate, healthy target. Published to allowed devices. `reachable: true`. |
 
 `serving` is the target device's own report plus coordinator-side certificate
@@ -202,13 +202,16 @@ validates the certificate. Agents older than this release ignore
 ## Live lab (3 October 2026)
 
 `deploy/homelab/prove-private-services.sh` on `docker --context m3-max`
-(coordinator plus three privileged Linux agents on kernel WireGuard):
+(coordinator plus three privileged Linux agents on kernel WireGuard). Re-run
+on 3 October 2026 after the `--serve-services-ports` allow-list and
+probe-gated routes landed (`LAB_PREFIX=final-svclab`):
 
-- Server (tags office, ranger; `--serve-services`), ally (office; the access
-  tag), outsider (ranger; a policy peer of the server without the tag), target
-  `python3 -m http.server` on `127.0.0.1:8080`.
+- Server (tags office, ranger; `--serve-services --serve-services-ports
+  8080,8081`), ally (office; the access tag), outsider (ranger; a policy peer
+  of the server without the tag), target `python3 -m http.server` on
+  `127.0.0.1:8080`.
 - After create, the server generated its key, obtained a certificate and the
-  console status became `serving` within seconds. Key file mode 600, no key
+  console status became `serving` within 1 s. Key file mode 600, no key
   material in the agent log. The listener was bound only to the server's
   overlay IPv4 and IPv6 addresses on 443, and `BLAKTAIL-ACL` held a tcp/443
   REJECT for the outsider.
@@ -219,11 +222,27 @@ validates the certificate. Agents older than this release ignore
 - Outsider: the name was NXDOMAIN; `curl --resolve <name>:443:<overlay IP>` and
   `curl -k https://<overlay IP>/` both failed; ordinary policy access (ping) to
   the server was unchanged.
-- Stopping the target: `target_unhealthy` after 16 s and the ally's name
-  withdrawn; restarting it: `serving` again after 22 s and served.
-- Disable: the server's listener was gone at the first check (under 1 s), the
+- Allow-list and probe gate: `admin`, a healthy HTTP target on unlisted port
+  9090, got no certificate request and no key, showed `target_unhealthy` with
+  the device's reason ("port 9090 is not in this agent's
+  --serve-services-ports list"), was not resolvable and was not proxied with
+  the name forced to the server. `banner`, on listed port 8081 but answering
+  with an SSH banner instead of HTTP, got a certificate but showed
+  `target_unhealthy`, was not resolvable, and a forced TLS connection with
+  its SNI never received the banner.
+- Stopping the target: `target_unhealthy` after 26 s and the ally's name
+  withdrawn; restarting it: `serving` again after 25 s and served.
+- Disable: the server's listener was gone 1 s after disable, the
   ally could not connect even with the name forced, the name was withdrawn and
   the key file deleted.
+
+The re-run first failed: once routes became probe-gated, the agent dropped a
+failing target's route (and the listener with it), reporting `listening:
+false`, so the coordinator showed `certificate_issued` ("has not reported a
+listener") or `awaiting_certificate` ("run `--serve-services`") instead of
+the device's reason. The coordinator now records any failed check as
+`unhealthy` and shows `target_unhealthy` with the device's detail whether or
+not a listener or certificate exists (`service_serving::tests::access_ingress_and_dns_follow_health_and_certificates`).
 
 Lab caveat: Docker rewrites container `resolv.conf`, so the lab points each
 client's resolver at its own MagicDNS listener (and lists the coordinator in

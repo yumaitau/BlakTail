@@ -240,11 +240,12 @@ Docker network, with kernel WireGuard between the nodes. A Node 22 driver
 signs console assertions like the console and opens the gateway WebSocket
 like the browser terminal.
 
-Run on 3 October 2026 (m3-max, Linux containers), commit `d05f493` plus the
-lab script changes recorded with these docs. Summarised output:
+Re-run on 3 October 2026 (m3-max, Linux containers, `LAB_PREFIX=final-rax`)
+on `netbird-parity-2` after the gateway-change, SCIM-revoke and job-replay
+fixes, with two new live-session checks. Summarised output:
 
 ```
-ok target ready: capabilities=acl-filter,forward-filter,magicdns,remote-jobs,remote-ssh-ca,ssh-users,wireguard
+ok target ready: capabilities=acl-filter,forward-filter,magicdns,pq-psk,remote-jobs,remote-ssh-ca,ssh-users,wireguard
 Match Address 100.64.0.1,fda4:…::1      # gateway only
     TrustedUserCAKeys /var/lib/blaktail/ssh_user_ca.pub
 == browser SSH session
@@ -255,14 +256,18 @@ ok OS user outside the SSH rule refused: no SSH rule lets the gateway log in to 
 ok live session ended 10.0s after revoke (reason revoked)
 ok live session ended 10.0s after the device was suspended (policy: the device is suspended)
 ok suspended device refused: the device is suspended
+ok live session ended 10.0s after the gateway setting was cleared (reason gateway_changed)
+ok revoke-only assertion refused elsewhere (401) and without a system: subject (403)
+ok SCIM-style revoke (service assertion, system:scim) ended the live session 10.0s later (reason revoked); audited
 == remote jobs
 ok shell template refused
 ok approved job ran as the unprivileged user: uid=1001(jobrunner) gid=1001(jobrunner) groups=1001(jobrunner)
 ok job killed at its 2 s timeout (timed_out)
 ok running job cancelled from the console
-ok audit chain intact over 34 events
+ok audit chain intact over 43 events
 == RDP through guacd to xrdp
-ok RDP desktop drawn through guacd: {"size":5,"img":5,"blob":5,"cursor":4,"sync":5,…}
+ok RDP desktop drawn through guacd: {"mouse":1,"size":5,"img":5,"blob":5,"end":5,"cursor":4,"set":1,"sync":6}
+ok RDP session recorded: status=ended bytes_from_target=5997
 == host key swapped behind the agent's back
 ok host key mismatch failed closed before login and was audited
 == agent reports the new key
@@ -270,6 +275,12 @@ ok changed host key blocks new sessions: this device reported a new SSH host key
 == gateway logs carry no terminal content
 remote_access_proof passed
 ```
+
+The SCIM check signs the same `remote_access.revoke_user` service assertion
+the console's SCIM handler sends (`apps/console/src/lib/remote-revoke-core.ts`)
+and calls the coordinator directly; it does not drive a real IdP's SCIM
+client through the console. The same assertion is refused on another route
+(`401`) and with a subject outside `system:` (`403`).
 
 sshd logged each login as `Accepted certificate ID
 "blaktail-session:<session>:<person>" … via /var/lib/blaktail/ssh_user_ca.pub`.

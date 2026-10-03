@@ -134,7 +134,7 @@ Admins and automation clients cannot confirm them.
 
 ## Live lab (3 October 2026)
 
-`deploy/homelab/prove-routing.sh` (Docker context `m3-max`, resources named
+`deploy/homelab/prove-routing.sh` (Docker context `m3-max`, resources named `${LAB_PREFIX}-*`, default
 `labs-routing-*`, removed on exit; about 5 minutes) builds two sites, an
 exit node and two clients on internal Docker networks: site A with routers
 `ra1` (metric 10, iptables-nft) and `ra2` (metric 20, iptables-legacy), site B
@@ -155,6 +155,15 @@ default-routing to a home gateway that forwards nothing. Resources: site A TCP
 | Forced exit | `c2` forcing the Internet prefix into `ex`'s allowed IPs: refused, `ex` default-reject 0 → 2 |
 | Leak captures | `ex` Internet uplink: 0 packets during `c2`'s attempts, 8 during `c1`'s (2 DNS), all from `ex`'s own address; `c1` uplink (excluding WireGuard UDP 51820 and coordinator TCP 8443): 0 packets while it used DNS and HTTP through the exit |
 | Router loss | `docker kill` of `ra1`: `c1` reached site A through `ra2` after 82 s (89 s in an earlier run); `rb` immediately after; detail shows `ra1` offline, `ra2` primary; `ra2` (legacy) counted the traffic |
+
+Quick regression re-run on 3 October 2026 on `netbird-parity-2` after the
+security fixes (`LAB_PREFIX=final-routing`): `routing lab passed (failover
+82s)`. Distribution 2 s (site A) and 9 s (site B); adjacent ports and the
+modified guest refused; router-to-router both ways; 150 connects during 6
+chain swaps with 0 failures and exactly one jump, no staging chain, on all
+four routers; exit node only for `c1`, `ex` default-reject 0 → 2 for the
+forced `c2`, 0 uplink leak packets; `rb` via `ra2` immediately after the
+loss.
 
 The lab found and fixed two coordinator bugs: an agent resumed with a new
 `--exit-node` only long-polls with its current revision, so the selection was

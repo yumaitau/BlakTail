@@ -26,9 +26,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 CTX="${DOCKER_CONTEXT:-m3-max}"
 D=(docker --context "$CTX")
-P=svclab
-IMG=svclab-image:latest
-COORD_URL=https://svclab-coord:8443
+P="${LAB_PREFIX:-svclab}"
+IMG="$P-image:latest"
+COORD_URL="https://$P-coord:8443"
 ORG="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 export BLAKTAIL_AUTH_HMAC_SECRET="$(openssl rand -hex 32)"
 export BLAKTAIL_RELAY_AUTH_SECRET="$(openssl rand -hex 32)"
@@ -59,13 +59,13 @@ echo "== coordinator (self-signed lab CA, SQLite)"
   -e BLAKTAIL_TLS_CERT=/certs/coord.crt -e BLAKTAIL_TLS_KEY=/certs/coord.key \
   -e BLAKTAIL_CONSOLE_URL=https://console.svclab.example \
   "$IMG" >/dev/null
-"${D[@]}" exec "$P-coord" sh -c '
+"${D[@]}" exec -e P="$P" "$P-coord" sh -c '
   set -e; cd /certs
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
     -subj "/CN=svclab CA" -keyout ca.key -out ca.crt 2>/dev/null
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-    -subj "/CN=svclab-coord" -keyout coord.key -out coord.csr 2>/dev/null
-  printf "subjectAltName=DNS:svclab-coord\n" > san.ext
+    -subj "/CN=$P-coord" -keyout coord.key -out coord.csr 2>/dev/null
+  printf "subjectAltName=DNS:%s\n" "$P-coord" > san.ext
   openssl x509 -req -in coord.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
     -days 1 -extfile san.ext -out coord.crt 2>/dev/null
   chmod 644 coord.key ca.crt coord.crt; rm -f ca.key'
@@ -75,7 +75,7 @@ for i in $(seq 1 61); do
   "${D[@]}" exec "$P-coord" python3 -c "import ssl,urllib.request; urllib.request.urlopen('$COORD_URL/readyz', context=ssl.create_default_context(cafile='/certs/ca.crt'))" >/dev/null 2>&1 && break
   sleep 1
 done
-lab() { "${D[@]}" exec -e BLAKTAIL_AUTH_HMAC_SECRET "$P-coord" svc-lab "$@"; }
+lab() { "${D[@]}" exec -e BLAKTAIL_AUTH_HMAC_SECRET -e SVCLAB_COORD="$COORD_URL" "$P-coord" svc-lab "$@"; }
 lab bootstrap "$ORG"
 
 agent_ip() { "${D[@]}" inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$P-$1"; }
@@ -95,14 +95,21 @@ status_field() {
   "${D[@]}" exec "$P-$1" blaktaild status --json \
     | python3 -c "import json,sys; print(json.load(sys.stdin)[sys.argv[1]].split('/')[0])" "$2"
 }
-service_status() { lab status "$ORG" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["status"])'; }
-wait_status() {
+service_status() { # [name, default wiki] [field, default status]
+  lab status "$ORG" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    if row["name"] == sys.argv[1]:
+        print(row[sys.argv[2]])' "${1:-wiki}" "${2:-status}"
+}
+wait_status() { # status [name]
   local want="$1" started=$SECONDS
-  until [[ "$(service_status)" == "$want" ]]; do
+  until [[ "$(service_status "${2:-wiki}")" == "$want" ]]; do
     (( SECONDS - started < 150 )) || { lab status "$ORG"; "${D[@]}" exec "$P-server" tail -20 /var/log/agent.log; fail "status never became $want"; }
     sleep 3
   done
-  echo "ok status $want after $((SECONDS - started))s"
+  echo "ok ${2:-wiki} status $want after $((SECONDS - started))s"
 }
 resolves() { "${D[@]}" exec "$P-$1" getent hosts "$2" >/dev/null 2>&1; }
 wait_resolution() { # agent, name, yes|no
@@ -123,7 +130,7 @@ for name in server ally outsider; do
 done
 echo "== enrol server (office,ranger; --serve-services), ally (office), outsider (ranger)"
 start_target
-start_agent server office,ranger --serve-services --serve-services-ports 8080
+start_agent server office,ranger --serve-services --serve-services-ports 8080,8081
 start_agent ally office
 start_agent outsider ranger
 for name in server ally outsider; do pin_port "$name"; done
@@ -186,6 +193,39 @@ resolves outsider "$fqdn" && fail "outsider resolves $fqdn"
   && fail "outsider reached the raw overlay IP"
 "${D[@]}" exec "$P-outsider" ping -c 1 -W 2 "$server_ip" >/dev/null 2>&1 || fail "outsider lost ordinary policy access"
 echo "ok outsider: name NXDOMAIN; forced name and raw IP both refused; ordinary policy access (ping) unchanged"
+
+echo "== allow-list and probe gate: an unlisted port and a non-HTTP target are never routed"
+# admin: a healthy HTTP target on 127.0.0.1:9090, which the operator did not list.
+# banner: a listed port (8081) whose target speaks a non-HTTP protocol.
+"${D[@]}" exec -d "$P-server" sh -c 'mkdir -p /srv/admin && echo "admin console" > /srv/admin/index.html && cd /srv/admin && exec python3 -m http.server 9090 --bind 127.0.0.1 >/var/log/admin.log 2>&1'
+"${D[@]}" exec -d "$P-server" python3 -c '
+import socket
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 8081)); s.listen(8)
+while True:
+    c, _ = s.accept(); c.sendall(b"SSH-2.0-OpenSSH_9.2 banner-target\r\n"); c.close()'
+admin="$(lab create "$ORG" admin "$server_node" 9090 office)"
+admin_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$admin")"
+admin_fqdn="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["fqdn"])' "$admin")"
+banner="$(lab create "$ORG" banner "$server_node" 8081 office)"
+banner_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$banner")"
+banner_fqdn="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["fqdn"])' "$banner")"
+wait_status target_unhealthy banner
+service_status banner detail
+wait_status target_unhealthy admin
+detail="$(service_status admin detail)"
+echo "$detail"
+[[ "$detail" == *--serve-services-ports* ]] || fail "admin status does not name the allow-list"
+"${D[@]}" exec "$P-server" test -e "/var/lib/blaktail/services/$admin_id.key" && fail "agent requested a certificate for unlisted port 9090"
+resolves ally "$admin_fqdn" && fail "ally resolves the unlisted-port service"
+resolves ally "$banner_fqdn" && fail "ally resolves the non-HTTP service"
+"${D[@]}" exec "$P-ally" curl -sS --max-time 8 -k --resolve "$admin_fqdn:443:$server_ip" "https://$admin_fqdn/" >/dev/null 2>&1 \
+  && fail "unlisted port 9090 was proxied"
+out="$("${D[@]}" exec "$P-ally" sh -c "echo | timeout 8 openssl s_client -quiet -connect $server_ip:443 -servername $banner_fqdn 2>/dev/null" || true)"
+[[ "$out" == *SSH-2.0* ]] && fail "non-HTTP banner target was proxied"
+echo "ok admin (unlisted 9090): target_unhealthy naming the allow-list, no key, no name, not proxied; banner (non-HTTP on 8081): target_unhealthy, no name, not proxied"
+lab disable "$ORG" "$admin_id" >/dev/null
+lab disable "$ORG" "$banner_id" >/dev/null
 
 echo "== target outage withdraws the name; recovery republishes it"
 "${D[@]}" exec "$P-server" pkill -f "http.server 8080"

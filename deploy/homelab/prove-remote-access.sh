@@ -6,7 +6,8 @@
 # target (blaktaild + sshd with the opt-in drop-in and SSH user CA), then:
 #   - opens a browser-style WebSocket session through the gateway and runs `id`;
 #   - shows a reused ticket, a member and an unlisted OS user are refused;
-#   - ends live sessions by revoke and by suspending the device;
+#   - ends live sessions by revoke, by suspending the device, by clearing the
+#     gateway setting and by a SCIM-style service-assertion user revoke;
 #   - swaps sshd's host key behind the agent's back: the gateway refuses it;
 #   - lets the agent report the new key: new sessions are blocked;
 #   - runs approved jobs as an unprivileged user with timeout and cancel;
@@ -179,6 +180,8 @@ drive session-id "$org"
 drive forbidden "$org"
 drive revoke-live "$org"
 drive suspend-live "$org"
+drive gateway-change-live "$org"
+drive scim-revoke-live "$org"
 
 step "remote jobs"
 drive jobs "$org"
