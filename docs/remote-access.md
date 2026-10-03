@@ -1,0 +1,222 @@
+# Browser remote access and remote jobs
+
+BlakTail can open an SSH terminal (and, with guacd, an RDP desktop) on a device
+from the console, and can run owner-approved, allowlisted jobs on devices that
+opted in. Both are off until an operator turns them on, and both follow
+[ADR 0006](adr/0006-browser-remote-access.md).
+
+## How a browser session works
+
+```
+browser ──wss (console origin)──▶ onshore gateway ──WireGuard (its own node)──▶ device:22
+   │                                 │
+   └ console server action           └ redeems the ticket with its node credential
+     asks the coordinator for          gets a session-only SSH certificate
+     a single-use ticket               pins the device's reported host key
+```
+
+1. A person with **use remote sessions** (owner, admin or network admin) opens
+   a device, chooses **Open browser terminal**, enters the OS account and a
+   reason. The console needs a sign-in within the last 5 minutes (or the
+   organisation's shorter step-up window) and applies the organisation's MFA
+   rule. Members and auditors are refused by the coordinator (`403`).
+2. The coordinator checks, then issues a ticket valid for **60 seconds, once**:
+   - the device and gateway are in this organisation, not suspended, revoked,
+     deleted or credential-expired;
+   - the access policy pairs the gateway with the device, lets the gateway
+     reach TCP 22, and an **SSH rule lets the gateway log in as that OS user**;
+   - the device's agent proved it installed the organisation SSH CA
+     (`remote-ssh-ca` capability) and reported a host key with no pending
+     change;
+   - the person has no other live session to that device.
+   Refusals are audited as `remote_session.denied` with the reason.
+3. The browser opens a WebSocket to the gateway and sends only the ticket and
+   its terminal size. The gateway generates an Ed25519 key in memory, redeems
+   the ticket with **its own node credential**, and gets back the device's
+   overlay address, the OS user, the pinned host key, and an SSH user
+   certificate for its in-memory key: one principal (the OS user),
+   `source-address` set to the gateway's overlay addresses, only `permit-pty`,
+   valid until the session's end (at most 30 minutes).
+4. The gateway connects over the overlay, negotiates only `ssh-ed25519` host
+   keys, and refuses any key other than the reported one **before**
+   authenticating. It then logs in with the certificate and relays a PTY.
+5. Every 10 seconds the gateway reports byte counts. The coordinator re-runs
+   the same checks and answers `terminate` if the session was revoked, the
+   person was suspended, the device or gateway was suspended or revoked, the
+   policy changed, a new host key arrived or the time limit passed. The
+   gateway also ends a session after 10 minutes without input.
+
+Nothing in the browser's messages names a device, port or account; those come
+only from the ticket. The browser never sees a WireGuard key, node token,
+certificate or private key.
+
+### Limits
+
+| | |
+| --- | --- |
+| Ticket | single use, 60 seconds |
+| Session | at most 30 minutes (choose 1–30); no reconnect, start again |
+| Idle | 10 minutes without input |
+| Revoke, suspend, policy change | ends the live session within one report (10 s) |
+| Concurrency | one live session per person and device |
+| Clipboard | the browser's own copy and paste only |
+| File transfer | off (no SFTP, no drives, no RDP file streams) |
+| Recording | none; only metadata is audited |
+
+### What is audited
+
+Coordinator audit (hash-chained): `remote_session.issued`, `.denied`,
+`.started`, `.ended` (with reason, duration and bytes each way), `.revoked`,
+`.host_key_changed`, `.host_key_acknowledged`, `.host_key_mismatch`, and
+`remote_access.settings_updated`. Each names the person, device, OS user and
+access reason. Keystrokes, screen output and passwords are never logged by the
+coordinator, the gateway or the console.
+
+## Setting it up
+
+### 1. Run a gateway node
+
+The gateway is an ordinary enrolled BlakTail device in the organisation, so
+policy decides what it can reach and it can be suspended or revoked like any
+device. Run it onshore, next to the coordinator. One gateway serves one
+organisation; it never dials another organisation's devices.
+
+```sh
+# enrol the gateway host like any Linux device, tagged for policy
+printf '%s' "$JOIN_KEY" | blaktaild up --coord https://coord.example.org.au --name remote-gateway
+blaktaild run &
+
+blaktail-gateway \
+  --coord https://coord.example.org.au \
+  --state-dir /var/lib/blaktail \
+  --listen 0.0.0.0:8443 \
+  --allowed-origin https://console.example.org.au \
+  --tls-cert /etc/blaktail/gateway.crt --tls-key /etc/blaktail/gateway.key
+```
+
+`deploy/docker/gateway.Dockerfile` builds an image with both binaries. Without
+`--tls-cert`/`--tls-key` the gateway serves plain HTTP and must sit behind a
+TLS proxy. Browsers must send an `Origin` in `--allowed-origin`.
+
+Then an owner opens **Remote → Remote access**, chooses the gateway device and
+enters its `wss://` address. Saving creates the organisation's SSH user CA
+(sealed with the coordinator secret) and publishes it to agents.
+
+### 2. Write the policy
+
+Give the gateway a tag and allow it explicitly, for example:
+
+```json
+{
+  "rules": [{ "action": "allow", "src_tags": ["office"], "dst_tags": ["store"], "dst_ports": ["22"], "protocols": ["tcp"] }],
+  "ssh": [{ "action": "allow", "src_tags": ["office"], "dst_tags": ["store"], "users": ["deploy"] }]
+}
+```
+
+A browser session can never reach a port or account that an ordinary device
+with the gateway's tags could not.
+
+### 3. Opt devices in
+
+On each Linux device that should accept browser SSH, use the existing sshd
+drop-in (see [linux-agent.md](linux-agent.md#ssh-user-policy)) and also
+name a CA file under `/var/lib/blaktail` (the hardened unit can only write
+there):
+
+```sh
+BLAKTAIL_SSHD_DROPIN=/var/lib/blaktail/sshd_policy.conf \
+BLAKTAIL_SSH_USER_CA=/var/lib/blaktail/ssh_user_ca.pub \
+blaktaild run
+```
+
+The agent then writes the CA and appends, only for the gateway's overlay
+addresses:
+
+```
+Match Address 100.64.0.5,fd…::5
+    TrustedUserCAKeys /var/lib/blaktail/ssh_user_ca.pub
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AllowAgentForwarding no
+    AllowTcpForwarding no
+    X11Forwarding no
+    PermitTunnel no
+Match all
+```
+
+The principal mapping is sshd's built-in one: with no `AuthorizedPrincipalsFile`
+or `AuthorizedPrincipalsCommand` configured, a certificate logs in only as a
+login name it lists, and each session certificate lists exactly the one
+approved OS user. The agent refuses to activate the CA if sshd has another
+principals source. It proves the block with `sshd -T` for the gateway
+address and for an unrelated address before claiming `remote-ssh-ca`; any
+failure restores the previous file.
+
+The agent also reports `/etc/ssh/ssh_host_ed25519_key.pub`
+(`BLAKTAIL_SSH_HOST_KEY` overrides the path). The first report is pinned. A
+different key later is held as pending, blocks new sessions and ends live ones,
+until someone with **manage devices** compares it on the device
+(`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) and accepts it on the
+Remote access page.
+
+### Suspending people
+
+Suspending or removing a membership in the console, or changing it to a role
+without the permission, revokes that person's open sessions. SCIM-driven
+deactivation does not yet reach the coordinator; those sessions still end at
+their 30-minute cap.
+
+## RDP
+
+With `--guacd 127.0.0.1:4822` (Apache Guacamole's `guacd` in the gateway's
+network namespace, so it dials over the overlay), the device page offers
+**Open remote desktop**. The coordinator issues a ticket the same way, checking
+that policy lets the gateway reach TCP 3389. The gateway performs the guacd
+handshake itself with the ticket's address and account; the browser supplies
+only the password, which is used once and never stored. Browser instructions
+outside an allowlist (keys, mouse, size, clipboard, sync) are dropped, and
+upload, download, drive and printing are disabled.
+
+Limits: the RDP server certificate is not pinned (`ignore-cert`); the device's
+identity rests on its WireGuard-authenticated overlay address. The device's
+own Windows or xrdp sign-in is enforced. No RDP target has been tested in the
+lab yet (see the status below).
+
+## Remote jobs
+
+Owners define **job templates** on **Remote → Remote jobs**: a name, an
+absolute program path and fixed arguments (one per line, never a shell
+string), a timeout (at most 10 minutes), an output cap (at most 64 KiB) and
+target tags or devices. Shells, `env`, `sudo`, `xargs` and interpreters are
+refused as the program.
+
+A run is requested for one template and one device (owner, admin or network
+admin, with a reason). The request carries no command text, so nothing can be
+added to the owner's argv. Only an owner can approve it. Approval signs the
+exact job (run, organisation, device, argv, limits, a 10-minute claim window)
+with an Ed25519 key derived from the coordinator secret; a database write alone
+cannot create a runnable job.
+
+Devices opt in explicitly:
+
+```sh
+blaktaild --allow-remote-jobs --remote-jobs-user blaktail-jobs run
+```
+
+The agent pins the organisation's job key on first use, polls every 15
+seconds, verifies each job's signature, device and expiry, claims it once, and
+runs exactly its argv with no shell, an empty environment (`PATH` and `LANG`
+only), stdin closed, `/` as the working directory and its own process group,
+as the named non-root user (supplementary groups dropped). The timeout, the
+output cap and a console cancel each kill the whole process group. The result
+(status, exit code, capped output) is stored on the run; the audit chain
+records `remote_job.template_created`, `.requested`, `.approved`, `.started`,
+`.finished` (with an output SHA-256) and `.cancel_requested`. Linux and macOS
+only.
+
+## Live lab proof
+
+`deploy/homelab/prove-remote-access.sh` (run with
+`DOCKER_CONTEXT=m3-max`) builds the coordinator and gateway images from
+tracked sources and proves the SSH and job paths on real containers. Results
+are recorded below.

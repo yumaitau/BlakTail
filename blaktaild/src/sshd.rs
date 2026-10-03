@@ -14,10 +14,11 @@
 //! Browser remote access (draft 13) is a second opt-in: when
 //! `BLAKTAIL_SSH_USER_CA` also names a file, the agent writes the
 //! organisation's SSH user CA there and trusts it only inside a
-//! `Match Address` block for the gateway's overlay addresses. In that block
-//! `AuthorizedPrincipalsFile none` keeps sshd's built-in principal mapping: a
-//! certificate logs in only as a login name it lists, and the coordinator
-//! lists exactly one approved OS user per session certificate.
+//! `Match Address` block for the gateway's overlay addresses. The principal
+//! mapping is sshd's built-in one, used only when no `AuthorizedPrincipalsFile`
+//! or command is configured (verified below): a certificate logs in only as a
+//! login name it lists, and the coordinator lists exactly one approved OS
+//! user per session certificate.
 
 use crate::{acl_filter, Error, Peer};
 use std::{
@@ -126,7 +127,6 @@ fn remote_ca_config(ca: &RemoteCa<'_>) -> Result<String, String> {
     out.push_str(&format!("Match Address {}\n", gateways.join(",")));
     for line in [
         format!("TrustedUserCAKeys {path}"),
-        "AuthorizedPrincipalsFile none".into(),
         "PasswordAuthentication no".into(),
         "KbdInteractiveAuthentication no".into(),
         "AllowAgentForwarding no".into(),
@@ -192,14 +192,24 @@ fn verify_ca(ca: &RemoteCa<'_>, runner: &mut dyn Runner) -> Result<(), String> {
     let trusted = format!("trustedusercakeys {}", path.to_ascii_lowercase());
     for gateway in &gateways {
         let lines = effective(runner, gateway)?;
-        if !lines.contains(&trusted)
-            || !lines
-                .iter()
-                .any(|line| line == "authorizedprincipalsfile none")
-        {
+        if !lines.contains(&trusted) {
             return Err(format!(
                 "sshd does not apply the BlakTail SSH user CA for gateway {gateway}; check that sshd_config includes the drop-in"
             ));
+        }
+        // Another principals source would map certificates to users by its
+        // own rules rather than "principal equals login name".
+        let builtin_mapping = lines
+            .iter()
+            .any(|line| line == "authorizedprincipalsfile none")
+            && !lines.iter().any(|line| {
+                line.starts_with("authorizedprincipalscommand ")
+                    && line != "authorizedprincipalscommand none"
+            });
+        if !builtin_mapping {
+            return Err(
+                "sshd sets an AuthorizedPrincipalsFile or command; remove it to use BlakTail session certificates".into(),
+            );
         }
     }
     if effective(runner, UNRELATED_ADDRESS)?.contains(&trusted) {
@@ -331,6 +341,7 @@ mod tests {
         include_applies: bool,
         leaks: bool,
         running: bool,
+        principals_file: &'static str,
         calls: Vec<String>,
     }
 
@@ -343,6 +354,10 @@ mod tests {
                     let text = fs::read_to_string(&self.dropin).unwrap_or_default();
                     let addr = spec.rsplit("addr=").next().unwrap_or_default();
                     let mut out = String::from("port 22\n");
+                    out.push_str(&format!(
+                        "authorizedprincipalsfile {}\n",
+                        self.principals_file
+                    ));
                     let mut active = false;
                     for line in text.lines() {
                         if let Some(list) = line.strip_prefix("Match Address ") {
@@ -392,6 +407,7 @@ mod tests {
             include_applies: true,
             leaks: false,
             running: false,
+            principals_file: "none",
             calls: vec![],
         }
     }
@@ -526,12 +542,28 @@ mod tests {
         let config = fs::read_to_string(&path).unwrap();
         assert!(config.contains("Match Address 100.64.0.9\n"));
         assert!(config.contains(&format!("TrustedUserCAKeys {}", ca_path.display())));
-        assert!(config.contains("AuthorizedPrincipalsFile none"));
+        assert!(!config.contains("AuthorizedPrincipalsFile"));
         assert!(config.contains("PasswordAuthentication no"));
         assert!(sshd
             .calls
             .iter()
             .any(|call| call.contains("addr=100.64.0.9")));
+
+        // Another principals source would change who a certificate logs in as.
+        let mut mapped = fake(dir.path());
+        mapped.principals_file = "/etc/ssh/principals/%u";
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(sync(
+            &path,
+            &[],
+            Some(&ca),
+            &mut mapped,
+            dir.path().join("none.pid")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("AuthorizedPrincipalsFile"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
 
         // A CA that leaks to every address is refused and the file restored.
         let mut leaky = fake(dir.path());

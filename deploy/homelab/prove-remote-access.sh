@@ -24,10 +24,14 @@ RELAY_SECRET="$(openssl rand -hex 32)"
 DIAG="$(openssl rand -hex 16)"
 LISTEN_PORT=51820
 DROPIN=/var/lib/blaktail/sshd_policy.conf
-USER_CA=/etc/ssh/blaktail_user_ca.pub
+USER_CA=/var/lib/blaktail/ssh_user_ca.pub
 REPORTED_KEY=/var/lib/blaktail/reported_host_key.pub
 
 cleanup() {
+  if [[ -n "${KEEP_LAB:-}" ]]; then
+    echo "KEEP_LAB set: leaving ${P}-* running" >&2
+    return
+  fi
   docker rm -f -v "${P}-coord" "${P}-gw" "${P}-target" "${P}-driver" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   if [[ -z "${KEEP_IMAGES:-}" ]]; then
@@ -35,7 +39,17 @@ cleanup() {
   fi
   rm -rf "$WORK"
 }
-trap cleanup EXIT
+on_exit() {
+  local status=$?
+  if (( status != 0 )); then
+    echo "== target sshd log (last 30 lines)" >&2
+    docker exec "${P}-target" tail -n 30 /var/log/sshd.log >&2 2>/dev/null || true
+    echo "== gateway log (last 20 lines)" >&2
+    docker logs --tail 20 "${P}-gw" >&2 2>/dev/null || true
+  fi
+  cleanup
+}
+trap on_exit EXIT
 
 step() { printf '\n== %s\n' "$*"; }
 
@@ -127,12 +141,12 @@ docker exec "${P}-target" sh -ceu '
   useradd -m -s /usr/sbin/nologin jobrunner
   mkdir -p /run/sshd
   ssh-keygen -A >/dev/null
-  printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n" \
+  printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nLogLevel VERBOSE\n" \
     > /etc/ssh/sshd_config.d/zz-lab.conf
   touch '"$DROPIN"'
   echo "Include '"$DROPIN"'" >> /etc/ssh/sshd_config
   cp /etc/ssh/ssh_host_ed25519_key.pub '"$REPORTED_KEY"'
-  sshd -t && /usr/sbin/sshd
+  sshd -t && /usr/sbin/sshd -E /var/log/sshd.log
 '
 echo "ok sshd running with host key $(docker exec "${P}-target" ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
 

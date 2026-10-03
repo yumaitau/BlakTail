@@ -70,6 +70,10 @@ See [console.md](console.md).
 - Explain access, and SSH rules enforced at Linux destinations (per-user
   limits only with a verified sshd drop-in; not enforced on macOS/iOS)
 - Owner-minted `/api/v1` automation credentials
+- Opt-in browser SSH through an onshore gateway node (single-use tickets,
+  session certificates, pinned host keys, revoke within 10 seconds) and
+  owner-approved argv-only remote jobs ([remote-access.md](remote-access.md));
+  RDP through guacd is built but not yet lab-proven
 - Prometheus metrics and an actor-attributed, paged, filterable audit log with
   audited export and a per-organisation hash chain (tamper-evident, not
   tamper-proof)

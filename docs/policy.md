@@ -135,6 +135,8 @@ Destination capabilities, reported by the agent on every poll:
 | `acl-filter` | Installs the inbound overlay filter from `ingress` | Linux `blaktaild` |
 | `ssh-users` | Verified sshd per-source `AllowUsers`/`DenyUsers` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` set and verified |
 | `forward-filter` | Routing peer forwards only its compiled `forward_filter` allow-list | Linux `blaktaild` |
+| `remote-ssh-ca` | Trusts the organisation SSH user CA, from the remote-access gateway only, verified with `sshd -T` | Linux `blaktaild` with `BLAKTAIL_SSHD_DROPIN` and `BLAKTAIL_SSH_USER_CA` ([remote-access.md](remote-access.md)) |
+| `remote-jobs` | Runs owner-approved, signed job templates | `blaktaild --allow-remote-jobs` |
 
 An agent that predates these capabilities reports neither, so user-limited
 SSH stays closed at port level (fail closed); it never widens access. The

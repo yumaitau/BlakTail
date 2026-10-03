@@ -203,6 +203,19 @@ unset the variable, and reload sshd. The hardened systemd unit only allows
 writes under `/var/lib/blaktail`, which is why the drop-in lives there.
 The SSH port is fixed at 22.
 
+### Browser SSH and remote jobs (opt-in)
+
+To accept browser SSH sessions from the organisation's onshore gateway, also
+set `BLAKTAIL_SSH_USER_CA=/var/lib/blaktail/ssh_user_ca.pub`. The agent writes
+the organisation SSH user CA there and trusts it only in a `Match Address`
+block for the gateway, verified with `sshd -T`, then reports `remote-ssh-ca`.
+It also reports `/etc/ssh/ssh_host_ed25519_key.pub` so the gateway can pin it.
+
+To run owner-approved remote jobs, start the agent with
+`--allow-remote-jobs --remote-jobs-user <unprivileged account>` (or
+`BLAKTAIL_ALLOW_REMOTE_JOBS=true` and `BLAKTAIL_REMOTE_JOBS_USER`). Root is
+refused. See [remote-access.md](remote-access.md).
+
 ## Linux tray (scaffold, issue #12)
 
 `apps/linux-tray/` holds an honest scaffold for a GTK/AppIndicator tray
