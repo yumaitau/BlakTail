@@ -1324,15 +1324,45 @@ struct RevokedCount {
     revoked: u64,
 }
 
-/// Called by the console when a person is suspended or removed, so their
-/// open sessions end at the gateway's next report.
+/// The console's service assertion action for directory deprovisioning.
+pub(crate) const REVOKE_USER_ACTION: &str = "remote_access.revoke_user";
+
+/// Called by the console when a person is suspended, removed or loses the
+/// remote-session permission, so their open sessions end at the gateway's
+/// next report. SCIM and IdP role sync have no person behind them, so they
+/// send a service assertion scoped to this one action.
 async fn revoke_user_sessions(
     State(s): State<AppState>,
     UrlPath((org_id, user_id)): UrlPath<(Uuid, String)>,
     headers: HeaderMap,
 ) -> Result<Json<RevokedCount>, ApiError> {
-    let session = console_session(&s, &headers, org_id).await?;
-    require(&session, Permission::ManageSecurity)?;
+    let claims = crate::verified_console_assertion(&s, &headers, org_id).await?;
+    let session = if claims.role == "service" {
+        if claims.action.as_deref() != Some(REVOKE_USER_ACTION)
+            || !claims.user_id.starts_with("system:")
+        {
+            return Err(ApiError::Forbidden);
+        }
+        // Read-only role, used only to attribute the audit row.
+        Session {
+            user_id: claims.user_id,
+            role: Role::Auditor,
+            name: claims.name,
+            email: claims.email,
+        }
+    } else {
+        if claims.action.is_some() {
+            return Err(ApiError::Unauthorized);
+        }
+        let session = Session {
+            role: claims.role.parse().map_err(|_| ApiError::Unauthorized)?,
+            user_id: claims.user_id,
+            name: claims.name,
+            email: claims.email,
+        };
+        require(&session, Permission::ManageSecurity)?;
+        session
+    };
     let mut tx = s.store.pool.begin().await?;
     let revoked = sqlx::query(
         "UPDATE remote_sessions SET revoked_at=$1,revoked_by=$2 WHERE org_id=$3 AND user_id=$4 AND revoked_at IS NULL AND ended_at IS NULL",
@@ -1545,38 +1575,50 @@ async fn redeem_ticket(
         }
         Err(error) => return Err(error),
     };
-    let target_address = path
-        .target
-        .host_addresses()
-        .into_iter()
-        .find(|address| !address.contains(':'))
-        .ok_or_else(|| ApiError::Conflict("the device has no overlay IPv4 address".into()))?;
-    let certificate = match row.kind {
-        SessionKind::Ssh => {
-            let public_key = input
-                .public_key
-                .as_deref()
-                .ok_or_else(|| ApiError::BadRequest("an SSH session needs a public key".into()))?;
-            let pem = open(&s.auth_hmac_secret, &org, &settings.ca_private_sealed)?;
-            let (certificate, serial) = sign_user_certificate(
-                &pem,
-                &CertificateRequest {
-                    session_id: row.id,
-                    user_id: &row.actor.user_id,
-                    os_user: &row.os_user,
-                    public_key,
-                    source_addresses: &path.gateway.host_addresses(),
-                    valid_before: row.max_end_at,
-                },
-            )?;
-            sqlx::query("UPDATE remote_sessions SET cert_serial=$1 WHERE id=$2")
-                .bind(serial.to_string())
-                .bind(row.id.to_string())
-                .execute(&s.store.pool)
-                .await?;
-            Some(certificate)
+    // The ticket is spent: any failure from here must end and audit the
+    // session rather than leave it redeemed with nothing running.
+    let prepared = async {
+        let target_address = path
+            .target
+            .host_addresses()
+            .into_iter()
+            .find(|address| !address.contains(':'))
+            .ok_or_else(|| ApiError::Conflict("the device has no overlay IPv4 address".into()))?;
+        let certificate = match row.kind {
+            SessionKind::Ssh => {
+                let public_key = input.public_key.as_deref().ok_or_else(|| {
+                    ApiError::BadRequest("an SSH session needs a public key".into())
+                })?;
+                let pem = open(&s.auth_hmac_secret, &org, &settings.ca_private_sealed)?;
+                let (certificate, serial) = sign_user_certificate(
+                    &pem,
+                    &CertificateRequest {
+                        session_id: row.id,
+                        user_id: &row.actor.user_id,
+                        os_user: &row.os_user,
+                        public_key,
+                        source_addresses: &path.gateway.host_addresses(),
+                        valid_before: row.max_end_at,
+                    },
+                )?;
+                sqlx::query("UPDATE remote_sessions SET cert_serial=$1 WHERE id=$2")
+                    .bind(serial.to_string())
+                    .bind(row.id.to_string())
+                    .execute(&s.store.pool)
+                    .await?;
+                Some(certificate)
+            }
+            SessionKind::Rdp => None,
+        };
+        Ok::<_, ApiError>((target_address, certificate))
+    }
+    .await;
+    let (target_address, certificate) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            end_session(&s, &row, "error", (0, 0)).await?;
+            return Err(error);
         }
-        SessionKind::Rdp => None,
     };
     let mut tx = s.store.pool.begin().await?;
     append_audit(
@@ -1684,6 +1726,14 @@ async fn report_session(
         Some("revoked".to_owned())
     } else if row.max_end_at <= now() {
         Some("max_duration".to_owned())
+    } else if load_settings(&s.store.pool, &org)
+        .await?
+        .and_then(|settings| settings.gateway_node_id)
+        != Some(node_id)
+    {
+        // Clearing or swapping the organisation's gateway ends live sessions
+        // on the old one, not just new redeems.
+        Some("gateway_changed".to_owned())
     } else {
         match check_path(
             &s,

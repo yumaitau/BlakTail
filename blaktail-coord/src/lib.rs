@@ -4983,6 +4983,8 @@ pub(crate) async fn append_audit(
         // their audit rows read as a human admin.
         actor_role: if session.user_id.starts_with("api:") {
             "api_client".into()
+        } else if session.user_id.starts_with("system:") {
+            "system".into()
         } else {
             session.role.as_str().into()
         },

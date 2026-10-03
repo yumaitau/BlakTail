@@ -43,8 +43,12 @@ browser ──wss (console origin)──▶ onshore gateway ──WireGuard (its
 5. Every 10 seconds the gateway reports byte counts. The coordinator re-runs
    the same checks and answers `terminate` if the session was revoked, the
    person was suspended, the device or gateway was suspended or revoked, the
-   policy changed, a new host key arrived or the time limit passed. The
-   gateway also ends a session after 10 minutes without input.
+   organisation's gateway setting was cleared or pointed at another device
+   (`gateway_changed`), the policy changed, a new host key arrived or the time
+   limit passed. The gateway also ends a session after 10 minutes without
+   input. If redeeming fails after the ticket is spent (no overlay IPv4 on the
+   device, a malformed or non-Ed25519 gateway key, a certificate signing
+   failure), the session is ended with reason `error` and audited.
 
 Nothing in the browser's messages names a device, port or account; those come
 only from the ticket. The browser never sees a WireGuard key, node token,
@@ -57,7 +61,7 @@ certificate or private key.
 | Ticket | single use, 60 seconds |
 | Session | at most 30 minutes (choose 1–30); no reconnect, start again |
 | Idle | 10 minutes without input |
-| Revoke, suspend, policy change | ends the live session within one report (10 s) |
+| Revoke, suspend, policy change, gateway change | ends the live session within one report (10 s) |
 | Concurrency | one live session per person and device |
 | Clipboard | the browser's own copy and paste only |
 | File transfer | off (no SFTP, no drives, no RDP file streams) |
@@ -162,9 +166,16 @@ Remote access page.
 ### Suspending people
 
 Suspending or removing a membership in the console, or changing it to a role
-without the permission, revokes that person's open sessions. SCIM-driven
-deactivation does not yet reach the coordinator; those sessions still end at
-their 30-minute cap.
+without the permission, revokes that person's open sessions and unredeemed
+tickets. So do SCIM deactivation (`PATCH active=false`, `DELETE`, or a
+provisioned-inactive user), applying a directory group mapping that moves
+someone to a role without **use remote sessions**, and the sweep that turns
+an expired grace period into a tombstone. SCIM and directory sweeps have no
+console session, so the console sends a service assertion that the
+coordinator accepts only for this one revoke call; the coordinator audits it
+as actor `system:scim` or `system:directory` with role `system`. These calls
+are best effort: if the coordinator is unreachable the console logs a
+warning and the session still ends at its 30-minute cap.
 
 ## RDP
 
@@ -205,7 +216,10 @@ blaktaild --allow-remote-jobs --remote-jobs-user blaktail-jobs run
 ```
 
 The agent pins the organisation's job key on first use, polls every 15
-seconds, verifies each job's signature, device and expiry, claims it once, and
+seconds, verifies each job's signature, device and expiry, records the run ID in
+`remote-jobs-runs.json` in its state directory (owner-only, kept until the
+job's signed expiry) and refuses any run ID it has already seen, even across
+restarts or if the coordinator offers it again, claims it once, and
 runs exactly its argv with no shell, an empty environment (`PATH` and `LANG`
 only), stdin closed, `/` as the working directory and its own process group,
 as the named non-root user (supplementary groups dropped). The timeout, the

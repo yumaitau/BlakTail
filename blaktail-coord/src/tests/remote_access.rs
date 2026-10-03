@@ -1021,3 +1021,197 @@ async fn running_jobs_can_be_cancelled_and_queued_ones_never_run() {
         StatusCode::GONE
     );
 }
+
+#[tokio::test]
+async fn live_sessions_end_when_the_gateway_setting_is_cleared_or_changed() {
+    let lab = lab("remote-gateway-change").await;
+    let settings = format!("/v1/orgs/{}/remote-access/settings", lab.org.id);
+    let put_gateway = |gateway: Option<Uuid>| {
+        send(
+            &lab.router,
+            Method::PUT,
+            &settings,
+            serde_json::json!({"gateway_node_id": gateway, "gateway_url": "wss://gateway.example.au"}),
+            &lab.owner,
+        )
+    };
+
+    let (session_id, ticket) = lab.ticket().await;
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, &ticket).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(put_gateway(None).await.status(), StatusCode::OK);
+    let decision = lab.report(session_id, serde_json::json!({})).await;
+    assert_eq!(decision.action, "terminate");
+    assert_eq!(decision.reason.as_deref(), Some("gateway_changed"));
+
+    assert_eq!(
+        put_gateway(Some(lab.gateway.id)).await.status(),
+        StatusCode::OK
+    );
+    let (session_id, ticket) = lab.ticket().await;
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, &ticket).await.status(),
+        StatusCode::OK
+    );
+    let replacement = register_test_node(
+        &lab.router,
+        lab.org.id,
+        &lab.owner,
+        "gateway-2",
+        "gw2-key",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        put_gateway(Some(replacement.id)).await.status(),
+        StatusCode::OK
+    );
+    let decision = lab.report(session_id, serde_json::json!({})).await;
+    assert_eq!(decision.reason.as_deref(), Some("gateway_changed"));
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT end_reason FROM remote_sessions WHERE id=$1")
+            .bind(session_id.to_string())
+            .fetch_one(&lab.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("gateway_changed"));
+}
+
+#[tokio::test]
+async fn failed_redeem_ends_and_audits_the_spent_session() {
+    let lab = lab("remote-redeem-error").await;
+    let (session_id, ticket) = lab.ticket().await;
+    // An RSA key, not the Ed25519 session key the gateway must send.
+    let response = call(
+        &lab.router,
+        Method::POST,
+        &format!("/v1/nodes/{}/remote-sessions/redeem", lab.gateway.id),
+        serde_json::json!({"ticket": ticket, "public_key": "ssh-rsa AAAAnot-a-key"}),
+        Some(&lab.gateway.node_token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let (ended_at, reason): (Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT ended_at,end_reason FROM remote_sessions WHERE id=$1")
+            .bind(session_id.to_string())
+            .fetch_one(&lab.store.pool)
+            .await
+            .unwrap();
+    assert!(ended_at.is_some());
+    assert_eq!(reason.as_deref(), Some("error"));
+    let actions = lab.audit_actions().await;
+    assert!(actions.contains(&"remote_session.ended".to_string()));
+    assert!(!actions.contains(&"remote_session.started".to_string()));
+    // A target with no overlay IPv4 address cannot be reached either; the
+    // person can open that fresh session straight away.
+    sqlx::query("UPDATE nodes SET allowed_ips_json=$1 WHERE id=$2")
+        .bind(r#"["fd7a:115c:a1e0::9/128"]"#)
+        .bind(lab.target.id.to_string())
+        .execute(&lab.store.pool)
+        .await
+        .unwrap();
+    let (session_id, ticket) = lab.ticket().await;
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, &ticket).await.status(),
+        StatusCode::CONFLICT
+    );
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT end_reason FROM remote_sessions WHERE id=$1")
+            .bind(session_id.to_string())
+            .fetch_one(&lab.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("error"));
+}
+
+fn directory_service(org_id: Uuid, user_id: &str, action: &str) -> String {
+    let current_time = now();
+    assertion_template(AssertionClaims {
+        user_id: user_id.into(),
+        org_id,
+        role: "service".into(),
+        name: "SCIM provisioning".into(),
+        email: String::new(),
+        iss: CONSOLE_ASSERTION_ISSUER.into(),
+        aud: CONSOLE_ASSERTION_AUDIENCE.into(),
+        iat: current_time,
+        exp: current_time + MAX_CONSOLE_ASSERTION_LIFETIME_SECS,
+        jti: String::new(),
+        action: Some(action.into()),
+    })
+}
+
+#[tokio::test]
+async fn directory_deprovisioning_revokes_with_a_scoped_service_assertion() {
+    let lab = lab("remote-scim-revoke").await;
+    let (session_id, ticket) = lab.ticket().await;
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, &ticket).await.status(),
+        StatusCode::OK
+    );
+    let revoke = format!("/v1/orgs/{}/remote-access/users/owner-1/revoke", lab.org.id);
+    let service = |user: &str, action: &str| directory_service(lab.org.id, user, action);
+
+    // Wrong action, a non-system subject, or another organisation: refused.
+    for (token, status) in [
+        (
+            service("system:scim", "bootstrap.commit"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            service("operator-cli", crate::remote_access::REVOKE_USER_ACTION),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            directory_service(
+                Uuid::new_v4(),
+                "system:scim",
+                crate::remote_access::REVOKE_USER_ACTION,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = send(
+            &lab.router,
+            Method::POST,
+            &revoke,
+            serde_json::json!({}),
+            &token,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+    }
+    // The scoped assertion opens no other console route.
+    let response = send(
+        &lab.router,
+        Method::GET,
+        &format!("/v1/orgs/{}/remote-access/sessions", lab.org.id),
+        serde_json::Value::Null,
+        &service("system:scim", crate::remote_access::REVOKE_USER_ACTION),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = send(
+        &lab.router,
+        Method::POST,
+        &revoke,
+        serde_json::json!({}),
+        &service("system:scim", crate::remote_access::REVOKE_USER_ACTION),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await["revoked"], 1);
+    let decision = lab.report(session_id, serde_json::json!({})).await;
+    assert_eq!(decision.reason.as_deref(), Some("revoked"));
+    let (actor, role): (String, String) = sqlx::query_as(
+        "SELECT actor_user_id,actor_role FROM audit_events WHERE org_id=$1 AND action='remote_session.revoked'",
+    )
+    .bind(lab.org.id.to_string())
+    .fetch_one(&lab.store.pool)
+    .await
+    .unwrap();
+    assert_eq!((actor.as_str(), role.as_str()), ("system:scim", "system"));
+}

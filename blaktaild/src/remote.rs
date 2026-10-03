@@ -27,6 +27,7 @@ const JOB_SIGNATURE_CONTEXT: &str = "blaktail-remote-job-v1\n";
 const MAX_TIMEOUT_SECS: i64 = 10 * 60;
 const MAX_OUTPUT_BYTES: i64 = 64 * 1024;
 const PIN_FILE: &str = "remote-jobs.pub";
+const RUNS_FILE: &str = "remote-jobs-runs.json";
 const CANCEL_CHECK: Duration = Duration::from_secs(2);
 
 /// What the coordinator publishes with each peer map.
@@ -217,6 +218,31 @@ fn pinned_key(state_dir: &Path, published: &str) -> Result<String, String> {
         }
         Err(_) => Err("the coordinator has not published a job signing key".into()),
     }
+}
+
+/// Records `run_id` as executed until its signed expiry so a replayed job
+/// (even one the coordinator signs and offers again) never runs twice on
+/// this device, across restarts. Returns false for a run already seen.
+fn remember_run(state_dir: &Path, run_id: Uuid, expires_at: i64, now: i64) -> Result<bool, String> {
+    let path = state_dir.join(RUNS_FILE);
+    let mut runs: std::collections::BTreeMap<Uuid, i64> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+            format!(
+                "{} is unreadable; remote jobs stay off until it is removed",
+                path.display()
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(error.to_string()),
+    };
+    runs.retain(|_, expires| *expires > now);
+    if runs.contains_key(&run_id) {
+        return Ok(false);
+    }
+    runs.insert(run_id, expires_at);
+    let bytes = serde_json::to_vec(&runs).map_err(|error| error.to_string())?;
+    crate::write_secret(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Who runs jobs: a named non-root account.
@@ -437,6 +463,13 @@ async fn poll_once(
                 continue;
             }
         };
+        // Recorded before the claim so a crash mid-run cannot rerun it.
+        if !remember_run(state_dir, verified.run_id, verified.expires_at, now)
+            .map_err(Error::Message)?
+        {
+            tracing::warn!(run_id = %job.run_id, "refusing a remote job that already ran here");
+            continue;
+        }
         run_one(coordinator, &state, verified, run_as).await?;
     }
     Ok(())
@@ -517,6 +550,7 @@ async fn run_one(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use std::os::unix::fs::PermissionsExt;
 
     fn current_user() -> RunAs {
         // SAFETY: getuid/getgid have no preconditions.
@@ -661,6 +695,27 @@ mod tests {
         assert_eq!(pinned_key(dir.path(), "AAA").unwrap(), "AAA");
         assert_eq!(pinned_key(dir.path(), "AAA").unwrap(), "AAA");
         assert!(pinned_key(dir.path(), "BBB").is_err());
+    }
+
+    #[test]
+    fn executed_runs_are_refused_until_they_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        assert!(remember_run(dir.path(), run, 1_000, 900).unwrap());
+        assert!(!remember_run(dir.path(), run, 1_000, 950).unwrap());
+        assert!(remember_run(dir.path(), other, 1_000, 950).unwrap());
+        // Survives a restart: the ledger is on disk with owner-only access.
+        let path = dir.path().join(RUNS_FILE);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!remember_run(dir.path(), other, 1_000, 999).unwrap());
+        // Pruned once the signature has expired, when it could not verify anyway.
+        assert!(remember_run(dir.path(), run, 2_000, 1_000).unwrap());
+        // A corrupt ledger fails closed.
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(remember_run(dir.path(), Uuid::from_u128(3), 2_000, 1_000).is_err());
     }
 
     #[test]

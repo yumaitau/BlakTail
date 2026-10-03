@@ -2,6 +2,7 @@ import "server-only";
 
 import { requireSecurityAssurance } from "./auth-policy";
 import { emitMembershipUpdated } from "./coord";
+import { revokeSessionsForMembership, revokeSessionsForUser } from "./coord-remote";
 import { writeConsoleAudit } from "./console-audit";
 import { rawSqlClient } from "./db/client";
 import {
@@ -227,9 +228,10 @@ export async function sweepDeprovisioned(organisationId: string): Promise<number
       AND status = 'suspended' AND role <> 'owner'
       AND deprovision_at IS NOT NULL AND deprovision_at <= now()
       AND tombstoned_at IS NULL
-    RETURNING id
+    RETURNING id, user_id
   `;
-  for (const row of rows as Array<{ id: string }>) {
+  for (const row of rows as Array<{ id: string; user_id: string }>) {
+    await revokeSessionsForUser(organisationId, row.user_id, { role: "member", status: "removed" }, "directory");
     await writeConsoleAudit({
       organisationId,
       actorUserId: "system",
@@ -325,6 +327,10 @@ export async function applyDirectoryDrift(
       role: change.to,
       status: outcome.statuses.get(change.membershipId) ?? "active",
       previous_role: change.from,
+    });
+    await revokeSessionsForMembership(ctx, change.membershipId, {
+      role: change.to,
+      status: outcome.statuses.get(change.membershipId) ?? "active",
     });
   }
   await audit(ctx, "directory.mapping_applied", {

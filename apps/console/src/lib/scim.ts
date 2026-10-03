@@ -1,4 +1,5 @@
 import { writeConsoleAudit } from "./console-audit";
+import { revokeSessionsForUser } from "./coord-remote";
 import { rawSqlClient } from "./db/client";
 import { scimActivation } from "./directory-mapping-core";
 import { getDirectorySettings, sweepDeprovisioned } from "./directory-mapping";
@@ -159,6 +160,9 @@ export async function provisionScimUser(organisationId: string, input: ScimUserI
     `;
     return id;
   });
+  if (!input.active) {
+    await revokeSessionsForUser(organisationId, userId, { role: "member", status: "suspended" }, "scim");
+  }
   return getScimUser(organisationId, userId);
 }
 
@@ -230,12 +234,11 @@ export async function setScimActive(
       targetId: String(membership.id),
       details: { status },
     });
-    await rawSqlClient()`
-      UPDATE person_login_identity
-      SET status = ${active ? "active" : "suspended"},
-          suspended_at = CASE WHEN ${active} THEN NULL ELSE now() END
-      WHERE user_id = ${userId}
-    `;
+    await revokeSessionsForUser(organisationId, userId, { role: String(membership.role), status }, "scim");
+    // Only this organisation's membership changes. The login identity is
+    // shared with every other organisation the person belongs to, so one
+    // directory's token must never suspend it; sign-in already ignores
+    // memberships that are not active.
   }
   return getScimUser(organisationId, userId);
 }

@@ -5,7 +5,8 @@ import { stepUpRefusal } from "./auth-policy-core";
 import { coordFetch, readError } from "./coord";
 import { writeConsoleAudit } from "./console-audit";
 import { rawSqlClient } from "./db/client";
-import { can, permissionReason, type Permission } from "./roles";
+import { needsRemoteRevoke, postUserRevoke, type RevokeSource } from "./remote-revoke-core";
+import { permissionReason, type Permission } from "./roles";
 import type { ConsoleContext } from "./session";
 
 /** ADR 0006: a terminal needs a sign-in within the last 5 minutes. */
@@ -230,9 +231,7 @@ export async function revokeSessionsForMembership(
   membershipId: string,
   next: { role: string; status: string },
 ): Promise<void> {
-  if (next.status === "active" && can(next.role as ConsoleContext["role"], "use_remote_sessions")) {
-    return;
-  }
+  if (!needsRemoteRevoke(next)) return;
   try {
     const sql = rawSqlClient();
     const [row] = (await sql`
@@ -244,6 +243,38 @@ export async function revokeSessionsForMembership(
       method: "POST",
       body: {},
     });
+  } catch (error) {
+    console.warn(
+      `remote session revoke failed: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+}
+
+/**
+ * The same revoke for SCIM deprovisioning and directory sweeps, which act
+ * without a console session: a service assertion scoped to this one call.
+ * Best effort like the console path; sessions are also capped at 30 minutes.
+ */
+export async function revokeSessionsForUser(
+  organisationId: string,
+  userId: string,
+  next: { role: string; status: string },
+  source: RevokeSource,
+): Promise<void> {
+  if (!needsRemoteRevoke(next)) return;
+  try {
+    const [org] = (await rawSqlClient()`
+      SELECT coord_org_id FROM organisation WHERE id = ${organisationId}
+    `) as { coord_org_id: string }[];
+    if (!org) return;
+    await postUserRevoke(
+      { coordOrgId: org.coord_org_id, userId, source },
+      {
+        baseUrl: process.env.COORD_BASE_URL ?? "",
+        secret: process.env.BLAKTAIL_AUTH_HMAC_SECRET ?? "",
+        fetch,
+      },
+    );
   } catch (error) {
     console.warn(
       `remote session revoke failed: ${error instanceof Error ? error.message : "unknown error"}`,
