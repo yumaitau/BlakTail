@@ -428,8 +428,57 @@ try {
     body: { email: owner.email, password: owner.password },
   });
   assert.equal(ownerSignIn.response.status, 200, JSON.stringify(ownerSignIn.body));
-  const ownerCookie = cookies(ownerSignIn.response);
+  let ownerCookie = cookies(ownerSignIn.response);
   assert.match(ownerCookie, /better-auth\.session_token/u);
+
+  // Changing your own password needs the current one, signs out other
+  // sessions, and is audited. Change it back so later steps keep working.
+  const otherOwnerSession = await jsonRequest(baseUrl, "/api/auth/sign-in/email", {
+    body: { email: owner.email, password: owner.password },
+  });
+  const otherOwnerCookie = cookies(otherOwnerSession.response);
+  const wrongCurrent = await jsonRequest(baseUrl, "/api/auth/change-password", {
+    cookie: ownerCookie,
+    body: { currentPassword: "not-the-password", newPassword: "changed-owner-password-1" },
+  });
+  assert.notEqual(wrongCurrent.response.status, 200);
+  const changed = await jsonRequest(baseUrl, "/api/auth/change-password", {
+    cookie: ownerCookie,
+    body: {
+      currentPassword: owner.password,
+      newPassword: "changed-owner-password-1",
+      revokeOtherSessions: true,
+    },
+  });
+  assert.equal(changed.response.status, 200, JSON.stringify(changed.body));
+  const changedCookie = cookies(changed.response) || ownerCookie;
+  const oldPassword = await jsonRequest(baseUrl, "/api/auth/sign-in/email", {
+    body: { email: owner.email, password: owner.password },
+  });
+  assert.equal(oldPassword.response.status, 401);
+  const newPassword = await jsonRequest(baseUrl, "/api/auth/sign-in/email", {
+    body: { email: owner.email, password: "changed-owner-password-1" },
+  });
+  assert.equal(newPassword.response.status, 200, JSON.stringify(newPassword.body));
+  const revokedOther = await fetch(`${baseUrl}/api/me`, {
+    headers: { cookie: otherOwnerCookie },
+  });
+  assert.equal(revokedOther.status, 401, "other sessions are signed out");
+  const [passwordAudit] = await sql`
+    SELECT count(*)::int AS count FROM console_audit_event
+    WHERE action = 'account.password_changed' AND actor_email = ${owner.email}
+  `;
+  assert.equal(passwordAudit.count, 1);
+  const restored = await jsonRequest(baseUrl, "/api/auth/change-password", {
+    cookie: changedCookie,
+    body: { currentPassword: "changed-owner-password-1", newPassword: owner.password },
+  });
+  assert.equal(restored.response.status, 200, JSON.stringify(restored.body));
+  const freshSignIn = await jsonRequest(baseUrl, "/api/auth/sign-in/email", {
+    body: { email: owner.email, password: owner.password },
+  });
+  assert.equal(freshSignIn.response.status, 200, JSON.stringify(freshSignIn.body));
+  ownerCookie = cookies(freshSignIn.response);
 
   const initialMe = await fetch(`${baseUrl}/api/me`, {
     headers: { cookie: ownerCookie },
