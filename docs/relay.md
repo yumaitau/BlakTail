@@ -185,7 +185,51 @@ loop. The previous homelab-only versions of these scripts depended on a
 long-lived stack, a console database and SSH to the Docker host; they were
 replaced by this harness.
 
+### WSS behind a TLS-terminating proxy, UDP blocked mid-session (4 October 2026)
+
+Production symptom: two agents relaying over UDP, then a firewall dropping
+all non-DNS UDP on `eth0`. Both agents moved to `relay_link=wss`, the relay
+counted two WSS connections and rising `registers_total`, but
+`forwards_total` stayed flat and overlay ping never recovered, even after
+UDP was restored. `prove-relay-wss.sh` had passed because it blocks UDP
+before the agents start and its relay terminates TLS itself.
+
+Root cause (agent only): each peer's forwarder task in
+`blaktaild/src/relay_client.rs` returned on the first failed send. A local
+iptables `OUTPUT` drop makes Linux `sendto` fail with `EPERM`, so the first
+WireGuard datagram sent after the block, while the ladder was still probing
+UDP, ended the task. The forwarder stayed registered and `ensure_forwarder`
+kept handing back its port, so WireGuard wrote into a socket nobody read
+(lab: `Recv-Q` 229 248 bytes on the 127.0.0.1 forwarder port) on every link
+until the agent restarted. REGISTER/PING come from a different task, which
+is why the WebSocket looked healthy. The relay, the proxy path and the
+mobile cores were not at fault: the relay keys WebSockets by connection
+id, not address, and the iOS and Android shells already ignore datagram
+send errors.
+
+Fix: a failed send drops that datagram (with at most one warning per peer
+every 30 s) and the task keeps running; `ensure_forwarder` also replaces a
+forwarder whose task has ended, and the next path refresh re-points
+WireGuard at the new port. Only `blaktaild` changes; the relay image does
+not need redeploying. Regression tests: `forwarder_survives_failed_sends`,
+`ensure_forwarder_replaces_a_stopped_forwarder` and
+`udp_blocked_mid_session_recovers_over_proxied_wss` (UDP relay first, then
+sends fail with EPERM, WebSocket through a TCP proxy; it fails on the old
+code).
+
+`prove-relay-wss-proxy.sh` puts nginx (TLS on 443 for a separate host name,
+WebSocket upgrade, 60 s read/send timeout like an ALB) in front of the
+relay's plain listener on 8080 (`BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY=true`),
+drops direct UDP between the agents, and drops non-DNS UDP with the
+production rules. After the WebSocket carries traffic it idles 75 s, pings
+again, restores UDP and waits for promotion back.
+
+| Variant | Before the fix (`c6f7ad3`) | After the fix |
+| --- | --- | --- |
+| `midsession` | Failed. UDP relay ping after 54 s (`forwards_total` 46); after the block both agents reached `relay_link=wss` with `wss_connections` 2, but no ping in 180 s and `forwards_total` stayed 46; forwarder `Recv-Q` 229 248 (a) and 24 192 (b). | Passed. UDP relay after 53 s; ping both ways over the proxied WebSocket 69 s after the block; 20/20 pings, `forwards_total` 106 → 164; ping after 75 s idle; promoted back to UDP 92 s after restore. |
+| `blocked-first` | Not run. | Passed. Ping both ways over the WebSocket after 62 s; 20/20 pings, `forwards_total` 24 → 64; ping after 75 s idle; promoted back to UDP in 106 s. |
+
 Still open (draft 21): independent-ISP and symmetric-NAT runs, a real
-corporate proxy (CONNECT is covered only by an in-process test proxy),
-ALB-fronted WSS, IPv6, relay capacity and draining, and physical-device runs
+corporate proxy (CONNECT is covered only by an in-process test proxy), a
+real AWS ALB (the nginx lab stands in for it), IPv6, relay capacity and draining, and physical-device runs
 for iPhone and Android.

@@ -38,6 +38,8 @@ const RELAY_STARTUP_GRACE_SECS: u64 = 10;
 /// With a WSS fallback the relay may need three silent UDP rounds plus a
 /// TLS connect before it first answers.
 const RELAY_STARTUP_GRACE_WITH_WSS_SECS: u64 = 35;
+/// At most one "forwarder send failed" warning per peer this often.
+const SEND_WARNING_EVERY: Duration = Duration::from_secs(30);
 const RELAY_HEALTH_SECS: u64 = blaktail_relay_proto::ladder::RELAY_HEALTH.as_secs();
 
 struct Creds {
@@ -103,6 +105,10 @@ struct Shared {
     started_at: Instant,
     stopped: AtomicBool,
     stop_notify: Notify,
+    /// Test hook standing in for a firewall that drops UDP: sends fail with
+    /// EPERM (as Linux reports an iptables OUTPUT drop) and receives vanish.
+    #[cfg(test)]
+    udp_blocked: AtomicBool,
 }
 
 impl Shared {
@@ -111,6 +117,15 @@ impl Shared {
             .lock()
             .map(|state| state.ladder.link())
             .unwrap_or(Link::Udp)
+    }
+
+    /// One UDP datagram from the relay socket (to the relay or a peer).
+    async fn send_udp(&self, frame: &[u8], target: SocketAddr) -> io::Result<()> {
+        #[cfg(test)]
+        if self.udp_blocked.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::from_raw_os_error(1));
+        }
+        self.relay_socket.send_to(frame, target).await.map(|_| ())
     }
 
     /// Sends one relay frame over the current link. On WSS the frame is
@@ -125,10 +140,7 @@ impl Shared {
             }
             _ => frame,
         };
-        self.relay_socket
-            .send_to(&frame, self.relay_addr)
-            .await
-            .map(|_| ())
+        self.send_udp(&frame, self.relay_addr).await
     }
 }
 
@@ -205,6 +217,8 @@ impl RelayMesh {
             started_at: Instant::now(),
             stopped: AtomicBool::new(false),
             stop_notify: Notify::new(),
+            #[cfg(test)]
+            udp_blocked: AtomicBool::new(false),
         });
         let mesh = Self { shared };
         tokio::spawn(mesh.clone().run(wss_frames));
@@ -217,11 +231,7 @@ impl RelayMesh {
     async fn register_and_ping(&self) {
         let frames = [self.register_frame(), Some(self.ping_frame())];
         for frame in frames.iter().flatten() {
-            let _ = self
-                .shared
-                .relay_socket
-                .send_to(frame, self.shared.relay_addr)
-                .await;
+            let _ = self.shared.send_udp(frame, self.shared.relay_addr).await;
         }
         if let Ok(state) = self.shared.link.lock() {
             if state.ladder.link() == Link::Wss && !state.ladder.udp_proven() {
@@ -310,6 +320,10 @@ impl RelayMesh {
             tokio::select! {
                 received = self.shared.relay_socket.recv_from(&mut buf) => {
                     let (len, source) = match received { Ok(r) => r, Err(_) => return };
+                    #[cfg(test)]
+                    if self.shared.udp_blocked.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
                     let from_relay = source == self.shared.relay_addr;
                     self.handle_frame(&buf[..len], source, from_relay, Link::Udp).await;
                 }
@@ -382,7 +396,7 @@ impl RelayMesh {
                     let mut ack = vec![PUNCH_ACK];
                     ack.extend_from_slice(&self.shared.self_id);
                     ack.extend_from_slice(&frame[HEADER..len]);
-                    let _ = self.shared.relay_socket.send_to(&ack, source).await;
+                    let _ = self.shared.send_udp(&ack, source).await;
                     None
                 }
                 PUNCH_ACK if len == HEADER + 8 => {
@@ -456,7 +470,18 @@ impl RelayMesh {
 
     /// Ensures a localhost forwarder exists for `peer_id`; returns the local
     /// port to install as that peer's WireGuard endpoint.
+    /// A forwarder whose task has ended is replaced (new port), so the next
+    /// path refresh re-points WireGuard instead of black-holing the peer.
     pub async fn ensure_forwarder(&self, peer_id: Uuid) -> io::Result<u16> {
+        if let Ok(mut forwarders) = self.shared.forwarders.lock() {
+            if forwarders
+                .get(&peer_id)
+                .is_some_and(|forwarder| forwarder.task.is_finished())
+            {
+                tracing::warn!(%peer_id, "relay forwarder stopped; starting a new one");
+                forwarders.remove(&peer_id);
+            }
+        }
         if let Some(port) = self.forwarder_port(peer_id) {
             return Ok(port);
         }
@@ -478,6 +503,7 @@ impl RelayMesh {
             let mut buf = vec![0u8; 65_535];
             let mut punch = tokio::time::interval(Duration::from_secs(1));
             punch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_send_warning: Option<Instant> = None;
             loop {
                 tokio::select! {
                     received = task_socket.recv_from(&mut buf) => {
@@ -502,14 +528,17 @@ impl RelayMesh {
                         frame.extend_from_slice(&buf[..len]);
                         let sent = match mode {
                             Transport::Relay(_) => shared.send_to_relay(frame).await,
-                            Transport::Direct(candidate) => shared
-                                .relay_socket
-                                .send_to(&frame, candidate)
-                                .await
-                                .map(|_| ()),
+                            Transport::Direct(candidate) => shared.send_udp(&frame, candidate).await,
                         };
-                        if sent.is_err() {
-                            return;
+                        // A failed send is a lost datagram, as on the wire:
+                        // a firewall that drops UDP makes Linux return EPERM
+                        // until the ladder moves to the WebSocket. Ending the
+                        // task here would strand this peer for good.
+                        if let Err(error) = sent {
+                            if last_send_warning.is_none_or(|at: Instant| at.elapsed() >= SEND_WARNING_EVERY) {
+                                last_send_warning = Some(Instant::now());
+                                tracing::warn!(%peer_id, %error, "relay forwarder send failed; datagram dropped");
+                            }
                         }
                     }
                     _ = punch.tick() => {
@@ -521,7 +550,7 @@ impl RelayMesh {
                             let mut frame = vec![PUNCH];
                             frame.extend_from_slice(&shared.self_id);
                             frame.extend_from_slice(&punch_nonce.to_be_bytes());
-                            let _ = shared.relay_socket.send_to(&frame, candidate).await;
+                            let _ = shared.send_udp(&frame, candidate).await;
                         }
                     }
                 }
@@ -689,6 +718,7 @@ fn set_fwmark(_socket: &std::net::UdpSocket, _fwmark: Option<u32>) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     fn secret() -> Vec<u8> {
         b"mesh-test-secret".to_vec()
@@ -795,6 +825,235 @@ mod tests {
         relay_task.abort();
         wss_task.abort();
         drop(black_hole);
+    }
+
+    /// Sends `payload` from `wg_a` to the forwarder on `port_b` until `wg_b`
+    /// receives it; returns the source `wg_b` saw.
+    async fn deliver_until(
+        wg_a: &UdpSocket,
+        wg_b: &UdpSocket,
+        port_b: u16,
+        payload: &[u8],
+        within: Duration,
+    ) -> Option<SocketAddr> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut buf = [0u8; 128];
+        while tokio::time::Instant::now() < deadline {
+            wg_a.send_to(payload, format!("127.0.0.1:{port_b}"))
+                .await
+                .unwrap();
+            if let Ok(Ok((len, source))) =
+                tokio::time::timeout(Duration::from_millis(500), wg_b.recv_from(&mut buf)).await
+            {
+                if &buf[..len] == payload {
+                    return Some(source);
+                }
+            }
+        }
+        None
+    }
+
+    /// Two meshes on a real UDP relay, each with a forwarder to the other.
+    async fn udp_relay_pair() -> (
+        RelayMesh,
+        RelayMesh,
+        UdpSocket,
+        UdpSocket,
+        u16,
+        u16,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let relay_task = tokio::spawn(blaktail_relay::serve(
+            relay,
+            blaktail_relay::RelayConfig {
+                auth_secret: secret(),
+                ..blaktail_relay::RelayConfig::default()
+            },
+        ));
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let wg_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let wg_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let spawn = |node: Uuid, wg: SocketAddr| {
+            RelayMesh::spawn(
+                relay_addr,
+                wg,
+                node,
+                &capability(node, expires, &secret()),
+                expires,
+                None,
+            )
+            .unwrap()
+        };
+        let (node_a, node_b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mesh_a = spawn(node_a, wg_a.local_addr().unwrap());
+        let mesh_b = spawn(node_b, wg_b.local_addr().unwrap());
+        let port_b = mesh_a.ensure_forwarder(node_b).await.unwrap();
+        let port_a = mesh_b.ensure_forwarder(node_a).await.unwrap();
+        (mesh_a, mesh_b, wg_a, wg_b, port_a, port_b, relay_task)
+    }
+
+    /// A failing UDP send (EPERM from a local firewall drop) loses that
+    /// datagram only: once UDP works again the same forwarder relays.
+    #[tokio::test]
+    async fn forwarder_survives_failed_sends() {
+        let (mesh_a, mesh_b, wg_a, wg_b, port_a, port_b, relay_task) = udp_relay_pair().await;
+        let source = deliver_until(&wg_a, &wg_b, port_b, b"before", Duration::from_secs(3)).await;
+        assert_eq!(source.map(|s| s.port()), Some(port_a));
+
+        mesh_a.shared.udp_blocked.store(true, Ordering::Relaxed);
+        let lost = deliver_until(&wg_a, &wg_b, port_b, b"blocked", Duration::from_secs(1)).await;
+        assert_eq!(lost, None, "blocked UDP must not deliver");
+        mesh_a.shared.udp_blocked.store(false, Ordering::Relaxed);
+
+        let source = deliver_until(&wg_a, &wg_b, port_b, b"after", Duration::from_secs(3)).await;
+        assert_eq!(source.map(|s| s.port()), Some(port_a), "forwarder died");
+        assert_eq!(mesh_a.forwarder_port(Uuid::from_u128(2)), Some(port_b));
+
+        mesh_a.stop();
+        mesh_b.stop();
+        relay_task.abort();
+    }
+
+    /// A forwarder whose task ended is replaced rather than handed back.
+    #[tokio::test]
+    async fn ensure_forwarder_replaces_a_stopped_forwarder() {
+        let (mesh_a, mesh_b, wg_a, wg_b, port_a, port_b, relay_task) = udp_relay_pair().await;
+        let node_b = Uuid::from_u128(2);
+        mesh_a.shared.forwarders.lock().unwrap()[&node_b]
+            .task
+            .abort();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mesh_a.shared.forwarders.lock().unwrap()[&node_b]
+                .task
+                .is_finished()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let replaced = mesh_a.ensure_forwarder(node_b).await.unwrap();
+        assert_ne!(replaced, port_b);
+        let source = deliver_until(&wg_a, &wg_b, replaced, b"again", Duration::from_secs(3)).await;
+        assert_eq!(source.map(|s| s.port()), Some(port_a));
+
+        mesh_a.stop();
+        mesh_b.stop();
+        relay_task.abort();
+    }
+
+    /// Production regression: two agents relay over UDP, then a firewall
+    /// starts dropping UDP while they run (sends fail with EPERM). The relay's
+    /// WebSocket sits behind a TCP proxy, like an ALB in front of the plain
+    /// listener. Once the ladder moves to WSS, WireGuard datagrams that hit
+    /// the failing UDP send in between must not have stopped the forwarder.
+    #[tokio::test]
+    async fn udp_blocked_mid_session_recovers_over_proxied_wss() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = listener.local_addr().unwrap();
+        let metrics = Arc::new(blaktail_relay::Metrics::default());
+        let (events_tx, events_rx) = blaktail_relay::stream_channel();
+        let relay_task = tokio::spawn(blaktail_relay::serve_with_streams(
+            relay,
+            blaktail_relay::RelayConfig {
+                auth_secret: secret(),
+                ..blaktail_relay::RelayConfig::default()
+            },
+            metrics.clone(),
+            events_rx,
+        ));
+        let wss_task = tokio::spawn(blaktail_relay::wss::serve_wss(
+            listener,
+            blaktail_relay::wss::WssServerConfig::default(),
+            events_tx,
+            metrics.clone(),
+        ));
+        // Byte-pumping proxy: the relay sees every WebSocket from one address.
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let proxy_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = proxy.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    if let Ok(mut upstream) = tokio::net::TcpStream::connect(backend).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        let fallback = WssFallback {
+            url: format!("ws://127.0.0.1:{proxy_port}/v1/relay"),
+            options: ClientOptions::default(),
+        };
+        let node_a = Uuid::from_u128(1);
+        let node_b = Uuid::from_u128(2);
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let wg_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let wg_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let spawn = |node: Uuid, wg: SocketAddr| {
+            RelayMesh::spawn_with_fallback(
+                relay_addr,
+                wg,
+                node,
+                &capability(node, expires, &secret()),
+                expires,
+                None,
+                Some(fallback.clone()),
+            )
+            .unwrap()
+        };
+        let mesh_a = spawn(node_a, wg_a.local_addr().unwrap());
+        let mesh_b = spawn(node_b, wg_b.local_addr().unwrap());
+        let port_b = mesh_a.ensure_forwarder(node_b).await.unwrap();
+        let port_a = mesh_b.ensure_forwarder(node_a).await.unwrap();
+        let deliver = |payload: &'static [u8], within: Duration| {
+            deliver_until(&wg_a, &wg_b, port_b, payload, within)
+        };
+        let source = deliver(b"over-udp", Duration::from_secs(5)).await;
+        assert_eq!(source.map(|s| s.port()), Some(port_a), "UDP relay works");
+        assert_eq!(mesh_a.transport_label(), "relay");
+        assert!(!metrics
+            .render()
+            .contains("blaktail_relay_wss_connections 1"));
+
+        mesh_a.shared.udp_blocked.store(true, Ordering::Relaxed);
+        mesh_b.shared.udp_blocked.store(true, Ordering::Relaxed);
+        // WireGuard keeps sending while UDP fails and before the ladder moves.
+        let _ = deliver(b"lost-in-firewall", Duration::from_secs(2)).await;
+        assert_eq!(mesh_a.transport_label(), "relay", "still probing UDP");
+
+        let source = deliver(b"over-wss", Duration::from_secs(60)).await;
+        assert_eq!(
+            source.map(|s| s.port()),
+            Some(port_a),
+            "relay traffic did not recover over the WebSocket"
+        );
+        assert_eq!(mesh_a.transport_label(), "relay-wss");
+        assert_eq!(mesh_b.transport_label(), "relay-wss");
+        assert!(metrics
+            .render()
+            .contains("blaktail_relay_wss_connections 2"));
+
+        mesh_a.stop();
+        mesh_b.stop();
+        relay_task.abort();
+        wss_task.abort();
+        proxy_task.abort();
     }
 
     #[tokio::test]
