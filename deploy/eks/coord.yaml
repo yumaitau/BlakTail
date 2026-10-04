@@ -1,0 +1,137 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: blaktail-coord-migrate
+  namespace: blaktail
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: blaktail/coord
+          args: ["migrate"]
+          envFrom:
+            - configMapRef:
+                name: blaktail-coord
+          env:
+            - name: BLAKTAIL_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_DATABASE_URL}}
+            - name: BLAKTAIL_AUTH_HMAC_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_AUTH_HMAC_SECRET}}
+            - name: BLAKTAIL_RELAY_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_RELAY_AUTH_SECRET}}
+            - name: BLAKTAIL_TLS_CERT_PEM
+              valueFrom: {secretKeyRef: {name: blaktail-coord-tls, key: tls.crt}}
+            - name: BLAKTAIL_TLS_KEY_PEM
+              valueFrom: {secretKeyRef: {name: blaktail-coord-tls, key: tls.key}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blaktail-coord
+  namespace: blaktail
+  labels: {app: blaktail-coord}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: blaktail-coord}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: blaktail-coord}
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coord
+          image: blaktail/coord
+          args: ["serve"]
+          ports:
+            - {name: https, containerPort: 8443}
+          envFrom:
+            - configMapRef:
+                name: blaktail-coord
+          env:
+            - name: BLAKTAIL_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_DATABASE_URL}}
+            - name: BLAKTAIL_AUTH_HMAC_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_AUTH_HMAC_SECRET}}
+            - name: BLAKTAIL_RELAY_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_RELAY_AUTH_SECRET}}
+            - name: BLAKTAIL_TLS_CERT_PEM
+              valueFrom: {secretKeyRef: {name: blaktail-coord-tls, key: tls.crt}}
+            - name: BLAKTAIL_TLS_KEY_PEM
+              valueFrom: {secretKeyRef: {name: blaktail-coord-tls, key: tls.key}}
+          readinessProbe:
+            httpGet: {path: /readyz, port: https, scheme: HTTPS}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /livez, port: https, scheme: HTTPS}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blaktail-coord
+  namespace: blaktail
+  annotations:
+    # The coordinator always speaks TLS; the ALB re-encrypts to it.
+    alb.ingress.kubernetes.io/backend-protocol: HTTPS
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+spec:
+  selector: {app: blaktail-coord}
+  ports:
+    - {name: https, port: 8443, targetPort: https}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: blaktail-coord
+  namespace: blaktail
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: blaktail-coord}

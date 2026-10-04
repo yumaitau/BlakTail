@@ -1,0 +1,60 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: blaktail-owner-password
+  namespace: blaktail
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: aws-secretsmanager}
+  target: {name: blaktail-owner-password, creationPolicy: Owner, deletionPolicy: Delete}
+  data:
+    - secretKey: password
+      remoteRef: {key: blaktail-eks-owner-password, property: password}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: blaktail-bootstrap-owner
+  namespace: blaktail
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: {kubernetes.io/arch: arm64, karpenter.sh/capacity-type: on-demand}
+      securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: bootstrap
+          image: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/console:IMAGE_TAG
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - |
+              umask 077
+              cp /run/secrets/owner/password /tmp/owner-password
+              bun scripts/bootstrap.mjs init --token-file /tmp/bootstrap-token
+              bun scripts/bootstrap.mjs claim \
+                --token-file /tmp/bootstrap-token \
+                --password-file /tmp/owner-password \
+                --email OWNER_EMAIL \
+                --name "OWNER NAME" \
+                --organisation-name "ORGANISATION NAME"
+              rm -f /tmp/bootstrap-token /tmp/owner-password
+          envFrom:
+            - configMapRef: {name: blaktail-console}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: DATABASE_URL}}
+            - name: BETTER_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BETTER_AUTH_SECRET}}
+            - name: BLAKTAIL_AUTH_HMAC_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_AUTH_HMAC_SECRET}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: owner, mountPath: /run/secrets/owner, readOnly: true}
+            - {name: ca, mountPath: /etc/blaktail/ca, readOnly: true}
+      volumes:
+        - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+        - {name: owner, secret: {secretName: blaktail-owner-password}}
+        - {name: ca, secret: {secretName: blaktail-internal-ca}}
