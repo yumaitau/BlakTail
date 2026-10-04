@@ -19,6 +19,7 @@ import { listPendingInvitations } from "@/lib/invitations";
 import { listIdentitySettings } from "@/lib/identity-links";
 import { listIdentityProviders, listMemberships } from "@/lib/oidc";
 import { AccountSecurity } from "@/components/account-security";
+import { ChangePassword } from "@/components/change-password";
 import { SignInSecurity } from "@/components/sign-in-security";
 import { getSignInPolicy, identityAssurance, listDomains } from "@/lib/auth-policy";
 import { MFA_PRIVILEGED_ROLES } from "@/lib/auth-policy-core";
@@ -128,7 +129,8 @@ export default async function SettingsPage() {
             conflicts={identitySettings.conflicts}
           />
         </div>
-        <div id="account-security">
+        <div id="account-security" className="stack">
+          {assurance.hasPassword ? <ChangePassword /> : null}
           <AccountSecurity
             hasPassword={assurance.hasPassword}
             twoFactorEnabled={assurance.twoFactorEnabled}
