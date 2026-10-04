@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blaktail-relay
+  namespace: blaktail
+  labels: {app: blaktail-relay}
+spec:
+  # One relay: registrations are held in memory by the relay process.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: blaktail-relay}
+  template:
+    metadata:
+      labels: {app: blaktail-relay}
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: blaktail/relay
+          ports:
+            - {name: relay-udp, containerPort: 3478, protocol: UDP}
+            - {name: relay-ws, containerPort: 8080}
+            - {name: metrics, containerPort: 9702}
+          envFrom:
+            - configMapRef: {name: blaktail-relay}
+          env:
+            - name: BLAKTAIL_RELAY_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_RELAY_AUTH_SECRET}}
+            - name: BLAKTAIL_RELAY_DIAGNOSTICS_TOKEN
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_DIAGNOSTICS_TOKEN}}
+          readinessProbe:
+            tcpSocket: {port: metrics}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+---
+# UDP relay on a dedicated internet-facing NLB in Sydney.
+apiVersion: v1
+kind: Service
+metadata:
+  name: blaktail-relay-udp
+  namespace: blaktail
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "9702"
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: App=blaktail
+spec:
+  type: LoadBalancer
+  loadBalancerClass: eks.amazonaws.com/nlb
+  externalTrafficPolicy: Local
+  selector: {app: blaktail-relay}
+  ports:
+    - {name: relay-udp, port: 3478, targetPort: relay-udp, protocol: UDP}
+---
+# WebSocket fallback, reached through the ALB on 443.
+apiVersion: v1
+kind: Service
+metadata:
+  name: blaktail-relay-ws
+  namespace: blaktail
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-port: "9702"
+    alb.ingress.kubernetes.io/healthcheck-path: /metrics
+    alb.ingress.kubernetes.io/success-codes: "200-499"
+spec:
+  selector: {app: blaktail-relay}
+  ports:
+    - {name: relay-ws, port: 8080, targetPort: relay-ws}

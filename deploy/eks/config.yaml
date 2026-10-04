@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blaktail-coord
+  namespace: blaktail
+data:
+  BLAKTAIL_REGION: ap-southeast-2
+  BLAKTAIL_BIND: 0.0.0.0:8443
+  BLAKTAIL_DATABASE_BACKEND: postgres
+  BLAKTAIL_DATABASE_STORAGE: network
+  BLAKTAIL_CONSOLE_URL: https://console.blaktail.yumait.au
+  # UDP relay behind the NLB, with its WebSocket-over-443 fallback on the ALB.
+  BLAKTAIL_RELAYS: relay.blaktail.yumait.au:3478#ap-southeast-2;wss=wss://relay-wss.blaktail.yumait.au/v1/relay
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blaktail-console
+  namespace: blaktail
+data:
+  BLAKTAIL_REGION: ap-southeast-2
+  BETTER_AUTH_URL: https://console.blaktail.yumait.au
+  BETTER_AUTH_TRUSTED_ORIGINS: https://console.blaktail.yumait.au
+  COORD_BASE_URL: https://blaktail-coord.blaktail.svc.cluster.local:8443
+  NODE_EXTRA_CA_CERTS: /etc/blaktail/ca/ca.crt
+  NEXT_TELEMETRY_DISABLED: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blaktail-relay
+  namespace: blaktail
+data:
+  BLAKTAIL_REGION: ap-southeast-2
+  BLAKTAIL_RELAY_BIND: 0.0.0.0:3478
+  # TLS ends on the ALB (ACM, Sydney); the relay speaks plain WebSocket to it.
+  BLAKTAIL_RELAY_WSS_BIND: 0.0.0.0:8080
+  BLAKTAIL_RELAY_WSS_BEHIND_TLS_PROXY: "true"
+  BLAKTAIL_RELAY_METRICS_BIND: 0.0.0.0:9702
+  BLAKTAIL_RELAY_ALLOW_PUBLIC_METRICS: "true"

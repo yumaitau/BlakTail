@@ -1,0 +1,132 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: blaktail-console-migrate
+  namespace: blaktail
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: blaktail/console
+          command: ["bun", "scripts/migrate.mjs"]
+          envFrom:
+            - configMapRef: {name: blaktail-console}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: DATABASE_URL}}
+            - name: BETTER_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BETTER_AUTH_SECRET}}
+            - name: BLAKTAIL_AUTH_HMAC_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_AUTH_HMAC_SECRET}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: ca, mountPath: /etc/blaktail/ca, readOnly: true}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        - name: ca
+          secret: {secretName: blaktail-internal-ca}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blaktail-console
+  namespace: blaktail
+  labels: {app: blaktail-console}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: blaktail-console}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: blaktail-console}
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: console
+          image: blaktail/console
+          ports:
+            - {name: http, containerPort: 3000}
+          envFrom:
+            - configMapRef: {name: blaktail-console}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: DATABASE_URL}}
+            - name: BETTER_AUTH_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BETTER_AUTH_SECRET}}
+            - name: BLAKTAIL_AUTH_HMAC_SECRET
+              valueFrom: {secretKeyRef: {name: blaktail-runtime, key: BLAKTAIL_AUTH_HMAC_SECRET}}
+          readinessProbe:
+            httpGet: {path: /sign-in, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /sign-in, port: http}
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 150m, memory: 384Mi}
+            limits: {memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: next-cache, mountPath: /app/.next/cache}
+            - {name: ca, mountPath: /etc/blaktail/ca, readOnly: true}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        - name: next-cache
+          emptyDir: {sizeLimit: 256Mi}
+        - name: ca
+          secret: {secretName: blaktail-internal-ca}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blaktail-console
+  namespace: blaktail
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /sign-in
+spec:
+  selector: {app: blaktail-console}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: blaktail-console
+  namespace: blaktail
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: blaktail-console}

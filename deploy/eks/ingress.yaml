@@ -1,0 +1,42 @@
+# Dedicated internet-facing ALB in Sydney. TLS ends here with an ACM
+# certificate, so traffic is never decrypted outside Australia; DNS records
+# in Cloudflare are DNS-only. No custom tags: EKS Auto Mode's load-balancing
+# policy only allows its own tag keys on rules it creates.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blaktail
+  namespace: blaktail
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: blaktail
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:959038055523:certificate/c3306ea0-c15c-4afd-b650-1920aa347f79
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=120,routing.http.drop_invalid_header_fields.enabled=true
+spec:
+  ingressClassName: alb
+  rules:
+    - host: console.blaktail.yumait.au
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: blaktail-console, port: {number: 80}}
+    - host: coord.blaktail.yumait.au
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: blaktail-coord, port: {number: 8443}}
+    - host: relay-wss.blaktail.yumait.au
+      http:
+        paths:
+          - path: /v1/relay
+            pathType: Exact
+            backend:
+              service: {name: blaktail-relay-ws, port: {number: 8080}}

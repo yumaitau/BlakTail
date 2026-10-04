@@ -1,0 +1,58 @@
+# Idempotently creates the coordinator and console databases and their
+# least-privilege owners on the shared RDS instance.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: blaktail-db-init
+  namespace: blaktail
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: on-demand
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: psql
+          image: public.ecr.aws/docker/library/postgres:16-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - secretRef:
+                name: blaktail-db-admin
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - |
+              psql "$MASTER_URL" -v ON_ERROR_STOP=1 \
+                -v coord_pw="$COORD_PASSWORD" -v console_pw="$CONSOLE_PASSWORD" <<'SQL'
+              SELECT 'CREATE ROLE coord_app LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='coord_app') \gexec
+              SELECT 'CREATE ROLE console_app LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='console_app') \gexec
+              ALTER ROLE coord_app PASSWORD :'coord_pw';
+              ALTER ROLE console_app PASSWORD :'console_pw';
+              GRANT coord_app TO CURRENT_USER;
+              GRANT console_app TO CURRENT_USER;
+              SELECT 'CREATE DATABASE blaktail_coord OWNER coord_app' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='blaktail_coord') \gexec
+              ALTER DATABASE blaktail_console OWNER TO console_app;
+              REVOKE ALL ON DATABASE blaktail_coord FROM PUBLIC;
+              REVOKE ALL ON DATABASE blaktail_console FROM PUBLIC;
+              SQL
+              psql "${MASTER_URL%/postgres*}/blaktail_console?sslmode=require" -v ON_ERROR_STOP=1 \
+                -c 'ALTER SCHEMA public OWNER TO console_app'
+              psql "${MASTER_URL%/postgres*}/blaktail_coord?sslmode=require" -v ON_ERROR_STOP=1 \
+                -c 'ALTER SCHEMA public OWNER TO coord_app'
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

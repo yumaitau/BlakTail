@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: blaktail
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - config.yaml
+  - db-init.yaml
+  - coord.yaml
+  - console.yaml
+  - relay.yaml
+  - ingress.yaml
+images:
+  - name: blaktail/coord
+    newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/coord
+    newTag: f8821c406b12
+  - name: blaktail/console
+    newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/console
+    newTag: f8821c406b12
+  - name: blaktail/relay
+    newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/relay
+    newTag: f8821c406b12
