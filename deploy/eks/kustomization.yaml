@@ -16,7 +16,7 @@ images:
     newTag: a988bda9d132
   - name: blaktail/console
     newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/console
-    newTag: 77867144efcb
+    newTag: 5848aae60f6d
   - name: blaktail/relay
     newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/relay
     newTag: a988bda9d132
