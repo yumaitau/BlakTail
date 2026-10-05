@@ -54,7 +54,7 @@ COPY --chown=blaktail:blaktail --from=prod-deps /app /app
 COPY --chown=blaktail:blaktail --from=build /app/apps/console/.next ./.next
 COPY --chown=blaktail:blaktail --from=build /app/apps/console/public ./public
 COPY --chown=blaktail:blaktail --from=build /app/apps/console/scripts ./scripts
-COPY --chown=blaktail:blaktail apps/console/package.json apps/console/drizzle.config.ts ./
+COPY --chown=blaktail:blaktail apps/console/package.json apps/console/drizzle.config.ts apps/console/next.config.ts ./
 COPY --chown=blaktail:blaktail apps/console/drizzle ./drizzle
 COPY --from=config-build /src/target/release/blaktail-config /usr/local/bin/blaktail-config
 COPY --chown=blaktail:blaktail --chmod=0755 deploy/docker/console-entrypoint.sh /usr/local/bin/console-entrypoint

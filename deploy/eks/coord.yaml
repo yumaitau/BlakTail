@@ -54,6 +54,8 @@ metadata:
   labels: {app: blaktail-coord}
 spec:
   replicas: 2
+  # Give the ALB time to register new targets before old pods go.
+  minReadySeconds: 15
   selector:
     matchLabels: {app: blaktail-coord}
   strategy:
@@ -62,6 +64,7 @@ spec:
     metadata:
       labels: {app: blaktail-coord}
     spec:
+      terminationGracePeriodSeconds: 45
       nodeSelector:
         kubernetes.io/arch: arm64
         karpenter.sh/capacity-type: on-demand
@@ -75,6 +78,10 @@ spec:
         - name: coord
           image: blaktail/coord
           args: ["serve"]
+          lifecycle:
+            # Keep serving while the ALB deregisters this pod.
+            preStop:
+              sleep: {seconds: 20}
           ports:
             - {name: https, containerPort: 8443}
           envFrom:
@@ -121,6 +128,9 @@ metadata:
     alb.ingress.kubernetes.io/backend-protocol: HTTPS
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTPS
     alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=15
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
 spec:
   selector: {app: blaktail-coord}
   ports:
