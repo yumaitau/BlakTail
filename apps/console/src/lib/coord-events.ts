@@ -2,7 +2,7 @@ import "server-only";
 
 import type { AuditFilters } from "./audit-view";
 import type { FlowsPage } from "./traffic-view";
-import { coordFetch, readError, type AuditEvent } from "./coord";
+import { coordFetch, coordError, type AuditEvent } from "./coord";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -58,7 +58,7 @@ export type EventKind = {
 
 async function json<T>(ctx: ConsoleContext, path: string, init: RequestInit = {}): Promise<T> {
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}${path}`, { ...init, ctx });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<T>;
 }
 
@@ -104,9 +104,10 @@ export async function exportTrafficEvents(
   params.set("format", "csv");
   const res = await coordFetch(
     `/v1/orgs/${ctx.coordOrgId}/traffic/events/export?${params.toString()}`,
-    { method: "GET", ctx },
+    // The body streams to the browser, so allow longer than the default.
+    { method: "GET", ctx, signal: AbortSignal.timeout(10 * 60_000) },
   );
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res;
 }
 

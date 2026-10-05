@@ -1,5 +1,6 @@
 "use server";
 
+import { errorText } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import {
@@ -19,7 +20,7 @@ import { requireConsoleContext } from "@/lib/session";
 const OWNER_ONLY = "Only owners can publish services to the Internet.";
 
 function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return errorText(error, fallback);
 }
 
 function int(formData: FormData, name: string, fallback: number): number {

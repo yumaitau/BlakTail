@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import type { ConsoleContext } from "./session";
 
 export type IpamPool = {
@@ -139,19 +139,9 @@ async function ipamFetch(
   });
 }
 
-async function readError(res: Response): Promise<string> {
-  try {
-    const body = (await res.json()) as { error?: string };
-    if (body.error) return body.error;
-  } catch {
-    /* ignore */
-  }
-  return `Coordinator returned ${res.status}`;
-}
-
 export async function getIpam(ctx: ConsoleContext): Promise<IpamView> {
   const res = await ipamFetch(ctx, "", { method: "GET" });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<IpamView>;
 }
 
@@ -164,7 +154,7 @@ export async function reserveAddress(
     method: "POST",
     body: JSON.stringify(input),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<IpamReservation>;
 }
 
@@ -181,7 +171,7 @@ export async function releaseReservation(
   if (res.status === 412) {
     throw new Error("Someone else changed this reservation. Reload to see the latest version.");
   }
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
 }
 
 export async function previewRenumber(
@@ -192,7 +182,7 @@ export async function previewRenumber(
     method: "POST",
     body: JSON.stringify(input),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<RenumberPreview>;
 }
 
@@ -204,7 +194,7 @@ export async function startRenumber(
     method: "POST",
     body: JSON.stringify(input),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<RenumberPlan>;
 }
 
@@ -222,6 +212,6 @@ export async function finishRenumber(
   if (res.status === 412) {
     throw new Error("This renumber plan changed since the page loaded. Reload to see its state.");
   }
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<RenumberPlan>;
 }

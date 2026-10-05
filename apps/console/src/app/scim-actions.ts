@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db/client";
 import { scimToken } from "@/lib/db/schema";
@@ -28,9 +29,6 @@ export async function mintScimTokenAction(): Promise<
     revalidatePath("/settings");
     return { ok: true, token: minted.token };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not mint a SCIM token.",
-    };
+    return actionFailure(error, "Could not mint a SCIM token.");
   }
 }

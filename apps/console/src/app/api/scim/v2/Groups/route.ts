@@ -1,3 +1,4 @@
+import { SCIM_BODY_LIMIT, readJsonBodyOr } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { organisationForToken } from "@/lib/scim";
 import { createScimGroup, listScimGroups } from "@/lib/scim-groups";
@@ -30,7 +31,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const organisationId = await organisationForToken(request.headers.get("authorization"));
-    const input = parseScimGroup(await request.json().catch(() => null));
+    const input = parseScimGroup(await readJsonBodyOr(request, null, SCIM_BODY_LIMIT));
     if (!input) {
       return NextResponse.json(
         scimErrorBody("displayName is required and members must be [{ value }].", 400, "invalidValue"),

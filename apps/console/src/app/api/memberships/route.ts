@@ -1,3 +1,4 @@
+import { errorText, readJsonBody } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { emitMembershipUpdated } from "@/lib/coord";
 import { revokeSessionsForMembership } from "@/lib/coord-remote";
@@ -11,7 +12,7 @@ export async function PATCH(request: Request) {
   try {
     assertSameOrigin(request);
     const ctx = await requireConsoleContext();
-    const body = (await request.json()) as {
+    const body = (await readJsonBody(request)) as {
       membershipId?: string;
       role?: unknown;
       status?: "active" | "suspended" | "removed";
@@ -55,7 +56,7 @@ export async function PATCH(request: Request) {
             ? 400
             : 500;
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "membership update failed" },
+      { error: errorText(error, "Could not update the membership.") },
       { status },
     );
   }

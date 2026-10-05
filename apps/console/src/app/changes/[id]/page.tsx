@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { DnsDiff } from "@/components/dns/dns-diff";
@@ -85,7 +86,7 @@ export default async function ChangeDraftPage({
   try {
     draft = UUID.test(id) ? await getDraft(ctx, id) : null;
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load this draft.";
+    error = errorText(err, "Could not load this draft.");
   }
 
   if (!draft) {
@@ -128,7 +129,7 @@ export default async function ChangeDraftPage({
     try {
       preview = await previewDraft(ctx, draft.id, previewPair(search));
     } catch (err) {
-      previewError = err instanceof Error ? err.message : "Could not preview this draft.";
+      previewError = errorText(err, "Could not preview this draft.");
     }
   }
   const nodeName = (nodeId: string) => nodes.find((node) => node.id === nodeId)?.label ?? nodeId;

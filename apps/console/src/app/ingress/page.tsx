@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { IngressManager } from "@/components/ingress/ingress-manager";
 import { PageHeader } from "@/components/page-header";
@@ -14,7 +15,7 @@ export default async function IngressPage() {
   try {
     workspace = await getIngressWorkspace(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load public ingress.";
+    error = errorText(err, "Could not load public ingress.");
   }
   const canManage = can(ctx.role, "manage_public_ingress");
   const [nodes, services] = canManage

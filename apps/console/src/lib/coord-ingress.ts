@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import { can } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -110,7 +110,7 @@ async function json<T>(res: Response): Promise<T> {
     throw new Error("Someone else changed this route; reload to see the latest revision.");
   }
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<T>;
 }
@@ -181,7 +181,7 @@ export async function deleteRoute(ctx: ConsoleContext, routeId: string): Promise
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 

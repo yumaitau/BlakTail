@@ -1,3 +1,4 @@
+import { SCIM_BODY_LIMIT, readJsonBody } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { getScimUser, organisationForToken, ScimError, setScimActive } from "@/lib/scim";
 import { patchDeactivates } from "@/lib/scim-core";
@@ -35,7 +36,7 @@ export async function PATCH(
 ) {
   try {
     const organisationId = await organisationForToken(request.headers.get("authorization"));
-    const deactivates = patchDeactivates(await request.json());
+    const deactivates = patchDeactivates(await readJsonBody(request, SCIM_BODY_LIMIT));
     if (deactivates === null) {
       return NextResponse.json(
         {

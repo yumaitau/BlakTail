@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -20,7 +21,7 @@ export default async function ChangesPage({
   try {
     drafts = await listDrafts(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load change drafts.";
+    error = errorText(err, "Could not load change drafts.");
   }
   const allowed = SURFACES.filter((surface) => can(ctx.role, surface.permission));
 

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import type { TopologyEdge } from "./coord-topology";
 import type { ConsoleContext } from "./session";
 
@@ -98,7 +98,7 @@ async function send<T>(
     method,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<T>;
 }
 
@@ -109,7 +109,7 @@ export async function listDrafts(ctx: ConsoleContext): Promise<ChangeDraft[]> {
 export async function getDraft(ctx: ConsoleContext, id: string): Promise<ChangeDraft | null> {
   const res = await coordFetch(path(ctx, `/${encodeURIComponent(id)}`), { ctx, method: "GET" });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<ChangeDraft>;
 }
 

@@ -2,7 +2,7 @@ import "server-only";
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import { rawSqlClient } from "./db/client";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
@@ -62,7 +62,7 @@ export async function getOperationsHealth(ctx: ConsoleContext): Promise<Operatio
     method: "GET",
     ctx,
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<OperationsHealth>;
 }
 

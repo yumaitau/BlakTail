@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -15,7 +16,7 @@ export default async function TunnelProtectionPage() {
   try {
     overview = await getPqOverview(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load tunnel protection.";
+    error = errorText(err, "Could not load tunnel protection.");
   }
   const denied = permissionReason(ctx.role, "manage_security");
   const names = new Map(overview?.devices.map((device) => [device.id, device.name]) ?? []);

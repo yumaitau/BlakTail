@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { saveAclAction } from "@/app/actions";
+import { Button } from "./ui/button";
+import { toastResult } from "./ui/toast";
 import {
   ACL_DEFAULTS,
   ACL_PROTOCOLS,
@@ -834,10 +836,10 @@ export function AclEditor({
 
       {canMutate ? (
         <div className="actions">
-          <button
-            type="button"
+          <Button
             data-testid="acl-save"
-            disabled={pending}
+            loading={pending}
+            loadingLabel="Saving…"
             onClick={() => {
               const formData = new FormData();
               formData.set(
@@ -848,17 +850,18 @@ export function AclEditor({
               setMessage(null);
               startTransition(async () => {
                 const result = await saveAclAction(formData);
-                setMessage(
-                  result.ok ? "Access policy saved on the coordinator." : result.error,
-                );
+                toastResult(result, {
+                  success: "Access policy published",
+                  successDescription: "Access policy saved on the coordinator.",
+                });
                 if (result.ok) {
                   router.refresh();
                 }
               });
             }}
           >
-            {pending ? "Saving…" : "Save access policy"}
-          </button>
+            Save access policy
+          </Button>
           {policy.has_previous ? (
             <button
               type="button"
@@ -872,11 +875,10 @@ export function AclEditor({
                 setMessage(null);
                 startTransition(async () => {
                   const result = await saveAclAction(formData);
-                  setMessage(
-                    result.ok
-                      ? "Access policy rolled back on the coordinator."
-                      : result.error,
-                  );
+                  toastResult(result, {
+                    success: "Access policy rolled back",
+                    successDescription: "The previous policy is live on the coordinator again.",
+                  });
                   if (result.ok) {
                     router.refresh();
                   }
@@ -890,12 +892,7 @@ export function AclEditor({
       ) : null}
 
       {message ? (
-        <p
-          className={
-            message.startsWith("Access policy saved") ? "muted" : "error"
-          }
-          role={message.startsWith("Access policy saved") ? "status" : "alert"}
-        >
+        <p className="error" role="alert">
           {message}
         </p>
       ) : null}

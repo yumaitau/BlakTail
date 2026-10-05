@@ -1,3 +1,4 @@
+import { errorText, readJsonBodyOr } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { mintJoinKey, type DeviceTag } from "@/lib/coord";
 import {
@@ -20,7 +21,7 @@ export async function POST(request: Request) {
     if (!session) {
       return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     }
-    const body = (await request.json().catch(() => ({}))) as {
+    const body = (await readJsonBodyOr(request, ({}))) as {
       organisationId?: string;
       expiresInSeconds?: number;
       singleUse?: boolean;
@@ -57,7 +58,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Could not mint join key.";
+      errorText(error, "Could not mint join key.");
     const status =
       error instanceof OrganisationAccessError
         ? 403

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError, type DeviceTag } from "./coord";
+import { coordFetch, coordError, type DeviceTag } from "./coord";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -56,7 +56,7 @@ export async function getPqOverview(ctx: ConsoleContext, nodeId?: string): Promi
     ctx,
     method: "GET",
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<PqOverview>;
 }
 
@@ -77,7 +77,7 @@ export async function putPqPolicy(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<PqPolicy>;
 }
 

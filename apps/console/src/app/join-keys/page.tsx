@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { EnrolmentWorkspace } from "@/components/enrolment-workspace";
 import { PageHeader } from "@/components/page-header";
@@ -13,7 +14,7 @@ export default async function JoinKeysPage() {
     try {
       keys = await listJoinKeys(ctx);
     } catch (error) {
-      loadError = error instanceof Error ? error.message : "Could not load join keys.";
+      loadError = errorText(error, "Could not load join keys.");
     }
   }
 

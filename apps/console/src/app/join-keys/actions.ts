@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import type { DeviceTag } from "@/lib/coord";
@@ -23,6 +24,10 @@ async function joinKeyContext(formData: FormData) {
   return ctx;
 }
 
+function invalid(field: string, error: string): ActionFailure {
+  return { ok: false, error, fieldErrors: { [field]: error } };
+}
+
 export async function mintEnrolmentKeyAction(
   formData: FormData,
 ): Promise<ActionResult<{ key: string; expiresAt: number; name: string }>> {
@@ -30,12 +35,12 @@ export async function mintEnrolmentKeyAction(
     const ctx = await joinKeyContext(formData);
     const name = String(formData.get("name") ?? "").trim();
     const description = String(formData.get("description") ?? "").trim();
-    if (!name) return { ok: false, error: "Give the key a name." };
+    if (!name) return invalid("name", "Give the key a name.");
     if ([...name].length > 64) {
-      return { ok: false, error: "Names must be 64 characters or fewer." };
+      return invalid("name", "Names must be 64 characters or fewer.");
     }
     if ([...description].length > 200) {
-      return { ok: false, error: "Descriptions must be 200 characters or fewer." };
+      return invalid("description", "Descriptions must be 200 characters or fewer.");
     }
     const expiresInSeconds = Number(formData.get("expiresInSeconds") ?? 3600);
     if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > 2_592_000) {
@@ -45,7 +50,7 @@ export async function mintEnrolmentKeyAction(
     const rawMaxUses = String(formData.get("maxUses") ?? "").trim();
     const maxUses = rawMaxUses ? Number(rawMaxUses) : null;
     if (!singleUse && maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 10_000)) {
-      return { ok: false, error: "Maximum uses must be a whole number from 1 to 10000, or blank." };
+      return invalid("maxUses", "Maximum uses must be a whole number from 1 to 10000, or blank.");
     }
     const tags = formData.getAll("tags").map(String).filter(isDeviceTag);
     const minted = await mintEnrolmentKey(ctx, {
@@ -62,10 +67,7 @@ export async function mintEnrolmentKeyAction(
       data: { key: minted.key, expiresAt: minted.expires_at, name: minted.name },
     };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not mint join key.",
-    };
+    return actionFailure(error, "Could not mint join key.");
   }
 }
 
@@ -80,9 +82,6 @@ export async function revokeJoinKeyAction(
     revalidatePath("/join-keys");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not revoke join key.",
-    };
+    return actionFailure(error, "Could not revoke join key.");
   }
 }

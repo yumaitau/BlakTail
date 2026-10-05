@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError, type WebhookDestination } from "./coord";
+import { coordFetch, coordError, type WebhookDestination } from "./coord";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -31,7 +31,7 @@ async function json<T>(ctx: ConsoleContext, path: string, init: RequestInit): Pr
   const denied = permissionReason(ctx.role, "manage_integrations");
   if (denied) throw new Error(denied);
   const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}${path}`, { ...init, ctx });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<T>;
 }
 

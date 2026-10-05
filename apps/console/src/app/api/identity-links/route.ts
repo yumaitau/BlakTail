@@ -1,3 +1,4 @@
+import { readJsonBodyOr } from "@/lib/server-errors";
 import { auth } from "@/lib/auth";
 import {
   beginIdentityLink,
@@ -52,7 +53,7 @@ function string(body: Record<string, unknown>, key: string): string {
 async function objectBody(
   request: Request,
 ): Promise<Record<string, unknown> | null> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonBodyOr(request, null);
   return body && typeof body === "object" && !Array.isArray(body)
     ? (body as Record<string, unknown>)
     : null;

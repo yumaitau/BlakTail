@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/server-errors";
 import { auth } from "@/lib/auth";
 import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { requireConsoleContextFromSession } from "@/lib/desktop-auth";
@@ -59,7 +60,7 @@ export async function POST(request: Request): Promise<Response> {
     const ctx = await context(request);
     if (!ctx) return Response.json({ error: "Authentication required." }, { status: 401 });
     await requireSecurityAssurance(ctx);
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const result = await createInvitation(
       ctx,
       typeof body.email === "string" ? body.email : "",
@@ -84,7 +85,7 @@ export async function DELETE(request: Request): Promise<Response> {
     const ctx = await context(request);
     if (!ctx) return Response.json({ error: "Authentication required." }, { status: 401 });
     await requireSecurityAssurance(ctx);
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     await revokeInvitation(
       ctx,
       typeof body.invitationId === "string" ? body.invitationId : "",

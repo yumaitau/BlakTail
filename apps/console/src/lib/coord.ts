@@ -1,8 +1,10 @@
 import "server-only";
 
 import { requireWriteAssurance } from "./auth-policy";
+import { CoordError } from "./errors";
+import { coordError, errorText, rememberResponseRole } from "./server-errors";
 import { signCoordAssertion } from "./coord-assertion";
-import { can, permissionReason } from "./roles";
+import { can, permissionReason, roleLabel } from "./roles";
 import {
   organisationContext,
   type ConsoleContext,
@@ -150,6 +152,9 @@ function coordBaseUrl(): string {
   return url.replace(/\/$/, "");
 }
 
+/** Default per-request timeout. Streams (exports) pass their own `signal`. */
+const COORD_TIMEOUT_MS = 30_000;
+
 export async function coordFetch(
   path: string,
   init: RequestInit & { ctx?: ConsoleContext } = {},
@@ -167,27 +172,58 @@ export async function coordFetch(
   if (!headers.has("content-type") && rest.body) {
     headers.set("content-type", "application/json");
   }
-  return fetch(`${coordBaseUrl()}${path}`, {
-    ...rest,
-    headers,
-    cache: "no-store",
-  });
+  const url = `${coordBaseUrl()}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...rest,
+      signal: rest.signal ?? AbortSignal.timeout(COORD_TIMEOUT_MS),
+      headers,
+      cache: "no-store",
+    });
+  } catch (cause) {
+    // Network failure or timeout: log the cause, surface a mapped message.
+    const timeout =
+      cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+    const error = new CoordError({ transport: timeout ? "timeout" : "network" });
+    console.error(
+      JSON.stringify({
+        level: "error",
+        scope: `coordinator ${path.split("?")[0]}`,
+        ref: error.ref,
+        kind: error.user.kind,
+        cause: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
+      }),
+    );
+    error.logged = true;
+    throw error;
+  }
+  if (ctx && !res.ok) rememberResponseRole(res, roleLabel(ctx.role));
+  return res;
 }
 
+/**
+ * Raw coordinator error text, for server logs only. Never show it to people:
+ * throw `await coordError(res)` instead.
+ */
 export async function readError(res: Response): Promise<string> {
   try {
-    const body = (await res.json()) as { error?: string };
-    if (body.error) return body.error;
+    const body = (await res.json()) as { error?: string; code?: string; request_id?: string };
+    if (body.error) {
+      return `${body.error} (${body.code ?? res.status}${body.request_id ? `, ${body.request_id}` : ""})`;
+    }
   } catch {
     /* ignore */
   }
   return `Coordinator returned ${res.status}`;
 }
 
+export { coordError };
+
 export async function getCoordHealth(): Promise<CoordHealth> {
   const res = await coordFetch("/health", { method: "GET" });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<CoordHealth>;
 }
@@ -198,7 +234,7 @@ export async function listNodes(ctx: ConsoleContext): Promise<CoordNode[]> {
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<CoordNode[]>;
 }
@@ -236,9 +272,7 @@ export async function listAllNodes(
         return {
           nodes: [],
           error: `${organisation.organisationName}: ${
-            error instanceof Error
-              ? error.message
-              : "Could not load devices."
+            errorText(error, "Could not load devices.", "inventory")
           }`,
         };
       }
@@ -268,7 +302,7 @@ export async function listAuditEvents(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<AuditEvent[]>;
 }
@@ -286,7 +320,7 @@ export async function revokeNode(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -306,7 +340,7 @@ export async function tombstoneNode(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -322,7 +356,7 @@ export async function listApiClients(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<ApiClient[]>;
 }
@@ -341,7 +375,7 @@ export async function createApiClient(
     body: JSON.stringify(input),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<ApiClientCreated>;
 }
@@ -358,7 +392,7 @@ export async function listWebhooks(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WebhookDestination[]>;
 }
@@ -377,7 +411,7 @@ export async function createWebhook(
     body: JSON.stringify(input),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WebhookDestination>;
 }
@@ -398,7 +432,7 @@ export async function disableWebhook(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -418,7 +452,7 @@ export async function listWebhookDeliveries(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WebhookDelivery[]>;
 }
@@ -473,7 +507,7 @@ export async function replayWebhookDelivery(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -493,7 +527,7 @@ export async function revokeApiClient(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -515,7 +549,7 @@ export async function updateNodeFriendlyName(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -537,7 +571,7 @@ export async function approveNodeRoutes(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -563,7 +597,7 @@ export async function mintJoinKey(
     }),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<JoinKeyResult>;
 }
@@ -580,7 +614,7 @@ export async function getDeviceAuthorization(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<DeviceAuthorizationPreview>;
 }
@@ -599,7 +633,7 @@ export async function approveDeviceAuthorization(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<{ status: string; expires_at: number }>;
 }
@@ -610,7 +644,7 @@ export async function getAcl(ctx: ConsoleContext): Promise<unknown> {
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json();
 }
@@ -667,7 +701,7 @@ export async function getDns(ctx: ConsoleContext): Promise<OrgDnsResponse> {
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<OrgDnsResponse>;
 }
@@ -701,7 +735,7 @@ export async function listWgOnlyPeers(
     { method: "GET", ctx },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WireGuardOnlyPeer[]>;
 }
@@ -726,9 +760,7 @@ export async function listAllWgOnlyPeers(
         return {
           peers: [],
           error: `${organisation.organisationName}: ${
-            error instanceof Error
-              ? error.message
-              : "Could not load unmanaged peers."
+            errorText(error, "Could not load unmanaged peers.", "inventory")
           }`,
         };
       }
@@ -774,7 +806,7 @@ export async function createWgOnlyPeer(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WireGuardOnlyPeer>;
 }
@@ -797,7 +829,7 @@ export async function rotateWgOnlyPeer(
     },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<WireGuardOnlyPeer>;
 }
@@ -815,7 +847,7 @@ export async function revokeWgOnlyPeer(
     { method: "DELETE", ctx },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
@@ -839,8 +871,8 @@ export async function putAcl(
     body: JSON.stringify(acl),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }
 
-export { roleLabel } from "./roles";
+export { roleLabel };

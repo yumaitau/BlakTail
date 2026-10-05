@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { requireSecurityAssurance } from "@/lib/auth-policy";
 import {
@@ -16,7 +17,7 @@ export type RemoteActionResult<T = undefined> =
   | { ok: false; error: string };
 
 function failure(error: unknown, fallback: string): { ok: false; error: string } {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 const UUID = /^[0-9a-f-]{36}$/i;

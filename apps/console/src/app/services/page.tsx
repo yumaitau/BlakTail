@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import { ServiceCaPanel } from "@/components/services/service-ca";
@@ -14,7 +15,7 @@ export default async function ServicesPage() {
   try {
     workspace = await listServices(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load private services.";
+    error = errorText(err, "Could not load private services.");
   }
   const nodes = await listNodes(ctx).catch(() => []);
   const devices = nodes

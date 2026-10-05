@@ -1,6 +1,7 @@
 import "server-only";
 
 import {
+  coordError,
   coordFetch,
   type AuditEvent,
   type CoordNode,
@@ -75,14 +76,8 @@ export type MintedJoinKey = {
   max_uses: number | null;
 };
 
-export class CoordRequestError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
+/** Coordinator failure with a user-safe message and `.status`. */
+export { CoordError as CoordRequestError } from "./errors";
 
 /** Coordinator URL shown in install instructions; never carries a secret. */
 export function agentCoordinatorUrl(): string | null {
@@ -100,14 +95,7 @@ async function coordRequest<T>(
     ctx,
   });
   if (!res.ok) {
-    let message = `Coordinator returned ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) message = body.error;
-    } catch {
-      /* keep status message */
-    }
-    throw new CoordRequestError(message, res.status);
+    throw await coordError(res);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

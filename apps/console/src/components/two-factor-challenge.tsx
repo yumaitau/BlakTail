@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { authClient } from "@/lib/auth-client";
+import { authErrorMessage } from "@/lib/errors";
 
 /** Second step of a password sign-in for an identity with TOTP enabled. */
 export function TwoFactorChallenge({
@@ -29,8 +30,10 @@ export function TwoFactorChallenge({
             : await authClient.twoFactor.verifyTotp({ code });
           if (result.error) {
             setError(
-              result.error.message ??
+              authErrorMessage(
+                result.error,
                 "That code was not accepted. Check the time on your authenticator and try again.",
+              ).message,
             );
             return;
           }

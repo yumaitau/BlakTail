@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { exportTrafficEvents } from "@/lib/coord-events";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
@@ -23,7 +24,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     upstream = await exportTrafficEvents(ctx, query);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Export failed.";
+    const message = errorText(error, "Export failed.");
     return Response.json({ error: message }, { status: 502 });
   }
   const stamp = new Date().toISOString().slice(0, 10);

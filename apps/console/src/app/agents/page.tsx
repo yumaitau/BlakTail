@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -55,7 +56,7 @@ export default async function AgentsPage() {
     try {
       [overview, usage] = await Promise.all([getAgentOverview(ctx), getAgentUsage(ctx)]);
     } catch (err) {
-      error = err instanceof Error ? err.message : "Could not load the agent network.";
+      error = errorText(err, "Could not load the agent network.");
     }
   }
   const nodes = viewReason ? [] : await listNodes(ctx).catch(() => []);

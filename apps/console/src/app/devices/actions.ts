@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import { setPeerSuspended } from "@/lib/coord-peers";
@@ -32,10 +33,6 @@ export async function setDeviceSuspendedAction(
     revalidatePath(`/devices/${nodeId}`);
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error ? error.message : "Could not change suspension.",
-    };
+    return actionFailure(error, "Could not change suspension.");
   }
 }

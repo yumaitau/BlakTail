@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure, errorText, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { revokeSessionsForMembership } from "@/lib/coord-remote";
 import { cookies } from "next/headers";
@@ -42,9 +43,15 @@ import {
 } from "@/lib/invitations";
 import { OidcError, changeMembership, upsertIdentityProvider } from "@/lib/oidc";
 
+/**
+ * Every server action returns this. On failure `error` is already a short,
+ * user-safe message (see `actionFailure` in lib/server-errors); `ref` is shown
+ * with it for support; `fieldErrors` maps form field names to messages.
+ * Client code turns it into a toast with `toastResult` / `useActionToast`.
+ */
 export type ActionResult<T = void> =
   | { ok: true; data: T }
-  | { ok: false; error: string };
+  | ActionFailure;
 
 function isDeviceTag(value: string): value is DeviceTag {
   return value === "office" || value === "ranger" || value === "store";
@@ -74,13 +81,7 @@ export async function approveDeviceAuthorizationAction(
     revalidatePath("/enroll");
     return { ok: true, data: { expiresAt: result.expires_at } };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not approve device enrollment.",
-    };
+    return actionFailure(error, "Could not approve device enrollment.");
   }
 }
 
@@ -103,10 +104,7 @@ export async function revokeDeviceAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not revoke device.",
-    };
+    return actionFailure(error, "Could not revoke device.");
   }
 }
 
@@ -129,10 +127,7 @@ export async function tombstoneDeviceAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not delete device.",
-    };
+    return actionFailure(error, "Could not delete device.");
   }
 }
 
@@ -161,13 +156,7 @@ export async function createApiClientAction(
     revalidatePath("/settings");
     return { ok: true, data: { token: created.token, prefix: created.token_prefix } };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not create automation credential.",
-    };
+    return actionFailure(error, "Could not create automation credential.");
   }
 }
 
@@ -189,13 +178,7 @@ export async function revokeApiClientAction(
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not revoke automation credential.",
-    };
+    return actionFailure(error, "Could not revoke automation credential.");
   }
 }
 
@@ -226,13 +209,7 @@ export async function createWebhookAction(
       },
     };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not create webhook destination.",
-    };
+    return actionFailure(error, "Could not create webhook destination.");
   }
 }
 
@@ -253,13 +230,7 @@ export async function disableWebhookAction(
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not disable webhook destination.",
-    };
+    return actionFailure(error, "Could not disable webhook destination.");
   }
 }
 
@@ -278,13 +249,7 @@ export async function listWebhookDeliveriesAction(
     const deliveries = await listWebhookDeliveries(ctx, destinationId);
     return { ok: true, data: { deliveries } };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not list webhook deliveries.",
-    };
+    return actionFailure(error, "Could not list webhook deliveries.");
   }
 }
 
@@ -305,13 +270,7 @@ export async function replayWebhookDeliveryAction(
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not replay webhook delivery.",
-    };
+    return actionFailure(error, "Could not replay webhook delivery.");
   }
 }
 
@@ -350,13 +309,7 @@ export async function createWgOnlyPeerAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not add unmanaged WireGuard peer.",
-    };
+    return actionFailure(error, "Could not add unmanaged WireGuard peer.");
   }
 }
 
@@ -384,13 +337,7 @@ export async function rotateWgOnlyPeerAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not rotate unmanaged WireGuard peer.",
-    };
+    return actionFailure(error, "Could not rotate unmanaged WireGuard peer.");
   }
 }
 
@@ -413,13 +360,7 @@ export async function revokeWgOnlyPeerAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Could not revoke unmanaged WireGuard peer.",
-    };
+    return actionFailure(error, "Could not revoke unmanaged WireGuard peer.");
   }
 }
 
@@ -440,10 +381,8 @@ export async function updateDeviceFriendlyNameAction(
     }
     const friendlyName = String(formData.get("friendlyName") ?? "").trim();
     if ([...friendlyName].length > 64) {
-      return {
-        ok: false,
-        error: "Friendly names must be 64 characters or fewer.",
-      };
+      const error = "Friendly names must be 64 characters or fewer.";
+      return { ok: false, error, fieldErrors: { friendlyName: error } };
     }
     await updateNodeFriendlyName(ctx, nodeId, friendlyName);
     revalidatePath("/devices");
@@ -452,10 +391,9 @@ export async function updateDeviceFriendlyNameAction(
       data: { friendlyName: friendlyName || null },
     };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not rename device.",
-    };
+    return actionFailure(error, "Could not rename the device.", "rename device", {
+      fields: { friendlyName: ["friendly name", "friendly_name", "name"] },
+    });
   }
 }
 
@@ -482,11 +420,7 @@ export async function approveNodeRoutesAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error ? error.message : "Could not approve routes.",
-    };
+    return actionFailure(error, "Could not approve routes.");
   }
 }
 
@@ -514,10 +448,7 @@ export async function saveAclAction(formData: FormData): Promise<ActionResult> {
     revalidatePath("/acls");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not save ACL.",
-    };
+    return actionFailure(error, "Could not save ACL.");
   }
 }
 
@@ -526,10 +457,7 @@ export async function loadAclAction(): Promise<ActionResult<unknown>> {
     const ctx = await requireConsoleContext();
     return { ok: true, data: await getAcl(ctx) };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not load ACL.",
-    };
+    return actionFailure(error, "Could not load ACL.");
   }
 }
 
@@ -641,9 +569,7 @@ export async function upsertOidcProviderAction(
       error:
         error instanceof OidcError
           ? error.message
-          : error instanceof Error
-            ? error.message
-            : "Could not save the identity provider.",
+          : errorText(error, "Could not save the identity provider."),
     };
   }
 }
@@ -696,9 +622,7 @@ export async function changeMembershipAction(
       error:
         error instanceof OidcError
           ? error.message
-          : error instanceof Error
-            ? error.message
-            : "Could not update membership.",
+          : errorText(error, "Could not update membership."),
     };
   }
 }

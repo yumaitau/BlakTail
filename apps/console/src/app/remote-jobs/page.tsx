@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -65,7 +66,7 @@ export default async function RemoteJobsPage() {
         listNodes(ctx),
       ]);
     } catch (err) {
-      error = err instanceof Error ? err.message : "Could not load remote jobs.";
+      error = errorText(err, "Could not load remote jobs.");
     }
   }
   const names = new Map(nodes.map((node) => [node.id, node.display_name || node.name]));

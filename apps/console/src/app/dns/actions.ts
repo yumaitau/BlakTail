@@ -1,5 +1,6 @@
 "use server";
 
+import { errorText } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import type { DeviceTag, OrgDnsSettings } from "@/lib/coord";
@@ -18,7 +19,7 @@ import { requireConsoleContext } from "@/lib/session";
 const DEVICE_TAGS: readonly DeviceTag[] = ["office", "ranger", "store"];
 
 function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return errorText(error, fallback);
 }
 
 function parseDocument(raw: string): OrgDnsSettings {

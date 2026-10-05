@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import {
   auditCsv,
   auditFiltersFromParams,
@@ -33,7 +34,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     coordinator = await exportCoordinatorAudit(ctx, filters);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Export failed.";
+    const message = errorText(error, "Export failed.");
     return Response.json({ error: message }, { status: 502 });
   }
   const consoleEvents: AuditEventView[] = [];

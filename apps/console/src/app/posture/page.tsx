@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import { ApproveHardwareButton, PostureIntegrations } from "@/components/posture-integrations";
@@ -64,12 +65,12 @@ export default async function PosturePage() {
   try {
     [checks, report] = await Promise.all([listPostureChecks(ctx), listPostureAssessments(ctx)]);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load posture checks.";
+    error = errorText(err, "Could not load posture checks.");
   }
   try {
     integrations = await listPostureIntegrations(ctx);
   } catch (err) {
-    integrationsError = err instanceof Error ? err.message : "Could not load integrations.";
+    integrationsError = errorText(err, "Could not load integrations.");
   }
   const canManage = can(ctx.role, "manage_policy");
   const canManageIntegrations = can(ctx.role, "manage_security");

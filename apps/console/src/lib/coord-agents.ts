@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import { can } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -133,7 +133,7 @@ function requireManage(ctx: ConsoleContext) {
 
 async function send<T>(res: Response, conflict: string): Promise<T> {
   if (res.status === 412) throw new Error(conflict);
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }

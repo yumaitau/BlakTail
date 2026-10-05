@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { requireConsoleContextFromSession } from "@/lib/desktop-auth";
@@ -18,7 +19,7 @@ export async function POST(request: Request): Promise<Response> {
         { status: 401 },
       );
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId.trim() : "";
     if (!organisationId) {

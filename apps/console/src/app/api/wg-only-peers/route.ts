@@ -1,3 +1,4 @@
+import { errorText, readJsonBody } from "@/lib/server-errors";
 import {
   createWgOnlyPeer,
   listAllWgOnlyPeers,
@@ -29,9 +30,7 @@ function errorResponse(error: unknown): Response {
   return Response.json(
     {
       error:
-        error instanceof Error
-          ? error.message
-          : "Unmanaged peer request failed.",
+        errorText(error, "Unmanaged peer request failed."),
     },
     { status: 400 },
   );
@@ -64,7 +63,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!person) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const ctx = organisationContext(person, organisationId);
@@ -115,7 +114,7 @@ export async function PATCH(request: Request): Promise<Response> {
     if (!person) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const peerId = typeof body.peerId === "string" ? body.peerId : "";
@@ -157,7 +156,7 @@ export async function DELETE(request: Request): Promise<Response> {
     if (!person) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const peerId = typeof body.peerId === "string" ? body.peerId : "";

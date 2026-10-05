@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   createJobTemplate,
@@ -15,7 +16,7 @@ const UUID = /^[0-9a-f-]{36}$/i;
 const TAGS = ["office", "ranger", "store"];
 
 function failure(error: unknown, fallback: string): JobActionResult {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 /**

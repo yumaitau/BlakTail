@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import { permissionReason } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -35,7 +35,7 @@ export async function rotateApiClient(
       ),
     },
   );
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<RotatedApiClient>;
 }
 
@@ -51,5 +51,5 @@ export async function setApiClientSuspended(
     }`,
     { method: "POST", ctx },
   );
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
 }

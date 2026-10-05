@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { ControlCenter } from "@/components/control-center/control-center";
@@ -25,7 +26,7 @@ export default async function ControlCenterPage({
   try {
     topology = await getTopology(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load the topology.";
+    error = errorText(err, "Could not load the topology.");
   }
 
   return (

@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ConsoleShell } from "@/components/console-shell";
@@ -52,9 +53,7 @@ export default async function EnrollPage({
     request = await getDeviceAuthorization(ctx, code);
   } catch (error) {
     loadError =
-      error instanceof Error
-        ? error.message
-        : "Could not load this device authorization.";
+      errorText(error, "Could not load this device authorization.");
   }
   if (!request) {
     return (

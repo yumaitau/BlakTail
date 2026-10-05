@@ -1,8 +1,8 @@
+import { errorText } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
 import {
-  OidcError,
   completeOidcLogin,
   establishConsoleSession,
 } from "@/lib/oidc";
@@ -53,7 +53,7 @@ export async function GET(request: Request) {
     return response;
   } catch (caught) {
     const message =
-      caught instanceof OidcError ? caught.message : "OIDC sign-in failed";
+      errorText(caught, "Single sign-on didn't finish.", "oidc callback");
     return NextResponse.redirect(
       new URL(`/sign-in?error=${encodeURIComponent(message)}`, url.origin),
     );
