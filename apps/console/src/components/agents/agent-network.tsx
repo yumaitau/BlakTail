@@ -15,7 +15,7 @@ import {
   updateKeyAction,
 } from "@/app/agents/actions";
 import type { AgentGateway, AgentKey, AgentPolicy, AgentProvider } from "@/lib/coord-agents";
-import { formatDateTime } from "@/lib/format-time";
+import { LocalTime } from "../ui/local-time";
 import { Alert } from "../ui/alert";
 import { StatusPill } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -47,8 +47,8 @@ function useRunner() {
   return { pending, busy, run };
 }
 
-function when(seconds: number | null): string {
-  return formatDateTime(seconds, "Never");
+function when(seconds: number | null) {
+  return <LocalTime value={seconds} />;
 }
 
 export function ResidencyBadge({ provider }: { provider: AgentProvider }) {

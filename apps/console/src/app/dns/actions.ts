@@ -1,6 +1,6 @@
 "use server";
 
-import { errorText } from "@/lib/server-errors";
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import type { DeviceTag, OrgDnsSettings } from "@/lib/coord";
@@ -17,10 +17,6 @@ import { can } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 const DEVICE_TAGS: readonly DeviceTag[] = ["office", "ranger", "store"];
-
-function message(error: unknown, fallback: string): string {
-  return errorText(error, fallback);
-}
 
 function parseDocument(raw: string): OrgDnsSettings {
   try {
@@ -47,7 +43,7 @@ export async function publishDnsAction(
     revalidatePath("/dns");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not publish DNS settings.") };
+    return actionFailure(error, "Could not publish DNS settings.");
   }
 }
 
@@ -71,7 +67,7 @@ export async function rollbackDnsAction(
     revalidatePath("/dns");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not roll back DNS settings.") };
+    return actionFailure(error, "Could not roll back DNS settings.");
   }
 }
 
@@ -82,7 +78,7 @@ export async function validateDnsAction(
     const ctx = await requireConsoleContext();
     return { ok: true, data: await validateDns(ctx, parseDocument(dnsJson)) };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not check DNS settings.") };
+    return actionFailure(error, "Could not check DNS settings.");
   }
 }
 
@@ -95,7 +91,8 @@ export async function previewDnsAction(input: {
     const ctx = await requireConsoleContext();
     const name = input.name.trim();
     if (!name) {
-      return { ok: false, error: "Enter a name to preview." };
+      const error = "Enter a name to preview, such as wiki.kakadu.internal.";
+      return { ok: false, error, fieldErrors: { name: error } };
     }
     const tags = input.tags.filter((tag): tag is DeviceTag =>
       DEVICE_TAGS.includes(tag as DeviceTag),
@@ -109,7 +106,7 @@ export async function previewDnsAction(input: {
       }),
     };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not preview this name.") };
+    return actionFailure(error, "Could not preview this name.");
   }
 }
 
@@ -120,6 +117,6 @@ export async function loadDnsRevisionAction(
     const ctx = await requireConsoleContext();
     return { ok: true, data: await getDnsRevision(ctx, revision) };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not load that revision.") };
+    return actionFailure(error, "Could not load that revision.");
   }
 }

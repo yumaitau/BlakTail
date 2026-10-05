@@ -10,7 +10,7 @@ import {
 } from "@/app/settings/actions";
 import type { SignInPolicy } from "@/lib/auth-policy-core";
 import type { OrganisationDomain } from "@/lib/auth-policy";
-import { formatDateTime } from "@/lib/format-time";
+import { LocalTime } from "./ui/local-time";
 import { Alert } from "./ui/alert";
 import { StatusPill } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -194,7 +194,7 @@ export function SignInSecurity({
                       {domain.verifiedAt ? "Verified" : "Not verified"}
                     </StatusPill>
                     {domain.lastCheckedAt ? (
-                      <span className="cell-sub">Checked {formatDateTime(domain.lastCheckedAt)}</span>
+                      <span className="cell-sub">Checked <LocalTime value={domain.lastCheckedAt} /></span>
                     ) : null}
                   </Td>
                   <Td>

@@ -1,7 +1,8 @@
 "use server";
 
-import { errorText } from "@/lib/server-errors";
-import { redirect } from "next/navigation";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
+import { revalidatePath } from "next/cache";
+import type { ActionResult } from "@/app/actions";
 import {
   createDraft,
   discardDraft,
@@ -20,6 +21,12 @@ const SURFACE_PERMISSION: Record<ChangeSurface, Permission> = {
   resources: "manage_networks",
 };
 
+const SURFACE_NAME: Record<ChangeSurface, string> = {
+  policy: "the access policy",
+  dns: "DNS",
+  resources: "network resources",
+};
+
 function surfacesFrom(formData: FormData): ChangeSurface[] {
   return formData
     .getAll("surfaces")
@@ -35,113 +42,122 @@ async function contextFor(formData: FormData, surfaces: ChangeSurface[]) {
   const ctx = await requireOrganisationContext(String(formData.get("organisationId") ?? ""));
   for (const surface of surfaces) {
     if (!can(ctx.role, SURFACE_PERMISSION[surface])) {
-      throw new Error(`Your role in ${ctx.organisationName} cannot change ${surface}.`);
+      throw new Error(`Your role in ${ctx.organisationName} cannot change ${SURFACE_NAME[surface]}.`);
     }
   }
   return ctx;
 }
 
-function back(path: string, params: Record<string, string>): never {
-  const query = new URLSearchParams(params).toString();
-  redirect(query ? `${path}?${query}` : path);
+function invalid(field: string, error: string): ActionFailure {
+  return { ok: false, error, fieldErrors: { [field]: error } };
 }
 
-function failure(error: unknown, fallback: string): string {
-  return errorText(error, fallback);
-}
-
-function parseObject(raw: string, label: string): Record<string, unknown> {
-  let parsed: unknown;
+function parseJson(raw: string): { ok: true; value: unknown } | { ok: false } {
   try {
-    parsed = JSON.parse(raw);
+    return { ok: true, value: JSON.parse(raw) };
   } catch {
-    throw new Error(`${label} must be valid JSON.`);
+    return { ok: false };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${label} must be a JSON object.`);
-  }
-  return parsed as Record<string, unknown>;
 }
 
-export async function createDraftAction(formData: FormData): Promise<void> {
-  const surfaces = surfacesFrom(formData);
-  let id: string;
-  try {
-    if (surfaces.length === 0) throw new Error("Choose at least one thing to change.");
-    const ctx = await contextFor(formData, surfaces);
-    id = (await createDraft(ctx, String(formData.get("title") ?? ""), surfaces)).id;
-  } catch (error) {
-    back("/changes", { error: failure(error, "Could not create the draft.") });
-  }
-  back(`/changes/${id}`, { notice: "Draft created from the current live state." });
+function titleProblem(title: string): string | null {
+  if (!title) return "Give the draft a title.";
+  if ([...title].length > 120) return "Titles must be 120 characters or fewer.";
+  return null;
 }
 
-export async function saveDraftAction(formData: FormData): Promise<void> {
-  const id = String(formData.get("draftId") ?? "");
-  const surfaces = surfacesFrom(formData);
+export async function createDraftAction(
+  formData: FormData,
+): Promise<ActionResult<{ id: string }>> {
   try {
-    const ctx = await contextFor(formData, surfaces);
-    const payload: DraftPayload = {};
-    if (surfaces.includes("policy")) {
-      payload.policy = parseObject(String(formData.get("policy") ?? ""), "Policy");
+    const title = String(formData.get("title") ?? "").trim();
+    const problem = titleProblem(title);
+    if (problem) return invalid("title", problem);
+    const surfaces = surfacesFrom(formData);
+    if (surfaces.length === 0) {
+      return invalid("surfaces", "Choose at least one thing to change.");
     }
-    if (surfaces.includes("dns")) {
-      payload.dns = parseObject(String(formData.get("dns") ?? ""), "DNS");
+    const ctx = await contextFor(formData, surfaces);
+    const draft = await createDraft(ctx, title, surfaces);
+    revalidatePath("/changes");
+    return { ok: true, data: { id: draft.id } };
+  } catch (error) {
+    return actionFailure(error, "Could not create the draft.", "changes", {
+      fields: { title: ["title"] },
+    });
+  }
+}
+
+export async function saveDraftAction(formData: FormData): Promise<ActionResult> {
+  const id = String(formData.get("draftId") ?? "");
+  try {
+    const title = String(formData.get("title") ?? "").trim();
+    const problem = titleProblem(title);
+    if (problem) return invalid("title", problem);
+    const surfaces = surfacesFrom(formData);
+    const payload: DraftPayload = {};
+    for (const [field, label] of [
+      ["policy", "The access policy"],
+      ["dns", "DNS"],
+    ] as const) {
+      if (!surfaces.includes(field)) continue;
+      const parsed = parseJson(String(formData.get(field) ?? ""));
+      if (!parsed.ok) return invalid(field, `${label} must be valid JSON.`);
+      if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+        return invalid(field, `${label} must be a JSON object.`);
+      }
+      payload[field] = parsed.value as Record<string, unknown>;
     }
     if (surfaces.includes("resources")) {
-      const raw = String(formData.get("resources") ?? "");
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new Error("Network resources must be valid JSON.");
+      const parsed = parseJson(String(formData.get("resources") ?? ""));
+      if (!parsed.ok) return invalid("resources", "Network resources must be valid JSON.");
+      if (!Array.isArray(parsed.value)) {
+        return invalid("resources", "Network resources must be a JSON array.");
       }
-      if (!Array.isArray(parsed)) throw new Error("Network resources must be a JSON array.");
-      payload.resources = parsed as Record<string, unknown>[];
+      payload.resources = parsed.value as Record<string, unknown>[];
     }
-    await updateDraft(
-      ctx,
-      id,
-      Number(formData.get("version")),
-      String(formData.get("title") ?? ""),
-      payload,
-    );
+    const ctx = await contextFor(formData, surfaces);
+    await updateDraft(ctx, id, Number(formData.get("version")), title, payload);
+    revalidatePath(`/changes/${id}`);
+    revalidatePath("/changes");
+    return { ok: true, data: undefined };
   } catch (error) {
-    back(`/changes/${id}`, { error: failure(error, "Could not save the draft.") });
+    return actionFailure(error, "Could not save the draft.", "changes", {
+      fields: { title: ["title"] },
+    });
   }
-  back(`/changes/${id}`, { notice: "Draft saved. Preview it before publishing." });
 }
 
-export async function rebaseDraftAction(formData: FormData): Promise<void> {
+export async function rebaseDraftAction(formData: FormData): Promise<ActionResult> {
   const id = String(formData.get("draftId") ?? "");
   try {
     const ctx = await contextFor(formData, surfacesFrom(formData));
     await rebaseDraft(ctx, id, Number(formData.get("version")));
+    revalidatePath(`/changes/${id}`);
+    return { ok: true, data: undefined };
   } catch (error) {
-    back(`/changes/${id}`, { error: failure(error, "Could not rebase the draft.") });
+    return actionFailure(error, "Could not rebase the draft.", "changes");
   }
-  back(`/changes/${id}`, {
-    notice: "Rebased on the live state. Your proposed documents are unchanged; preview to see what they now replace.",
-    preview: "1",
-  });
 }
 
-export async function discardDraftAction(formData: FormData): Promise<void> {
+export async function discardDraftAction(formData: FormData): Promise<ActionResult> {
   const id = String(formData.get("draftId") ?? "");
   try {
     const ctx = await contextFor(formData, surfacesFrom(formData));
     await discardDraft(ctx, id, Number(formData.get("version")));
+    revalidatePath(`/changes/${id}`);
+    revalidatePath("/changes");
+    return { ok: true, data: undefined };
   } catch (error) {
-    back(`/changes/${id}`, { error: failure(error, "Could not discard the draft.") });
+    return actionFailure(error, "Could not discard the draft.", "changes");
   }
-  back(`/changes/${id}`, { notice: "Draft discarded. Nothing was published." });
 }
 
-export async function publishDraftAction(formData: FormData): Promise<void> {
+export async function publishDraftAction(formData: FormData): Promise<ActionResult> {
   const id = String(formData.get("draftId") ?? "");
   try {
     if (formData.get("confirm") !== "on") {
-      throw new Error("Tick the confirmation to publish.");
+      return { ok: false, error: "Confirm the publish to continue." };
     }
     const ctx = await contextFor(formData, surfacesFrom(formData));
     await publishDraft(
@@ -150,8 +166,10 @@ export async function publishDraftAction(formData: FormData): Promise<void> {
       Number(formData.get("version")),
       formData.getAll("risk").map(String),
     );
+    revalidatePath(`/changes/${id}`);
+    revalidatePath("/changes");
+    return { ok: true, data: undefined };
   } catch (error) {
-    back(`/changes/${id}`, { error: failure(error, "Could not publish the draft."), preview: "1" });
+    return actionFailure(error, "Could not publish the draft.", "changes");
   }
-  back(`/changes/${id}`, { notice: "Published. Every surface changed in one transaction." });
 }

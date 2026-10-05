@@ -1,28 +1,40 @@
 import type { ServiceCa } from "@/lib/coord-services";
+import { EmptyState } from "../empty-state";
+import { CopyButton } from "../ui/copy-button";
+import { MonoValue } from "../ui/mono-value";
+import { Section } from "../ui/section";
 
 export function ServiceCaPanel({ ca }: { ca: ServiceCa | null }) {
   return (
-    <div className="panel stack" id="certificate-authority">
-      <div>
-        <h2>Organisation service CA</h2>
-        <p className="muted">
-          A private certificate authority, limited to this organisation&apos;s
-          service names, signs 24-hour certificates for serving devices. The
-          serving device generates its own key; the coordinator only signs
-          its request and never holds service keys.
-        </p>
-        <p className="muted">
-          Trusting this CA on client devices is a manual step today, and no
-          serving agent listener ships yet, so installing it does not make any
-          service reachable.
-        </p>
-      </div>
+    <Section
+      id="certificate-authority"
+      title="Organisation service CA"
+      description="A private certificate authority, limited to this organisation's service names, signs 24-hour certificates for serving devices. The serving device generates its own key; the coordinator only signs its request and never holds service keys. Trusting this CA on client devices is a manual step today."
+      actions={
+        ca ? (
+          <a
+            className="button secondary"
+            href={`data:application/x-pem-file;charset=utf-8,${encodeURIComponent(ca.cert_pem)}`}
+            download="blaktail-services-ca.pem"
+          >
+            Download CA certificate
+          </a>
+        ) : null
+      }
+    >
       {ca ? (
         <>
           <dl className="details">
             <div>
               <dt>SHA-256 fingerprint</dt>
-              <dd className="mono">{ca.fingerprint_sha256}</dd>
+              <dd>
+                <MonoValue
+                  value={ca.fingerprint_sha256}
+                  wrap
+                  copy
+                  copyLabel="Copy CA fingerprint"
+                />
+              </dd>
             </div>
             <div>
               <dt>Expires</dt>
@@ -33,25 +45,30 @@ export function ServiceCaPanel({ ca }: { ca: ServiceCa | null }) {
               </dd>
             </div>
           </dl>
-          <label>
-            CA certificate (PEM)
-            <textarea className="mono" rows={10} readOnly value={ca.cert_pem} />
-          </label>
-          <div>
-            <a
-              className="button secondary"
-              href={`data:application/x-pem-file;charset=utf-8,${encodeURIComponent(ca.cert_pem)}`}
-              download="blaktail-services-ca.pem"
-            >
-              Download CA certificate
-            </a>
-          </div>
+          <details>
+            <summary>Show the CA certificate (PEM)</summary>
+            <div className="stack pem-block">
+              <textarea
+                className="mono ca-pem"
+                rows={10}
+                readOnly
+                value={ca.cert_pem}
+                aria-label="CA certificate (PEM)"
+              />
+              <div className="actions">
+                <CopyButton value={ca.cert_pem} label="Copy CA certificate" toastMessage="CA certificate copied" />
+              </div>
+            </div>
+          </details>
         </>
       ) : (
-        <p className="muted">
-          The CA is created with the first service in this organisation.
-        </p>
+        <EmptyState
+          compact
+          headingLevel={3}
+          title="No CA yet"
+          body="The CA is created with the first service in this organisation."
+        />
       )}
-    </div>
+    </Section>
   );
 }

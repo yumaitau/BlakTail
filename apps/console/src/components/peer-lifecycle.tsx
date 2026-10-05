@@ -4,7 +4,13 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { revokeDeviceAction, tombstoneDeviceAction } from "@/app/actions";
 import { setDeviceSuspendedAction } from "@/app/devices/actions";
-import { can, permissionReason, roleLabel, type OrgRole } from "@/lib/roles";
+import { permissionReason, roleLabel, type OrgRole } from "@/lib/roles";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { PermissionNotice } from "./ui/permission-notice";
+import { Section } from "./ui/section";
+import { toastResult } from "./ui/toast";
 
 type Kind = "suspend" | "resume" | "revoke" | "delete";
 
@@ -38,9 +44,7 @@ export function PeerLifecycle({
   const [pending, startTransition] = useTransition();
   const [confirm, setConfirm] = useState<Kind | null>(null);
   const [reason, setReason] = useState("");
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const denied = permissionReason(role, "manage_peers");
-  const allowed = can(role, "manage_peers");
   const ended = state === "revoked" || state === "deleted";
 
   const routes =
@@ -63,8 +67,6 @@ export function PeerLifecycle({
       formData.set("suspend", String(kind === "suspend"));
       formData.set("reason", reason);
     }
-    setConfirm(null);
-    setMessage(null);
     startTransition(async () => {
       const result =
         kind === "revoke"
@@ -72,13 +74,14 @@ export function PeerLifecycle({
           : kind === "delete"
             ? await tombstoneDeviceAction(formData)
             : await setDeviceSuspendedAction(formData);
-      const done: Record<Kind, string> = {
-        suspend: `${label} is suspended.`,
-        resume: `${label} is active again.`,
-        revoke: `${label} is revoked.`,
-        delete: `${label} was removed from the inventory.`,
+      const done: Record<Kind, [string, string]> = {
+        suspend: ["Device suspended", `${label} is out of every peer map until you resume it.`],
+        resume: ["Device resumed", `${label} is active again.`],
+        revoke: ["Device access revoked", `${label} can no longer use ${organisationName}.`],
+        delete: ["Device removed from inventory", `${label} was revoked and removed. The audit tombstone remains.`],
       };
-      setMessage({ text: result.ok ? done[kind] : result.error, error: !result.ok });
+      toastResult(result, { success: done[kind][0], successDescription: done[kind][1] });
+      setConfirm(null);
       if (result.ok) {
         setReason("");
         router.refresh();
@@ -87,15 +90,15 @@ export function PeerLifecycle({
   }
 
   return (
-    <section className="panel stack" aria-labelledby="lifecycle-title">
-      <div>
-        <p className="eyebrow">Lifecycle</p>
-        <h2 id="lifecycle-title">Access for this device</h2>
-        <p className="muted">
-          Acting in <span className="badge network">{organisationName}</span> as{" "}
-          {roleLabel(role)}.
-        </p>
-      </div>
+    <Section
+      id="lifecycle"
+      title="Access for this device"
+      description={
+        <>
+          Acting in <span className="badge network">{organisationName}</span> as {roleLabel(role)}.
+        </>
+      }
+    >
       <dl className="details">
         <div>
           <dt>Suspend</dt>
@@ -114,105 +117,60 @@ export function PeerLifecycle({
         <p className="muted">
           This device is {state}. Lifecycle changes are no longer available.
         </p>
+      ) : denied ? (
+        <PermissionNotice reason={denied} />
       ) : (
         <div className="actions">
           {state === "suspended" ? (
-            <button
-              type="button"
-              className="secondary"
-              disabled={!allowed || pending}
-              title={denied ?? undefined}
+            <Button
+              variant="secondary"
+              loading={pending && confirm === "resume"}
+              disabled={pending}
               onClick={() => setConfirm("resume")}
             >
               Resume
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              className="secondary"
-              disabled={!allowed || pending}
-              title={denied ?? undefined}
+            <Button
+              variant="secondary"
+              disabled={pending}
               onClick={() => setConfirm("suspend")}
             >
               Suspend
-            </button>
+            </Button>
           )}
-          <button
-            type="button"
-            className="danger"
-            disabled={!allowed || pending}
-            title={denied ?? undefined}
-            onClick={() => setConfirm("revoke")}
-          >
+          <Button variant="danger" disabled={pending} onClick={() => setConfirm("revoke")}>
             Revoke access
-          </button>
-          <button
-            type="button"
-            className="quiet-danger"
-            disabled={!allowed || pending}
-            title={denied ?? undefined}
-            onClick={() => setConfirm("delete")}
-          >
+          </Button>
+          <Button variant="quiet-danger" disabled={pending} onClick={() => setConfirm("delete")}>
             Delete from inventory
-          </button>
+          </Button>
         </div>
       )}
-      {denied && !ended ? <p className="muted">{denied}</p> : null}
-      {message ? (
-        <p
-          className={message.error ? "error" : "muted"}
-          role={message.error ? "alert" : "status"}
-          aria-live="polite"
-        >
-          {message.text}
-        </p>
-      ) : null}
-      {confirm ? (
-        <div className="confirm-backdrop">
-          <div
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="lifecycle-confirm-title"
-            aria-describedby="lifecycle-confirm-impact"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setConfirm(null);
-            }}
-          >
-            <h2 id="lifecycle-confirm-title">{titles[confirm]}</h2>
-            <p id="lifecycle-confirm-impact">{impact[confirm]}</p>
-            {confirm === "suspend" ? (
-              <label>
-                Reason (recorded in the audit log)
-                <input
-                  type="text"
-                  maxLength={200}
-                  value={reason}
-                  onChange={(event) => setReason(event.target.value)}
-                />
-              </label>
-            ) : null}
-            <div className="actions">
-              <button
-                type="button"
-                className="secondary"
-                autoFocus
-                onClick={() => setConfirm(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className={confirm === "resume" || confirm === "suspend" ? undefined : "danger"}
-                disabled={pending}
-                onClick={() => run(confirm)}
-              >
-                {titles[confirm]}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </section>
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm ? titles[confirm] : ""}
+        description={confirm ? impact[confirm] : null}
+        confirmLabel={confirm ? titles[confirm] : ""}
+        tone={confirm === "resume" || confirm === "suspend" ? "primary" : "danger"}
+        confirmText={confirm === "revoke" || confirm === "delete" ? label : undefined}
+        pending={pending}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          if (confirm) run(confirm);
+        }}
+      >
+        {confirm === "suspend" ? (
+          <FormField label="Reason" hint="Optional. Recorded in the audit log.">
+            <input
+              type="text"
+              maxLength={200}
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </FormField>
+        ) : null}
+      </ConfirmDialog>
+    </Section>
   );
 }

@@ -3,7 +3,7 @@
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createInvitationAction, revokeInvitationAction } from "@/app/actions";
-import { formatDateTime } from "@/lib/format-time";
+import { LocalTime } from "./ui/local-time";
 import { ORG_ROLES, roleImpact, roleLabel, type OrgRole } from "@/lib/roles";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
@@ -123,7 +123,9 @@ export function InvitationManager({ invitations }: { invitations: PendingInvitat
                   <span className="cell-break">{invitation.email}</span>
                 </Td>
                 <Td label="Role">{roleLabel(invitation.role)}</Td>
-                <Td label="Expires">{formatDateTime(invitation.expiresAt)}</Td>
+                <Td label="Expires">
+                  <LocalTime value={invitation.expiresAt} />
+                </Td>
                 <Td>
                   <div className="cell-actions">
                     <Button

@@ -15,7 +15,7 @@ import type {
   NetworkAccountSummary,
   PendingRoleConflict,
 } from "@/lib/identity-links";
-import { formatDateTime } from "@/lib/format-time";
+import { LocalTime } from "./ui/local-time";
 import { roleLabel } from "@/lib/roles";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
@@ -211,7 +211,7 @@ export function IdentitySettings({
               </h4>
               <p className="muted">
                 Sign in again with both. An email address or an open browser session isn&apos;t
-                enough. This request expires {formatDateTime(challenge.expiresAt)}.
+                enough. This request expires <LocalTime value={challenge.expiresAt} />.
               </p>
             </div>
             <input type="hidden" name="challenge" value={challenge.token} />

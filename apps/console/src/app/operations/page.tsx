@@ -5,6 +5,7 @@ import {
   Alert,
   Card,
   EmptyState,
+  LocalTime,
   PageHeader,
   Section,
   SkeletonTable,
@@ -18,7 +19,6 @@ import {
   type ConsoleOperations,
   type OperationsHealth,
 } from "@/lib/coord-operations";
-import { formatDateTime } from "@/lib/format-time";
 import { permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -236,9 +236,9 @@ async function OperationsContent({ ctx }: { ctx: ConsoleContext }) {
         {health.backup.status === "recorded" ? (
           <dl className="detail-list">
             <dt>Backup completed</dt>
-            <dd>{formatDateTime(health.backup.completed_at, "Not recorded")}</dd>
+            <dd><LocalTime value={health.backup.completed_at} fallback="Not recorded" /></dd>
             <dt>Restore last checked</dt>
-            <dd>{formatDateTime(health.backup.restore_verified_at, "Not recorded")}</dd>
+            <dd><LocalTime value={health.backup.restore_verified_at} fallback="Not recorded" /></dd>
             {health.backup.label ? (
               <>
                 <dt>Label</dt>
@@ -249,7 +249,7 @@ async function OperationsContent({ ctx }: { ctx: ConsoleContext }) {
         ) : (
           <Alert tone="warning">The operator hasn&apos;t recorded a backup on this coordinator.</Alert>
         )}
-        <p className="muted">Generated {formatDateTime(health.generated_at)}.</p>
+        <p className="muted">Generated <LocalTime value={health.generated_at} />.</p>
       </Section>
     </>
   );

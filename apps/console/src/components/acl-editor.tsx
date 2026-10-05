@@ -3,7 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { saveAclAction } from "@/app/actions";
+import { EmptyState } from "./empty-state";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { MonoValue } from "./ui/mono-value";
+import { Section } from "./ui/section";
 import { toastResult } from "./ui/toast";
 import {
   ACL_DEFAULTS,
@@ -94,8 +100,15 @@ export function AclEditor({
   const [groupMember, setGroupMember] = useState("");
   const [hostName, setHostName] = useState("");
   const [hostTarget, setHostTarget] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
+  const [groupErrors, setGroupErrors] = useState<{ name?: string; member?: string }>({});
+  const [hostErrors, setHostErrors] = useState<{ name?: string; target?: string }>({});
+  const [confirmRollback, setConfirmRollback] = useState(false);
   const [pending, startTransition] = useTransition();
+  const initialSerialized = useMemo(
+    () => JSON.stringify(serializeAclPolicy(parsedInitial)),
+    [parsedInitial],
+  );
+  const dirty = JSON.stringify(serializeAclPolicy(policy)) !== initialSerialized;
   const groupNames = policy.groups.map((group) => group.name);
   // Keep names the policy already references visible even if the check was
   // removed, so a missing check reads as a failing requirement.
@@ -123,16 +136,12 @@ export function AclEditor({
 
   return (
     <div className="acl-layout">
-      <section className="acl-section">
-        <div>
-          <h2>Default</h2>
-          <p className="muted">
-            New organisations start with deny. Existing documents keep the
-            same-tag compatibility default until you change it.
-          </p>
-        </div>
-        <label>
-          Unmatched traffic
+      <Section
+        id="acl-default"
+        title="Default"
+        description="What happens to traffic no rule matches. New organisations start with deny; existing documents keep the same-tag compatibility default until you change it."
+      >
+        <FormField label="Unmatched traffic" className="field-md">
           <select
             data-testid="acl-defaults"
             disabled={!canMutate}
@@ -154,24 +163,26 @@ export function AclEditor({
               </option>
             ))}
           </select>
-        </label>
+        </FormField>
         {policy.generated.length > 0 ? (
           <p className="muted" data-testid="acl-generated">
             Visible generated rule: {policy.generated[0]?.note ?? "legacy same-tag allow."}
           </p>
         ) : null}
-      </section>
+      </Section>
 
-      <section className="acl-section">
-        <div>
-          <h2>Groups</h2>
-          <p className="muted">
-            Name a set of people, then use that name in a rule. Members are
-            matched to the account that enrolled each device.
-          </p>
-        </div>
+      <Section
+        id="acl-groups"
+        title="Groups"
+        description="Name a set of people, then use that name in a rule. Members are matched to the account that enrolled each device."
+      >
         {policy.groups.length === 0 ? (
-          <p className="muted">No groups yet. Create one for a team or site.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No groups yet"
+            body="Create one for a team or site, then use it as a rule source or destination."
+          />
         ) : (
           <ul className="acl-group-list">
             {policy.groups.map((group) => (
@@ -179,9 +190,10 @@ export function AclEditor({
                 <div className="acl-group-head">
                   <strong>{group.name}</strong>
                   {canMutate ? (
-                    <button
-                      type="button"
-                      className="secondary"
+                    <Button
+                      variant="quiet-danger"
+                      size="sm"
+                      aria-label={`Remove group ${group.name}`}
                       onClick={() =>
                         setPolicy((current) => ({
                           ...current,
@@ -201,7 +213,7 @@ export function AclEditor({
                       }
                     >
                       Remove group
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 <div className="acl-members">
@@ -265,8 +277,7 @@ export function AclEditor({
                     ))}
                 </div>
                 {canMutate ? (
-                  <label>
-                    Add a person
+                  <FormField label="Add a person" className="field-md">
                     <select
                       value=""
                       onChange={(event) => {
@@ -295,7 +306,7 @@ export function AclEditor({
                         </option>
                       ))}
                     </select>
-                  </label>
+                  </FormField>
                 ) : null}
               </li>
             ))}
@@ -309,20 +320,20 @@ export function AclEditor({
               const name = groupName.trim().toLowerCase();
               const member = groupMember.trim();
               if (!validGroupName(name)) {
-                setMessage(
-                  "Group names use lowercase letters, then letters, digits, or hyphens.",
-                );
+                setGroupErrors({
+                  name: "Start with a lowercase letter, then use letters, digits or hyphens.",
+                });
                 return;
               }
               if (policy.groups.some((group) => group.name === name)) {
-                setMessage("That group name is already in use.");
+                setGroupErrors({ name: "That group name is already in use." });
                 return;
               }
               if (!member) {
-                setMessage("Add at least one person when you create a group.");
+                setGroupErrors({ member: "Choose the first person for this group." });
                 return;
               }
-              setMessage(null);
+              setGroupErrors({});
               setPolicy((current) => ({
                 ...current,
                 groups: [
@@ -334,18 +345,17 @@ export function AclEditor({
               setGroupMember("");
             }}
           >
-            <label>
-              New group name
+            <FormField label="New group name" error={groupErrors.name}>
               <input
                 name="group-name"
                 value={groupName}
                 onChange={(event) => setGroupName(event.target.value)}
                 placeholder="rangers"
                 autoComplete="off"
+                maxLength={64}
               />
-            </label>
-            <label>
-              First person
+            </FormField>
+            <FormField label="First person" error={groupErrors.member}>
               <select
                 name="group-member"
                 value={groupMember}
@@ -358,36 +368,38 @@ export function AclEditor({
                   </option>
                 ))}
               </select>
-            </label>
-            <button type="submit" className="secondary" data-testid="acl-add-group">
+            </FormField>
+            <Button type="submit" variant="secondary" data-testid="acl-add-group">
               Add group
-            </button>
+            </Button>
           </form>
         ) : null}
-      </section>
+      </Section>
 
-      <section className="acl-section">
-        <div>
-          <h2>Hosts</h2>
-          <p className="muted">
-            Name a private address or subnet, then use that name as a rule
-            destination. Packet-level enforcement of host-only rules is still
-            later; tests can already assert them.
-          </p>
-        </div>
+      <Section
+        id="acl-hosts"
+        title="Hosts"
+        description="Name a private address or subnet, then use that name as a rule destination. Packet-level enforcement of host-only rules is still to come; tests can already assert them."
+      >
         {policy.hosts.length === 0 ? (
-          <p className="muted">No named hosts yet.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No named hosts yet"
+            body="Add one, such as wiki at 10.0.0.10, to use it as a rule destination."
+          />
         ) : (
           <ul className="acl-group-list">
             {policy.hosts.map((host) => (
               <li key={host.name} className="acl-group">
                 <div className="acl-group-head">
                   <strong>{host.name}</strong>
-                  <span className="muted mono">{host.target}</span>
+                  <MonoValue value={host.target} />
                   {canMutate ? (
-                    <button
-                      type="button"
-                      className="secondary"
+                    <Button
+                      variant="quiet-danger"
+                      size="sm"
+                      aria-label={`Remove host ${host.name}`}
                       onClick={() =>
                         setPolicy((current) => ({
                           ...current,
@@ -400,7 +412,7 @@ export function AclEditor({
                       }
                     >
                       Remove host
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
               </li>
@@ -415,20 +427,20 @@ export function AclEditor({
               const name = hostName.trim().toLowerCase();
               const target = hostTarget.trim();
               if (!validGroupName(name)) {
-                setMessage(
-                  "Host names use lowercase letters, then letters, digits, or hyphens.",
-                );
+                setHostErrors({
+                  name: "Start with a lowercase letter, then use letters, digits or hyphens.",
+                });
                 return;
               }
               if (policy.hosts.some((host) => host.name === name)) {
-                setMessage("That host name is already in use.");
+                setHostErrors({ name: "That host name is already in use." });
                 return;
               }
               if (!target) {
-                setMessage("Add a private address or CIDR for the host.");
+                setHostErrors({ target: "Enter a private address or CIDR, such as 10.0.0.10." });
                 return;
               }
-              setMessage(null);
+              setHostErrors({});
               setPolicy((current) => ({
                 ...current,
                 hosts: [...current.hosts, { name, target }],
@@ -437,50 +449,64 @@ export function AclEditor({
               setHostTarget("");
             }}
           >
-            <label>
-              New host name
+            <FormField label="New host name" error={hostErrors.name}>
               <input
                 name="host-name"
                 value={hostName}
                 onChange={(event) => setHostName(event.target.value)}
                 placeholder="wiki"
                 autoComplete="off"
+                maxLength={64}
               />
-            </label>
-            <label>
-              Address or CIDR
+            </FormField>
+            <FormField label="Address or CIDR" error={hostErrors.target}>
               <input
                 name="host-target"
+                className="mono"
                 value={hostTarget}
                 onChange={(event) => setHostTarget(event.target.value)}
                 placeholder="10.0.0.10"
                 autoComplete="off"
+                spellCheck={false}
               />
-            </label>
-            <button type="submit" className="secondary" data-testid="acl-add-host">
+            </FormField>
+            <Button type="submit" variant="secondary" data-testid="acl-add-host">
               Add host
-            </button>
+            </Button>
           </form>
         ) : null}
-      </section>
+      </Section>
 
-      <section className="acl-section">
-        <div>
-          <h2>Rules</h2>
-          <p className="muted">
-            Explicit deny wins. A blank source or destination matches everyone
-            on that side. Tagged devices still default to the same tag unless a
-            rule says otherwise.
-          </p>
-        </div>
+      <Section
+        id="acl-rules"
+        title="Rules"
+        description="Explicit deny wins. A blank source or destination matches everyone on that side. Tagged devices still default to the same tag unless a rule says otherwise."
+        actions={
+          policy.rules.length > 0 ? (
+            <Badge dot={false}>
+              {policy.rules.length} {policy.rules.length === 1 ? "rule" : "rules"}
+            </Badge>
+          ) : null
+        }
+      >
         {policy.rules.length === 0 ? (
-          <p className="muted">No extra rules. Same-tag devices can already reach each other.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No extra rules"
+            body={
+              policy.defaults === "deny"
+                ? "Nothing is allowed until you add an allow rule."
+                : "Same-tag devices can already reach each other. Add a rule to allow or deny more."
+            }
+          />
         ) : (
           <ol className="acl-rule-list">
             {policy.rules.map((rule, index) => (
               <li key={index} id={`rule-${index + 1}`} className="acl-rule">
                 <div className="acl-rule-head">
-                  <label>
+                  <h3 className="acl-rule-title">Rule {index + 1}</h3>
+                  <label className="acl-action">
                     Action
                     <select
                       value={rule.action}
@@ -497,9 +523,10 @@ export function AclEditor({
                     </select>
                   </label>
                   {canMutate ? (
-                    <button
-                      type="button"
-                      className="secondary"
+                    <Button
+                      variant="quiet-danger"
+                      size="sm"
+                      aria-label={`Remove rule ${index + 1}`}
                       onClick={() =>
                         setPolicy((current) => ({
                           ...current,
@@ -510,7 +537,7 @@ export function AclEditor({
                       }
                     >
                       Remove rule
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 <div className="acl-rule-grid">
@@ -588,8 +615,9 @@ export function AclEditor({
                     }
                   />
                   <label className="acl-selector">
-                    <span>Destination ports</span>
+                    <span className="acl-selector-label">Destination ports</span>
                     <input
+                      className="mono"
                       value={rule.dst_ports.join(",")}
                       disabled={!canMutate}
                       placeholder="22,80-443"
@@ -621,33 +649,29 @@ export function AclEditor({
           </ol>
         )}
         {canMutate ? (
-          <button
-            type="button"
-            className="secondary"
-            data-testid="acl-add-rule"
-            onClick={() =>
-              setPolicy((current) => ({
-                ...current,
-                rules: [...current.rules, emptyRule()],
-              }))
-            }
-          >
-            Add rule
-          </button>
-        ) : (
-          <p className="muted">Members can read access policy but cannot change it.</p>
-        )}
-      </section>
+          <div className="ui-form-actions">
+            <Button
+              variant="secondary"
+              data-testid="acl-add-rule"
+              onClick={() =>
+                setPolicy((current) => ({
+                  ...current,
+                  rules: [...current.rules, emptyRule()],
+                }))
+              }
+            >
+              Add rule
+            </Button>
+          </div>
+        ) : null}
+      </Section>
 
-      <section className="acl-section">
+      <Section
+        id="acl-ssh"
+        title="SSH"
+        description="Decide which operating-system users a source may open on a destination. SSH rules govern TCP 22 on every destination they select: sources without an SSH grant are rejected there even if a port rule allows 22."
+      >
         <div>
-          <h2>SSH</h2>
-          <p className="muted">
-            Decide which operating-system users a source may open on a
-            destination. SSH rules govern TCP 22 on every destination they
-            select: sources without an SSH grant are rejected there even if a
-            port rule allows 22.
-          </p>
           <ul className="audit-details" aria-label="Where SSH rules are enforced">
             <li>
               <span className="badge online">Linux agent</span> Rejects TCP 22
@@ -668,13 +692,19 @@ export function AclEditor({
           </ul>
         </div>
         {policy.ssh.length === 0 ? (
-          <p className="muted">No SSH rules yet.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No SSH rules yet"
+            body="Without SSH rules, port rules alone decide who reaches TCP 22."
+          />
         ) : (
           <ol className="acl-rule-list">
             {policy.ssh.map((rule, index) => (
               <li key={`ssh-${index}`} className="acl-rule">
                 <div className="acl-rule-head">
-                  <label>
+                  <h3 className="acl-rule-title">SSH rule {index + 1}</h3>
+                  <label className="acl-action">
                     Action
                     <select
                       value={rule.action}
@@ -694,9 +724,10 @@ export function AclEditor({
                     </select>
                   </label>
                   {canMutate ? (
-                    <button
-                      type="button"
-                      className="secondary"
+                    <Button
+                      variant="quiet-danger"
+                      size="sm"
+                      aria-label={`Remove SSH rule ${index + 1}`}
                       onClick={() =>
                         setPolicy((current) => ({
                           ...current,
@@ -707,7 +738,7 @@ export function AclEditor({
                       }
                     >
                       Remove SSH rule
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 <div className="acl-rule-grid">
@@ -764,8 +795,9 @@ export function AclEditor({
                     }
                   />
                   <label className="acl-selector">
-                    <span>Operating-system users</span>
+                    <span className="acl-selector-label">Operating-system users</span>
                     <input
+                      className="mono"
                       value={rule.users.join(",")}
                       disabled={!canMutate}
                       placeholder="ubuntu,deploy,*"
@@ -793,13 +825,14 @@ export function AclEditor({
                   ) : null}
                   {rule.action === "check" ? (
                     <label className="acl-selector">
-                      <span>
-                        Check period (seconds). The source device&apos;s
-                        credential must have been renewed within it; this is
-                        not an interactive person re-authentication. Default
-                        43200.
+                      <span className="acl-selector-label">Check period (seconds)</span>
+                      <span className="ui-field-hint">
+                        The source device&apos;s credential must have been
+                        renewed within it; this is not an interactive person
+                        re-authentication. Default 43200.
                       </span>
                       <input
+                        inputMode="numeric"
                         value={rule.check_period_secs}
                         disabled={!canMutate}
                         placeholder="3600"
@@ -818,24 +851,43 @@ export function AclEditor({
           </ol>
         )}
         {canMutate ? (
-          <button
-            type="button"
-            className="secondary"
-            data-testid="acl-add-ssh"
-            onClick={() =>
-              setPolicy((current) => ({
-                ...current,
-                ssh: [...current.ssh, emptySshRule()],
-              }))
-            }
-          >
-            Add SSH rule
-          </button>
+          <div className="ui-form-actions">
+            <Button
+              variant="secondary"
+              data-testid="acl-add-ssh"
+              onClick={() =>
+                setPolicy((current) => ({
+                  ...current,
+                  ssh: [...current.ssh, emptySshRule()],
+                }))
+              }
+            >
+              Add SSH rule
+            </Button>
+          </div>
         ) : null}
-      </section>
+      </Section>
 
+      <Section
+        id="acl-publish"
+        title={canMutate ? "Publish" : "Published policy"}
+        description={
+          canMutate
+            ? "Changes above stay in this browser until you save. Saving publishes the policy to every device in this organisation."
+            : "The policy as published on the coordinator."
+        }
+        actions={
+          canMutate ? (
+            dirty ? (
+              <Badge tone="warning">Unsaved changes</Badge>
+            ) : (
+              <Badge tone="muted">No unsaved changes</Badge>
+            )
+          ) : null
+        }
+      >
       {canMutate ? (
-        <div className="actions">
+        <div className="ui-form-actions">
           <Button
             data-testid="acl-save"
             loading={pending}
@@ -847,7 +899,6 @@ export function AclEditor({
                 JSON.stringify(serializeAclPolicy(policy), null, 2),
               );
               formData.set("etag", policy.etag);
-              setMessage(null);
               startTransition(async () => {
                 const result = await saveAclAction(formData);
                 toastResult(result, {
@@ -863,44 +914,48 @@ export function AclEditor({
             Save access policy
           </Button>
           {policy.has_previous ? (
-            <button
-              type="button"
-              className="secondary"
+            <Button
+              variant="secondary"
               data-testid="acl-rollback"
               disabled={pending}
-              onClick={() => {
-                const formData = new FormData();
-                formData.set("rollback", "true");
-                formData.set("etag", policy.etag);
-                setMessage(null);
-                startTransition(async () => {
-                  const result = await saveAclAction(formData);
-                  toastResult(result, {
-                    success: "Access policy rolled back",
-                    successDescription: "The previous policy is live on the coordinator again.",
-                  });
-                  if (result.ok) {
-                    router.refresh();
-                  }
-                });
-              }}
+              onClick={() => setConfirmRollback(true)}
             >
               Roll back
-            </button>
+            </Button>
           ) : null}
         </div>
-      ) : null}
-
-      {message ? (
-        <p className="error" role="alert">
-          {message}
-        </p>
       ) : null}
 
       <details className="acl-advanced">
         <summary>Advanced JSON</summary>
         <pre className="mono">{JSON.stringify(serializeAclPolicy(policy), null, 2)}</pre>
       </details>
+      </Section>
+
+      <ConfirmDialog
+        open={confirmRollback}
+        title="Roll back access policy"
+        description="The previous published policy replaces the current one on every device straight away. Unsaved edits on this page are discarded."
+        confirmLabel="Roll back policy"
+        pending={pending}
+        onCancel={() => setConfirmRollback(false)}
+        onConfirm={() => {
+          const formData = new FormData();
+          formData.set("rollback", "true");
+          formData.set("etag", policy.etag);
+          startTransition(async () => {
+            const result = await saveAclAction(formData);
+            toastResult(result, {
+              success: "Access policy rolled back",
+              successDescription: "The previous policy is live on the coordinator again.",
+            });
+            setConfirmRollback(false);
+            if (result.ok) {
+              router.refresh();
+            }
+          });
+        }}
+      />
     </div>
   );
 }

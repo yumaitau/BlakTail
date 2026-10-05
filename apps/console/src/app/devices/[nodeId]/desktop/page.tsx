@@ -3,6 +3,8 @@ import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
+import { Section } from "@/components/ui/section";
 import { RemoteDesktop } from "@/components/remote-desktop";
 import { CoordRequestError, getPeerDetail, type PeerDetail } from "@/lib/coord-peers";
 import { getRemoteSettings, type RemoteSettings } from "@/lib/coord-remote";
@@ -47,20 +49,30 @@ export default async function DeviceDesktopPage({
     return (
       <ConsoleShell ctx={person} current="/devices">
         <div className="stack">
-          <PageHeader eyebrow="Devices" title="Device not found" />
-          <div className="panel">
-            {found && "error" in found ? (
-              <p className="error" role="alert">
-                {found.error}
-              </p>
-            ) : (
+          <Link className="back-link" href="/devices">
+            ← All devices
+          </Link>
+          <PageHeader
+            eyebrow="Devices"
+            title={found ? "Device unavailable" : "Device not found"}
+          />
+          {found && "error" in found ? (
+            <Alert tone="error" title="Couldn't load this device">
+              {found.error}
+            </Alert>
+          ) : (
+            <div className="panel">
               <EmptyState
-                title="No device with that id in your networks"
+                title="No device with that ID in your networks"
                 body="It may have been deleted, or it belongs to a network account you cannot open."
-                action={<Link href="/devices">Back to all devices</Link>}
+                action={
+                  <Link className="button secondary" href="/devices">
+                    Back to all devices
+                  </Link>
+                }
               />
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </ConsoleShell>
     );
@@ -87,16 +99,18 @@ export default async function DeviceDesktopPage({
   return (
     <ConsoleShell ctx={person} current="/devices">
       <div className="stack">
-        <p>
-          <Link href={`/devices/${detail.node.id}`}>← {label}</Link>
-        </p>
+        <Link
+          className="back-link"
+          href={`/devices/${detail.node.id}?organisation=${ctx.organisationId}`}
+        >
+          ← {label}
+        </Link>
         <PageHeader
           eyebrow={ctx.organisationName}
           title={`Remote desktop: ${label}`}
           description="RDP to a Windows or xrdp host through the onshore gateway and its guacd sidecar. Policy must let the gateway reach TCP 3389 on this device. The device's own sign-in is enforced; the password is typed per session and never stored."
         />
-        <section className="panel stack" aria-labelledby="desktop-title">
-          <h2 id="desktop-title">Session</h2>
+        <Section id="session" title="Session">
           <RemoteDesktop
             organisationId={ctx.organisationId}
             organisationName={ctx.organisationName}
@@ -105,15 +119,14 @@ export default async function DeviceDesktopPage({
             deviceName={label}
             disabledReason={disabledReason}
           />
-        </section>
-        <section className="panel stack" aria-labelledby="desktop-limits-title">
-          <h2 id="desktop-limits-title">Limits</h2>
+        </Section>
+        <Section id="limits" title="Limits">
           <p className="muted">
             The RDP server certificate is not pinned: the gateway relies on the WireGuard identity
             of the device&apos;s overlay address instead. Screen contents are not recorded; only
             who, when, the account, your reason and byte counts are audited.
           </p>
-        </section>
+        </Section>
       </div>
     </ConsoleShell>
   );

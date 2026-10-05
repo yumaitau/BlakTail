@@ -6,6 +6,7 @@ import {
   Alert,
   Card,
   EmptyState,
+  LocalTime,
   PageHeader,
   Section,
   SkeletonTable,
@@ -28,7 +29,6 @@ import {
   type RemoteSession,
   type RemoteSettings,
 } from "@/lib/coord-remote";
-import { formatDateTime } from "@/lib/format-time";
 import { can, permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -187,7 +187,7 @@ async function RemoteAccessContent({ ctx }: { ctx: ConsoleContext }) {
                       <div className="stack tight">
                         <StatusPill tone="warning">New key reported</StatusPill>
                         <span className="mono cell-break">{key.pending_fingerprint}</span>
-                        <span className="cell-sub">Reported {formatDateTime(key.pending_reported_at)}</span>
+                        <span className="cell-sub">Reported <LocalTime value={key.pending_reported_at} /></span>
                         <AcceptHostKeyButton
                           nodeId={key.node_id}
                           fingerprint={key.pending_fingerprint}
@@ -250,9 +250,9 @@ async function RemoteAccessContent({ ctx }: { ctx: ConsoleContext }) {
                     {names.get(session.target_node_id) ?? session.target_node_id}
                   </Td>
                   <Td label="Reason">{session.reason}</Td>
-                  <Td label="Started">{formatDateTime(session.redeemed_at ?? session.created_at)}</Td>
+                  <Td label="Started"><LocalTime value={session.redeemed_at ?? session.created_at} /></Td>
                   <Td label="Ended">
-                    {formatDateTime(session.ended_at)}
+                    <LocalTime value={session.ended_at} fallback="—" />
                     {session.end_reason ? <span className="cell-sub">{session.end_reason}</span> : null}
                   </Td>
                   <Td label="Data">

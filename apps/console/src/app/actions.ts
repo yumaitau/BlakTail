@@ -293,10 +293,16 @@ export async function createWgOnlyPeerAction(
       .map((item) => item.trim())
       .filter(Boolean);
     const tags = formData.getAll("tags").map(String).filter(isDeviceTag);
-    if (!name || !wgPublicKey || !endpoint || allowedIps.length === 0) {
+    const missing: Record<string, string> = {};
+    if (!name) missing.name = "Give the peer a name.";
+    if (!wgPublicKey) missing.wgPublicKey = "Paste the peer's WireGuard public key.";
+    if (!endpoint) missing.endpoint = "Enter the endpoint as host:port.";
+    if (allowedIps.length === 0) missing.allowedIps = "Enter at least one address range.";
+    if (Object.keys(missing).length > 0) {
       return {
         ok: false,
-        error: "Name, public key, endpoint, and AllowedIPs are required.",
+        error: "Fill in the highlighted fields.",
+        fieldErrors: missing,
       };
     }
     await createWgOnlyPeer(ctx, {
@@ -309,7 +315,14 @@ export async function createWgOnlyPeerAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return actionFailure(error, "Could not add unmanaged WireGuard peer.");
+    return actionFailure(error, "Could not add unmanaged WireGuard peer.", "add wg-only peer", {
+      fields: {
+        name: ["name"],
+        wgPublicKey: ["public key", "wg_public_key", "key"],
+        endpoint: ["endpoint"],
+        allowedIps: ["allowed", "cidr", "address"],
+      },
+    });
   }
 }
 
@@ -327,8 +340,12 @@ export async function rotateWgOnlyPeerAction(
     const peerId = String(formData.get("peerId") ?? "").trim();
     const wgPublicKey = String(formData.get("wgPublicKey") ?? "").trim();
     const overlapSeconds = Number(formData.get("overlapSeconds") ?? "300");
-    if (!peerId || !wgPublicKey) {
-      return { ok: false, error: "Peer and new public key are required." };
+    if (!peerId) {
+      return { ok: false, error: "Choose a peer to rotate." };
+    }
+    if (!wgPublicKey) {
+      const error = "Paste the new WireGuard public key.";
+      return { ok: false, error, fieldErrors: { wgPublicKey: error } };
     }
     await rotateWgOnlyPeer(ctx, peerId, {
       wg_public_key: wgPublicKey,
@@ -337,7 +354,9 @@ export async function rotateWgOnlyPeerAction(
     revalidatePath("/devices");
     return { ok: true, data: undefined };
   } catch (error) {
-    return actionFailure(error, "Could not rotate unmanaged WireGuard peer.");
+    return actionFailure(error, "Could not rotate unmanaged WireGuard peer.", "rotate wg-only peer", {
+      fields: { wgPublicKey: ["public key", "wg_public_key", "key"] },
+    });
   }
 }
 

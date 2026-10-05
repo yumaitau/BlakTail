@@ -4,6 +4,13 @@ import { useState, useTransition } from "react";
 import { previewDnsAction } from "@/app/dns/actions";
 import type { DeviceTag } from "@/lib/coord";
 import type { DnsAnswerKind, DnsPreview } from "@/lib/coord-dns";
+import { Alert } from "../ui/alert";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { FormField } from "../ui/form-field";
+import { MonoValue } from "../ui/mono-value";
+import { Section } from "../ui/section";
+import { Table, Td } from "../ui/table";
 
 const TAGS: DeviceTag[] = ["office", "ranger", "store"];
 
@@ -17,6 +24,12 @@ const ANSWER_LABELS: Record<DnsAnswerKind, string> = {
   unmanaged: "Organisation DNS is not managed",
 };
 
+const SOURCE_LABELS: Record<string, string> = {
+  zone: "Custom zone",
+  group: "Nameserver group",
+  split: "Split route",
+};
+
 export function DnsPreviewPanel({
   devices,
 }: {
@@ -26,29 +39,33 @@ export function DnsPreviewPanel({
   const [nodeId, setNodeId] = useState("");
   const [tags, setTags] = useState<DeviceTag[]>([]);
   const [result, setResult] = useState<DnsPreview | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; ref?: string } | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   return (
-    <div className="panel stack" id="preview">
-      <div>
-        <h2>Split-match preview</h2>
-        <p className="muted">
-          Ask which answer a device gets for a name under the published
-          revision. Longest suffix wins across zones, nameserver groups and
-          split routes.
-        </p>
-      </div>
+    <Section
+      id="preview"
+      title="Split-match preview"
+      description="Ask which answer a device gets for a name under the published revision. Longest suffix wins across zones, nameserver groups and split routes."
+    >
       <form
-        className="stack"
+        className="ui-form wide"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           setError(null);
+          setNameError(null);
+          if (!name.trim()) {
+            setNameError("Enter a name to preview, such as wiki.kakadu.internal.");
+            return;
+          }
           startTransition(async () => {
             const response = await previewDnsAction({ name, nodeId, tags });
             if (!response.ok) {
               setResult(null);
-              setError(response.error);
+              if (response.fieldErrors?.name) setNameError(response.fieldErrors.name);
+              else setError({ message: response.error, ref: response.ref });
               return;
             }
             setResult(response.data);
@@ -56,18 +73,17 @@ export function DnsPreviewPanel({
         }}
       >
         <div className="dns-grid">
-          <label>
-            Name
+          <FormField label="Name" required error={nameError}>
             <input
               className="mono"
-              required
               value={name}
               placeholder="db.corp.example"
+              autoComplete="off"
+              spellCheck={false}
               onChange={(event) => setName(event.target.value)}
             />
-          </label>
-          <label>
-            Device
+          </FormField>
+          <FormField label="Device">
             <select value={nodeId} onChange={(event) => setNodeId(event.target.value)}>
               <option value="">Choose by tags instead</option>
               {devices.map((device) => (
@@ -76,50 +92,54 @@ export function DnsPreviewPanel({
                 </option>
               ))}
             </select>
-          </label>
+          </FormField>
         </div>
         {nodeId === "" ? (
-          <fieldset className="dns-assign">
-            <legend>Device tags (none means an untagged device)</legend>
-            {TAGS.map((tag) => (
-              <label key={tag}>
-                <input
-                  type="checkbox"
-                  checked={tags.includes(tag)}
-                  onChange={(event) =>
-                    setTags(
-                      event.target.checked
-                        ? [...tags, tag]
-                        : tags.filter((value) => value !== tag),
-                    )
-                  }
-                />
-                {tag}
-              </label>
-            ))}
+          <fieldset className="ui-fieldset">
+            <legend>Device tags</legend>
+            <p className="ui-field-hint">None means an untagged device.</p>
+            <div className="ui-choices">
+              {TAGS.map((tag) => (
+                <label key={tag}>
+                  <input
+                    type="checkbox"
+                    checked={tags.includes(tag)}
+                    onChange={(event) =>
+                      setTags(
+                        event.target.checked
+                          ? [...tags, tag]
+                          : tags.filter((value) => value !== tag),
+                      )
+                    }
+                  />
+                  {tag}
+                </label>
+              ))}
+            </div>
           </fieldset>
         ) : null}
-        <div>
-          <button type="submit" className="secondary" disabled={pending}>
-            {pending ? "Checking…" : "Preview"}
-          </button>
+        <div className="ui-form-actions">
+          <Button type="submit" variant="secondary" loading={pending} loadingLabel="Checking…">
+            Preview
+          </Button>
         </div>
       </form>
       {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
+        <Alert tone="error" title="Couldn't preview this name" reference={error.ref}>
+          {error.message}
+        </Alert>
       ) : null}
       {result ? (
         <div className="stack" role="status">
           <p>
-            <span className="badge network">{ANSWER_LABELS[result.answer]}</span>{" "}
-            {result.detail}
+            <Badge tone="brand">{ANSWER_LABELS[result.answer]}</Badge> {result.detail}
           </p>
           <dl className="details">
             <div>
               <dt>Name</dt>
-              <dd className="mono">{result.name}</dd>
+              <dd>
+                <MonoValue value={result.name} />
+              </dd>
             </div>
             <div>
               <dt>Device</dt>
@@ -131,7 +151,9 @@ export function DnsPreviewPanel({
             {result.matched_suffix ? (
               <div>
                 <dt>Matched suffix</dt>
-                <dd className="mono">{result.matched_suffix}</dd>
+                <dd>
+                  <MonoValue value={result.matched_suffix} />
+                </dd>
               </div>
             ) : null}
             {result.nameserver_group ? (
@@ -148,7 +170,7 @@ export function DnsPreviewPanel({
             ) : null}
           </dl>
           {result.records.length > 0 ? (
-            <ul>
+            <ul className="audit-details">
               {result.records.map((record) => (
                 <li key={`${record.type}-${record.name}-${record.value}`} className="mono">
                   {record.name} {record.ttl} {record.type} {record.value}
@@ -157,32 +179,31 @@ export function DnsPreviewPanel({
             </ul>
           ) : null}
           {result.candidates.length > 0 ? (
-            <div className="table-wrap">
-              <table className="table">
-                <caption className="muted">Matching suffixes considered</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Suffix</th>
-                    <th scope="col">Source</th>
-                    <th scope="col">Label</th>
-                    <th scope="col">Applies to this device</th>
+            <Table label="Matching suffixes considered" mobile="stack">
+              <thead>
+                <tr>
+                  <th scope="col">Suffix</th>
+                  <th scope="col">Source</th>
+                  <th scope="col">Label</th>
+                  <th scope="col">Applies</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.candidates.map((candidate) => (
+                  <tr key={`${candidate.source}-${candidate.label}-${candidate.suffix}`}>
+                    <Td label="Suffix" className="mono">
+                      {candidate.suffix}
+                    </Td>
+                    <Td label="Source">{SOURCE_LABELS[candidate.source] ?? candidate.source}</Td>
+                    <Td label="Label">{candidate.label}</Td>
+                    <Td label="Applies">{candidate.applies ? "Yes" : "No"}</Td>
                   </tr>
-                </thead>
-                <tbody>
-                  {result.candidates.map((candidate) => (
-                    <tr key={`${candidate.source}-${candidate.label}-${candidate.suffix}`}>
-                      <td className="mono">{candidate.suffix}</td>
-                      <td>{candidate.source}</td>
-                      <td>{candidate.label}</td>
-                      <td>{candidate.applies ? "Yes" : "No"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </Table>
           ) : null}
         </div>
       ) : null}
-    </div>
+    </Section>
   );
 }

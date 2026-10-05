@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Calendar, Download, Funnel, RefreshCw, Rows3, Search } from "lucide-react";
 import { ConsoleShell } from "@/components/console-shell";
 import { errorText } from "@/lib/server-errors";
-import { Alert, Card, EmptyState, PageHeader, Section, SkeletonTable } from "@/components/ui";
+import { Alert, Card, EmptyState, LocalTime, PageHeader, Section, SkeletonTable } from "@/components/ui";
 import { TrafficEventsTable } from "@/components/traffic-events-table";
 import { TrafficSettingsForm } from "@/components/traffic-settings";
 import { listNodes, type CoordNode } from "@/lib/coord";
@@ -19,8 +19,6 @@ import {
   PROTOCOLS,
   TIME_RANGES,
   coordinatorTrafficQuery,
-  formatDate,
-  formatTime,
   popoverFilterCount,
   trafficFiltersFromParams,
   trafficSearch,
@@ -154,9 +152,7 @@ async function TrafficContent({ ctx, params }: { ctx: ConsoleContext; params: Se
               <div>
                 <dt>Last event received</dt>
                 <dd>
-                  {page?.last_received_at
-                    ? `${formatDate(page.last_received_at)}, ${formatTime(page.last_received_at)}`
-                    : "Never"}
+                  <LocalTime value={page?.last_received_at} />
                 </dd>
               </div>
               {summary ? (
@@ -408,11 +404,11 @@ async function TrafficContent({ ctx, params }: { ctx: ConsoleContext; params: Se
               ) : null}
               <TrafficEventsTable
                 flows={page.flows}
-                caption={`Traffic events, newest first. Times in UTC. ${page.flows.length} connections on this page.`}
+                caption={`Traffic events, newest first. Times in your time zone. ${page.flows.length} connections on this page.`}
               />
               <nav className="traffic-pager" aria-label="Pages">
                 <span className="muted">
-                  {page.flows.length.toLocaleString("en-AU")} connections on this page · times in UTC
+                  {page.flows.length.toLocaleString("en-AU")} connections on this page · times in your time zone
                 </span>
                 <span className="row">
                   {filters.cursor ? (

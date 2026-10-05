@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { DeviceTag } from "@/lib/coord";
 import {
@@ -27,7 +27,7 @@ import { requireOrganisationContext } from "@/lib/session";
 
 export type NetworkActionResult<T = void> =
   | { ok: true; data: T }
-  | { ok: false; error: string };
+  | ActionFailure;
 
 const ROLES: OrgRole[] = ["owner", "admin", "member"];
 const TAGS: DeviceTag[] = ["office", "ranger", "store"];
@@ -86,8 +86,35 @@ async function managedContext(formData: FormData) {
   return ctx;
 }
 
-function failure(error: unknown, fallback: string): { ok: false; error: string } {
-  return actionFailure(error, fallback);
+/** Coordinator validation words that point at a form field. */
+const RESOURCE_FIELDS = {
+  name: ["name"],
+  target: ["cidr", "subnet", "prefix", "dns_target", "dns name"],
+  ports: ["port"],
+};
+
+function failure(
+  error: unknown,
+  fallback: string,
+  fields?: Record<string, string[]>,
+): ActionFailure {
+  return actionFailure(error, fallback, "networks", { fields });
+}
+
+function invalid(field: string, error: string): ActionFailure {
+  return { ok: false, error, fieldErrors: { [field]: error } };
+}
+
+/** Catches the obvious gaps before asking the coordinator. */
+function checkResourceInput(input: NetworkResourceInput): ActionFailure | null {
+  if (!input.name.trim()) return invalid("name", "Give the resource a name.");
+  if (!(input.cidr ?? input.dns_target ?? "").trim()) {
+    return invalid(
+      "target",
+      input.dns_target === undefined ? "Enter a subnet, such as 10.20.1.0/24." : "Enter a DNS name.",
+    );
+  }
+  return null;
 }
 
 /** Validates against the coordinator (overlap, access, routing peers) without saving. */
@@ -98,13 +125,15 @@ export async function previewNetworkResourceAction(
     const ctx = await managedContext(formData);
     const id = String(formData.get("resourceId") ?? "");
     const input = { ...inputFromForm(formData), dry_run: true };
+    const problem = checkResourceInput(input);
+    if (problem) return problem;
     if (id) {
       input.etag = String(formData.get("etag") ?? "");
       return { ok: true, data: await updateNetworkResource(ctx, id, input) };
     }
     return { ok: true, data: await createNetworkResource(ctx, input) };
   } catch (error) {
-    return failure(error, "Could not check this resource.");
+    return failure(error, "Could not check this resource.", RESOURCE_FIELDS);
   }
 }
 
@@ -115,6 +144,8 @@ export async function saveNetworkResourceAction(
     const ctx = await managedContext(formData);
     const id = String(formData.get("resourceId") ?? "");
     const input = inputFromForm(formData);
+    const problem = checkResourceInput(input);
+    if (problem) return problem;
     const saved = id
       ? await updateNetworkResource(ctx, id, {
           ...input,
@@ -124,7 +155,7 @@ export async function saveNetworkResourceAction(
     revalidatePath("/networks");
     return { ok: true, data: { id: saved.id } };
   } catch (error) {
-    return failure(error, "Could not save this resource.");
+    return failure(error, "Could not save this resource.", RESOURCE_FIELDS);
   }
 }
 
@@ -158,6 +189,9 @@ export async function reserveAddressAction(
 ): Promise<NetworkActionResult> {
   try {
     const ctx = await managedContext(formData);
+    if (!String(formData.get("address") ?? "").trim()) {
+      return invalid("address", "Enter the IPv4 address to reserve.");
+    }
     const optional = (key: string) => {
       const value = String(formData.get(key) ?? "").trim();
       return value ? value : undefined;
@@ -171,7 +205,10 @@ export async function reserveAddressAction(
     revalidatePath("/networks/addresses");
     return { ok: true, data: undefined };
   } catch (error) {
-    return failure(error, "Could not reserve this address.");
+    return failure(error, "Could not reserve this address.", {
+      address: ["address"],
+      boundKey: ["key"],
+    });
   }
 }
 
@@ -240,7 +277,7 @@ export async function previewRenumberAction(
     const ctx = await managedContext(formData);
     return { ok: true, data: await previewRenumber(ctx, renumberInput(formData)) };
   } catch (error) {
-    return failure(error, "Could not preview this renumber.");
+    return failure(error, "Could not preview this renumber.", { pool: ["pool"] });
   }
 }
 

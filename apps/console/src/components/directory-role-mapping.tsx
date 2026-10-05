@@ -11,7 +11,7 @@ import {
 } from "@/app/settings/directory-actions";
 import type { DriftPreview } from "@/lib/directory-mapping";
 import type { DirectorySettings, GroupRoleMapping } from "@/lib/directory-mapping-core";
-import { formatDate } from "@/lib/format-time";
+import { LocalTime } from "./ui/local-time";
 import { ORG_ROLES, roleLabel } from "@/lib/roles";
 import { StatusPill } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -266,9 +266,15 @@ export function DirectoryRoleMapping({
                 {preview.deprovisioned.map((row) => (
                   <li key={row.membershipId}>
                     {row.email} ({roleLabel(row.role)}):{" "}
-                    {row.state === "tombstoned"
-                      ? `removed ${formatDate(row.tombstonedAt)}`
-                      : `suspended, removed after ${formatDate(row.deprovisionAt)}`}
+                    {row.state === "tombstoned" ? (
+                      <>
+                        removed <LocalTime value={row.tombstonedAt} dateOnly fallback="—" />
+                      </>
+                    ) : (
+                      <>
+                        suspended, removed after <LocalTime value={row.deprovisionAt} dateOnly fallback="—" />
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>

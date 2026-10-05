@@ -1,7 +1,8 @@
 /**
- * Date and time text that renders the same on the server and in the browser.
- * `toLocaleString` differs between runtimes (spacing, "pm" vs "PM", time
- * zone), which breaks hydration, so these build the text by hand in UTC.
+ * UTC date and time text built by hand, so it is identical on the server and
+ * in the browser. People see times through `<LocalTime>` (viewer's time zone);
+ * these give its first render and its UTC hover text, and suit places that
+ * need one plain string (exports, aria labels).
  */
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -9,7 +10,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /** Unix seconds, an ISO string or a Date. */
 export type TimeInput = number | string | Date | null | undefined;
 
-function toDate(value: TimeInput): Date | null {
+export function toDate(value: TimeInput): Date | null {
   if (value === null || value === undefined || value === "" || value === 0) return null;
   const date =
     value instanceof Date ? value : typeof value === "number" ? new Date(value * 1000) : new Date(value);
@@ -30,9 +31,4 @@ export function formatDateTime(value: TimeInput, empty = "—"): string {
   const hours = String(date.getUTCHours()).padStart(2, "0");
   const minutes = String(date.getUTCMinutes()).padStart(2, "0");
   return `${formatDate(date)}, ${hours}:${minutes} UTC`;
-}
-
-/** ISO string for `<time dateTime>`. */
-export function isoTime(value: TimeInput): string | undefined {
-  return toDate(value)?.toISOString();
 }

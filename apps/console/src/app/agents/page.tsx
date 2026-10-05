@@ -6,6 +6,7 @@ import {
   Card,
   EmptyRow,
   EmptyState,
+  LocalTime,
   PageHeader,
   Section,
   SkeletonTable,
@@ -28,7 +29,6 @@ import {
   type AgentOverview,
   type AgentUsage,
 } from "@/lib/coord-agents";
-import { formatDateTime } from "@/lib/format-time";
 import { can, permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -247,7 +247,9 @@ async function AgentsContent({ ctx }: { ctx: ConsoleContext }) {
                   const key = keys.find((k) => k.id === request.key_id);
                   return (
                     <tr key={request.id}>
-                      <Td label="When">{formatDateTime(request.started_at)}</Td>
+                      <Td label="When">
+                        <LocalTime value={request.started_at} />
+                      </Td>
                       <Td label="Key">{key?.name ?? "Deleted key"}</Td>
                       <Td label="Model">
                         <span className="mono">{request.model}</span>

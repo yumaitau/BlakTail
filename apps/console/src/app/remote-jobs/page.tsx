@@ -6,6 +6,7 @@ import {
   Alert,
   Card,
   EmptyState,
+  LocalTime,
   PageHeader,
   Section,
   SkeletonTable,
@@ -22,7 +23,6 @@ import {
 } from "@/components/remote-jobs-manager";
 import { listNodes, type CoordNode } from "@/lib/coord";
 import { listJobRuns, listJobTemplates, type JobRun, type JobTemplate } from "@/lib/coord-remote";
-import { formatDateTime } from "@/lib/format-time";
 import { listMemberships } from "@/lib/oidc";
 import { can, permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
@@ -213,9 +213,19 @@ async function RemoteJobsContent({ ctx }: { ctx: ConsoleContext }) {
                   {run.exit_code !== null ? <span className="muted">exit code {run.exit_code}</span> : null}
                 </div>
                 <p className="muted">
-                  Requested by {people.get(run.requested_by) ?? run.requested_by}, {formatDateTime(run.requested_at)}: “{run.reason}”
-                  {run.decided_by ? ` · decided by ${people.get(run.decided_by) ?? run.decided_by}, ${formatDateTime(run.decided_at)}` : ""}
-                  {run.finished_at ? ` · finished ${formatDateTime(run.finished_at)}` : ""}
+                  Requested by {people.get(run.requested_by) ?? run.requested_by},{" "}
+                  <LocalTime value={run.requested_at} />: “{run.reason}”
+                  {run.decided_by ? (
+                    <>
+                      {" "}· decided by {people.get(run.decided_by) ?? run.decided_by},{" "}
+                      <LocalTime value={run.decided_at} />
+                    </>
+                  ) : null}
+                  {run.finished_at ? (
+                    <>
+                      {" "}· finished <LocalTime value={run.finished_at} />
+                    </>
+                  ) : null}
                 </p>
                 <p className="mono cell-break">{run.argv.join(" ")}</p>
                 {run.output !== null ? (

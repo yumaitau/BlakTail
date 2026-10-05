@@ -3,6 +3,9 @@ import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
+import { MonoValue } from "@/components/ui/mono-value";
+import { Section } from "@/components/ui/section";
 import { RemoteTerminal } from "@/components/remote-terminal";
 import { CoordRequestError, getPeerDetail, type PeerDetail } from "@/lib/coord-peers";
 import { getRemoteSettings, listHostKeys, type HostKey, type RemoteSettings } from "@/lib/coord-remote";
@@ -76,20 +79,30 @@ export default async function DeviceTerminalPage({
     return (
       <ConsoleShell ctx={person} current="/devices">
         <div className="stack">
-          <PageHeader eyebrow="Devices" title="Device not found" />
-          <div className="panel">
-            {found && "error" in found ? (
-              <p className="error" role="alert">
-                {found.error}
-              </p>
-            ) : (
+          <Link className="back-link" href="/devices">
+            ← All devices
+          </Link>
+          <PageHeader
+            eyebrow="Devices"
+            title={found ? "Device unavailable" : "Device not found"}
+          />
+          {found && "error" in found ? (
+            <Alert tone="error" title="Couldn't load this device">
+              {found.error}
+            </Alert>
+          ) : (
+            <div className="panel">
               <EmptyState
-                title="No device with that id in your networks"
+                title="No device with that ID in your networks"
                 body="It may have been deleted, or it belongs to a network account you cannot open."
-                action={<Link href="/devices">Back to all devices</Link>}
+                action={
+                  <Link className="button secondary" href="/devices">
+                    Back to all devices
+                  </Link>
+                }
               />
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </ConsoleShell>
     );
@@ -112,19 +125,23 @@ export default async function DeviceTerminalPage({
   return (
     <ConsoleShell ctx={person} current="/devices">
       <div className="stack">
-        <p>
-          <Link href={`/devices/${detail.node.id}`}>← {label}</Link>
-        </p>
+        <Link
+          className="back-link"
+          href={`/devices/${detail.node.id}?organisation=${ctx.organisationId}`}
+        >
+          ← {label}
+        </Link>
         <PageHeader
           eyebrow={ctx.organisationName}
           title={`Terminal: ${label}`}
           description="An SSH session through this organisation's onshore gateway. The gateway is a BlakTail device, so access policy and SSH rules decide what it can reach. The session needs a fresh ticket, a recent sign-in and an access reason; it lasts at most 30 minutes and ends after 10 minutes without input."
         />
-        <section className="panel stack" aria-labelledby="terminal-title">
-          <h2 id="terminal-title">Session</h2>
+        <Section id="session" title="Session">
           {hostKey && !hostKey.pending_fingerprint ? (
             <p className="muted">
-              Pinned host key <span className="mono">{hostKey.fingerprint}</span>. The gateway refuses any other key.
+              Pinned host key{" "}
+              <MonoValue value={hostKey.fingerprint} copy copyLabel="Copy host key fingerprint" />.
+              The gateway refuses any other key.
             </p>
           ) : null}
           <RemoteTerminal
@@ -135,15 +152,14 @@ export default async function DeviceTerminalPage({
             deviceName={label}
             disabledReason={disabledReason}
           />
-        </section>
-        <section className="panel stack" aria-labelledby="terminal-record-title">
-          <h2 id="terminal-record-title">What is recorded</h2>
+        </Section>
+        <Section id="recorded" title="What is recorded">
           <p className="muted">
             The audit log records who opened the session, the device, the account, your reason,
             start and end times, why it ended and how many bytes moved. Keystrokes and screen
             output are not recorded or logged.
           </p>
-        </section>
+        </Section>
       </div>
     </ConsoleShell>
   );

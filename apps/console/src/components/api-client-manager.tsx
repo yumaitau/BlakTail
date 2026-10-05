@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { createApiClientAction, revokeApiClientAction } from "@/app/actions";
 import { rotateApiClientAction, setApiClientSuspendedAction } from "@/app/settings/actions";
 import type { ApiClient } from "@/lib/coord";
-import { formatDate } from "@/lib/format-time";
+import { LocalTime } from "./ui/local-time";
 import { Alert } from "./ui/alert";
 import { StatusPill } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -118,8 +118,8 @@ export function ApiClientManager({
                   <StatusPill tone={client.revoked ? "muted" : client.suspended ? "warning" : "success"}>
                     {client.revoked ? "Revoked" : client.suspended ? "Suspended" : "Active"}
                   </StatusPill>
-                  {client.expires_at ? <span className="cell-sub">Expires {formatDate(client.expires_at)}</span> : null}
-                  {client.rotated_at ? <span className="cell-sub">Rotated {formatDate(client.rotated_at)}</span> : null}
+                  {client.expires_at ? <span className="cell-sub">Expires <LocalTime value={client.expires_at} dateOnly /></span> : null}
+                  {client.rotated_at ? <span className="cell-sub">Rotated <LocalTime value={client.rotated_at} dateOnly /></span> : null}
                 </Td>
                 <Td>
                   {client.revoked ? null : (

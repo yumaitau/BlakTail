@@ -3,6 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import type * as GuacamoleTypes from "guacamole-common-js";
 import { startRemoteSessionAction } from "@/app/remote-access/actions";
+import { Alert } from "./ui/alert";
+import { Button } from "./ui/button";
+import { FormField } from "./ui/form-field";
 
 type GuacamoleModule = typeof GuacamoleTypes;
 type Phase = "idle" | "requesting" | "connecting" | "connected" | "closed";
@@ -174,9 +177,14 @@ export function RemoteDesktop({
       <p className="muted">
         {organisationName} · {roleName}
       </p>
+      {disabledReason ? (
+        <Alert tone="info" title="A session can't start yet">
+          {disabledReason}
+        </Alert>
+      ) : null}
       {!live ? (
         <form
-          className="stack"
+          className="ui-form"
           aria-label={`Open a remote desktop on ${deviceName}`}
           onSubmit={(event) => {
             event.preventDefault();
@@ -201,20 +209,32 @@ export function RemoteDesktop({
           <input type="hidden" name="organisationId" value={organisationId} />
           <input type="hidden" name="nodeId" value={nodeId} />
           <input type="hidden" name="kind" value="rdp" />
-          <label>
-            Windows or xrdp account (DOMAIN\user allowed)
-            <input name="osUser" required autoComplete="off" spellCheck={false} disabled={disabledReason !== null} />
-          </label>
-          <label>
-            Password (sent once to the gateway for this session; never stored)
-            <input name="password" type="password" required autoComplete="off" disabled={disabledReason !== null} />
-          </label>
-          <label>
-            Reason for access (recorded in the audit log)
-            <input name="reason" required minLength={4} maxLength={200} disabled={disabledReason !== null} />
-          </label>
-          <label>
-            Session length (minutes, up to 30)
+          <div className="ui-form-grid">
+            <FormField label="Account" hint="Windows or xrdp account. DOMAIN\user is fine." required>
+              <input
+                name="osUser"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={disabledReason !== null}
+              />
+            </FormField>
+            <FormField
+              label="Password"
+              hint="Sent once to the gateway for this session. Never stored."
+              required
+            >
+              <input
+                name="password"
+                type="password"
+                autoComplete="off"
+                disabled={disabledReason !== null}
+              />
+            </FormField>
+          </div>
+          <FormField label="Reason for access" hint="Recorded in the audit log." required>
+            <input name="reason" minLength={4} maxLength={200} disabled={disabledReason !== null} />
+          </FormField>
+          <FormField label="Session length" hint="Minutes, up to 30." className="field-xs">
             <input
               name="durationMinutes"
               type="number"
@@ -223,19 +243,23 @@ export function RemoteDesktop({
               defaultValue={30}
               disabled={disabledReason !== null}
             />
-          </label>
-          <div className="row">
-            <button type="submit" disabled={disabledReason !== null || phase === "requesting"}>
-              {phase === "requesting" ? "Requesting…" : "Open remote desktop"}
-            </button>
+          </FormField>
+          <div className="ui-form-actions">
+            <Button
+              type="submit"
+              disabled={disabledReason !== null}
+              loading={phase === "requesting"}
+              loadingLabel="Requesting…"
+            >
+              Open remote desktop
+            </Button>
           </div>
-          {disabledReason ? <p className="muted">{disabledReason}</p> : null}
         </form>
       ) : (
         <div className="row">
-          <button type="button" className="danger" onClick={() => client.current?.disconnect()}>
+          <Button variant="danger" onClick={() => client.current?.disconnect()}>
             End session
-          </button>
+          </Button>
           <span className="muted">Clipboard uses your browser; file transfer and drives are off.</span>
         </div>
       )}
@@ -253,9 +277,9 @@ export function RemoteDesktop({
         </p>
       ) : null}
       {error ? (
-        <p className="error" role="alert">
+        <Alert tone="error" title="The session didn't start">
           {error}
-        </p>
+        </Alert>
       ) : null}
     </div>
   );

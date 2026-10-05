@@ -21,17 +21,28 @@ import {
 import { can } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
-export type PostureActionResult = { ok: true } | { ok: false; error: string };
+export type PostureActionResult =
+  | { ok: true }
+  | { ok: false; error: string; ref?: string; fieldErrors?: Record<string, string> };
+
+/** A validation message tied to one form field; actionFailure keeps both. */
+function fieldError(field: string, message: string): Error {
+  return Object.assign(new Error(message), { fieldErrors: { [field]: message } });
+}
 
 const OS_FAMILIES = ["linux", "macos", "ios", "android", "windows"];
 const VERSION = /^v?\d+(\.\d+){0,3}$/u;
 
-function hoursToSeconds(value: FormDataEntryValue | null, label: string): number | undefined {
+function hoursToSeconds(
+  value: FormDataEntryValue | null,
+  label: string,
+  field: string,
+): number | undefined {
   const text = String(value ?? "").trim();
   if (!text) return undefined;
   const hours = Number(text);
   if (!Number.isFinite(hours) || hours <= 0) {
-    throw new Error(`${label} must be a positive number of hours.`);
+    throw fieldError(field, `${label} must be a positive number of hours.`);
   }
   return Math.round(hours * 3600);
 }
@@ -42,7 +53,9 @@ function definitionFrom(formData: FormData): PostureDefinition {
   if (description) definition.description = description;
   const agent = String(formData.get("min_agent_version") ?? "").trim();
   if (agent) {
-    if (!VERSION.test(agent)) throw new Error("Minimum agent version must look like 0.2.0.");
+    if (!VERSION.test(agent)) {
+      throw fieldError("min_agent_version", "Minimum agent version must look like 0.2.0.");
+    }
     definition.min_agent_version = agent;
   }
   const families = formData
@@ -56,15 +69,23 @@ function definitionFrom(formData: FormData): PostureDefinition {
     for (const pair of minimums.split(",")) {
       const [family, version] = pair.split("=").map((part) => part.trim().toLowerCase());
       if (!family || !version || !OS_FAMILIES.includes(family) || !VERSION.test(version)) {
-        throw new Error("Minimum OS versions look like macos=14.0, linux=22.04.");
+        throw fieldError("min_os_versions", "Minimum OS versions look like macos=14.0, linux=22.04.");
       }
       entries[family] = version;
     }
     definition.min_os_versions = entries;
   }
-  const credential = hoursToSeconds(formData.get("max_credential_age_hours"), "Credential age");
+  const credential = hoursToSeconds(
+    formData.get("max_credential_age_hours"),
+    "Credential age",
+    "max_credential_age_hours",
+  );
   if (credential !== undefined) definition.max_credential_age_secs = credential;
-  const report = hoursToSeconds(formData.get("max_report_age_hours"), "Report freshness");
+  const report = hoursToSeconds(
+    formData.get("max_report_age_hours"),
+    "Report freshness",
+    "max_report_age_hours",
+  );
   if (report !== undefined) definition.max_report_age_secs = report;
   if (formData.get("require_approved_peer") === "on") definition.require_approved_peer = true;
   definition.on_missing_data = formData.get("on_missing_data") === "pass" ? "pass" : "fail";
@@ -72,14 +93,21 @@ function definitionFrom(formData: FormData): PostureDefinition {
   if (integration) {
     const minutes = Number(String(formData.get("integration_max_age_minutes") ?? "60").trim() || "60");
     if (!Number.isFinite(minutes) || minutes < 1) {
-      throw new Error("Provider data freshness must be at least 1 minute.");
+      throw fieldError(
+        "integration_max_age_minutes",
+        "Provider data freshness must be at least 1 minute.",
+      );
     }
     definition.integration = {
       integration_id: integration,
       max_age_secs: Math.round(minutes * 60),
       on_outage: formData.get("integration_on_outage") === "pass" ? "pass" : "fail",
     };
-    const seen = hoursToSeconds(formData.get("integration_last_seen_hours"), "Provider last seen");
+    const seen = hoursToSeconds(
+      formData.get("integration_last_seen_hours"),
+      "Provider last seen",
+      "integration_last_seen_hours",
+    );
     if (seen !== undefined) definition.integration.max_last_seen_secs = seen;
   }
   return definition;
@@ -102,7 +130,10 @@ export async function createPostureCheckAction(formData: FormData): Promise<Post
     const ctx = await managerContext();
     const name = String(formData.get("name") ?? "").trim();
     if (!/^[a-z][a-z0-9-]{0,31}$/u.test(name)) {
-      return { ok: false, error: "Name must be 1-32 lowercase letters, digits or hyphens." };
+      const error = name
+        ? "Start with a lowercase letter, then use up to 31 lowercase letters, digits or hyphens."
+        : "Give the check a name.";
+      return { ok: false, error, fieldErrors: { name: error } };
     }
     await createPostureCheck(ctx, name, definitionFrom(formData));
     revalidatePath("/posture");
@@ -144,7 +175,7 @@ const CONFIG_FIELDS = ["tenant_id", "client_id", "region", "console_url", "serve
 
 export type IntegrationActionResult =
   | { ok: true; report?: SyncReport }
-  | { ok: false; error: string };
+  | { ok: false; error: string; ref?: string; fieldErrors?: Record<string, string> };
 
 /** Provider credentials are owner-only, mirroring the coordinator. */
 async function securityContext() {

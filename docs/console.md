@@ -432,13 +432,22 @@ targets), tablet 801–1024px, desktop ≥ 1025px.
 | `Skeleton`, `SkeletonTable`, `SkeletonPage` | Loading placeholders (for `loading.tsx`). |
 | `ConfirmDialog({ open, title, description, confirmLabel, confirmText?, pending, onConfirm, onCancel })` | Native modal dialog: focus trapped, Escape cancels, Cancel focused first. `confirmText` adds type-to-confirm. |
 | `SecretPanel({ title, label, secret, description?, onDone })` | A secret shown once (API or SCIM token, signing secret, agent key, recovery codes, invitation link): copy button, "Shown once" label, and a "stored it somewhere safe" tick before it can be dismissed. |
+| `MonoValue({ value, copy?, copyLabel?, wrap? })`, `CopyButton({ value, label })` | Keys, addresses, IDs and FQDNs in mono; long values truncate with the full text in `title`; `copy` adds a copy button with a toast. |
+| `PermissionNotice({ reason })` | "View only" notice. Pass `permissionReason(role, permission)` so it names the roles that can. |
+| `LocalTime({ value, dateOnly?, fallback? })` | Unix seconds, ISO string or Date in the viewer's own time zone, with the exact UTC time on hover. Server and first browser render show UTC text, then it switches after hydration, so there's no mismatch. Use it for every time people see; `lib/format-time.ts` holds the UTC helpers it uses. |
 
-Dates and times in client components use `formatDate` / `formatDateTime`
-from `src/lib/format-time.ts` (UTC, built by hand) so server and browser render
-the same text; `toLocaleString` differs between runtimes and breaks hydration.
-Server pages that wrap coordinator data in `<Suspense>` render the shell and
-`PageHeader` straight away with a `SkeletonTable` fallback. `FormField` is a
-client component: server pages use plain `.ui-field` markup instead.
+**Page layout.** One `PageHeader` (with the page's main actions), then
+`Section`s. Detail pages start with `<Link className="back-link">`. Pages
+render the shell and header straight away and wrap coordinator-backed parts in
+`<Suspense>` with a skeleton (there are no `loading.tsx` files because each
+page renders its own shell). Forms use `.ui-form` (`.wide` for long ones),
+`.ui-form-grid` for short fields side by side, `.ui-fieldset` + `<legend>` for
+groups, `.ui-choices` for checkbox and radio rows, `field-xs|sm|md|lg` on
+`FormField` for max widths (none on phones), and end with `.ui-form-actions`
+(primary first). Revoke and delete of devices, keys, networks, services,
+ingress routes and anything public use `ConfirmDialog` with `confirmText`.
+Tables with up to six columns use `mobile="stack"`. `FormField` is a client
+component; server-rendered forms use plain `.ui-field` markup.
 
 **Toasts** report the outcome of something the person just did. `<Toaster />`
 is mounted once in the root layout.

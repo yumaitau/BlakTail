@@ -7,6 +7,7 @@ import {
   Alert,
   Card,
   EmptyState,
+  LocalTime,
   PageHeader,
   Section,
   SkeletonTable,
@@ -23,7 +24,6 @@ import {
 } from "@/lib/audit-view";
 import { listConsoleAuditPage } from "@/lib/console-audit";
 import { listAuditPage, verifyAuditChain, type ChainReport } from "@/lib/coord-events";
-import { formatDateTime, isoTime } from "@/lib/format-time";
 import { permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -84,7 +84,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
       <div className="stack">
         <PageHeader
           title="Audit log"
-          description={`Administrative changes in ${ctx.organisationName}, newest first. Times are UTC. Network connections aren't recorded here; see Traffic.`}
+          description={`Administrative changes in ${ctx.organisationName}, newest first. Times are in your time zone; hover for UTC. Network connections aren't recorded here; see Traffic.`}
           actions={
             exportDenied ? null : (
               <>
@@ -235,9 +235,7 @@ async function AuditEvents({
                 />
                 <div className="audit-event-head">
                   <strong className="mono">{event.action}</strong>
-                  <time className="muted" dateTime={isoTime(event.created_at)}>
-                    {formatDateTime(event.created_at)}
-                  </time>
+                  <LocalTime className="muted" value={event.created_at} />
                 </div>
                 <div>
                   {actor(event)}

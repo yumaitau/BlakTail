@@ -1,6 +1,15 @@
+import { Suspense } from "react";
+import Link from "next/link";
 import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
+import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { PermissionNotice } from "@/components/ui/permission-notice";
+import { Section } from "@/components/ui/section";
+import { Skeleton, SkeletonTable } from "@/components/ui/skeleton";
+import { Table, Td } from "@/components/ui/table";
 import { ApproveHardwareButton, PostureIntegrations } from "@/components/posture-integrations";
 import { PostureManager } from "@/components/posture-manager";
 import {
@@ -14,8 +23,8 @@ import {
   type IntegrationFact,
   type IntegrationList,
 } from "@/lib/coord-posture-integrations";
-import { can, permissionReason, roleLabel } from "@/lib/roles";
-import { requireConsoleContext } from "@/lib/session";
+import { can, permissionReason } from "@/lib/roles";
+import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
 function when(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString("en-AU", {
@@ -57,6 +66,48 @@ const FILTER_LABEL: Record<string, string> = {
 
 export default async function PosturePage() {
   const ctx = await requireConsoleContext();
+  const policyReason = permissionReason(ctx.role, "manage_policy");
+
+  return (
+    <ConsoleShell ctx={ctx} current="/posture">
+      <div className="stack">
+        <PageHeader
+          eyebrow={ctx.organisationName}
+          title="Posture checks"
+          description="Named, versioned device requirements. An allow or SSH rule that names a check only grants access to source devices that pass it; failing devices keep every other grant."
+          actions={
+            <Link className="button secondary" href="/acls">
+              Use in access rules
+            </Link>
+          }
+        />
+        <Alert tone="info" title="What these signals mean">
+          Operating system, OS version, agent version and capabilities are reported by each
+          device. They are hygiene signals, not attestation or evidence of compliance. Credential
+          renewal and device state are observed by the coordinator. Results are re-evaluated
+          whenever peer maps compile.
+        </Alert>
+        {policyReason ? <PermissionNotice reason={policyReason} /> : null}
+        <Suspense
+          fallback={
+            <>
+              <Section title="Checks">
+                <Skeleton lines={4} label="Loading posture checks" />
+              </Section>
+              <Section title="Device assessments">
+                <SkeletonTable rows={4} label="Loading device assessments" />
+              </Section>
+            </>
+          }
+        >
+          <PostureWorkspace ctx={ctx} />
+        </Suspense>
+      </div>
+    </ConsoleShell>
+  );
+}
+
+async function PostureWorkspace({ ctx }: { ctx: ConsoleContext }) {
   let checks: PostureCheck[] = [];
   let report: AssessmentReport | null = null;
   let error: string | null = null;
@@ -74,181 +125,158 @@ export default async function PosturePage() {
   }
   const canManage = can(ctx.role, "manage_policy");
   const canManageIntegrations = can(ctx.role, "manage_security");
+  const securityReason = permissionReason(ctx.role, "manage_security");
 
   return (
-    <ConsoleShell ctx={ctx} current="/posture">
-      <div className="stack">
-        <PageHeader
-          title="Posture checks"
-          description="Named, versioned device requirements. An allow rule or SSH rule that names a check only grants access to source devices that pass it; failing devices keep every other grant."
+    <>
+      {error ? (
+        <Alert tone="error" title="Posture checks couldn't be loaded">
+          {error}
+        </Alert>
+      ) : (
+        <PostureManager
+          checks={checks}
+          canManage={canManage}
+          integrations={(integrations?.integrations ?? []).map((integration) => ({
+            id: integration.id,
+            name: integration.name,
+            provider: integration.provider,
+          }))}
         />
-        <div className="panel stack">
-          <p className="muted" role="note">
-            Operating system, OS version, agent version and capabilities are
-            reported by each device. They are hygiene signals, not attestation,
-            and are not evidence of compliance. Credential renewal and device
-            state are observed by the coordinator. Results are re-evaluated
-            whenever peer maps compile, and agents are told to recompile when
-            a passing result reaches its time limit.
-          </p>
-          <p className="muted">
-            {ctx.organisationName} · {roleLabel(ctx.role)}
-          </p>
-          {error ? (
-            <p className="error" role="alert">
-              {error}
+      )}
+      <Section
+        id="integrations"
+        title="Integrations"
+        description="Optional device-health signals from an MDM or EDR your organisation already runs. BlakTail polls the provider with a read-only credential and matches its records to devices by serial number or MAC address (hostname only if you opt in). A record that matches more than one device fails for all of them."
+      >
+        {integrationsError ? (
+          <Alert tone="error" title="Integrations couldn't be loaded">
+            {integrationsError}
+          </Alert>
+        ) : integrations ? (
+          <>
+            <p className="muted small" role="note">
+              {integrations.residency_notice}
             </p>
-          ) : (
-            <PostureManager
-              checks={checks}
-              canManage={canManage}
-              reason={permissionReason(ctx.role, "manage_policy")}
-              integrations={(integrations?.integrations ?? []).map((integration) => ({
-                id: integration.id,
-                name: integration.name,
-                provider: integration.provider,
-              }))}
+            {securityReason ? <PermissionNotice reason={securityReason} /> : null}
+            <PostureIntegrations
+              providers={integrations.providers}
+              integrations={integrations.integrations}
+              residencyNotice={integrations.residency_notice}
+              canManage={canManageIntegrations}
             />
-          )}
-        </div>
-        <div className="panel stack" aria-labelledby="integrations-heading">
-          <div>
-            <h2 id="integrations-heading">Integrations</h2>
-            <p className="muted">
-              Optional device-health signals from an MDM or EDR your organisation already runs.
-              BlakTail polls the provider with a read-only credential and matches its records to
-              devices in this organisation by serial number or MAC address (hostname only if you
-              opt in). Serial numbers and MAC addresses are reported by each device; a record that
-              matches more than one device fails for all of them.
-            </p>
-            <p className="muted">
-              {ctx.organisationName} · {roleLabel(ctx.role)}
-            </p>
-          </div>
-          {integrationsError ? (
-            <p className="error" role="alert">
-              {integrationsError}
-            </p>
-          ) : integrations ? (
-            <>
-              <p className="muted" role="note">
-                {integrations.residency_notice}
-              </p>
-              <PostureIntegrations
-                providers={integrations.providers}
-                integrations={integrations.integrations}
-                residencyNotice={integrations.residency_notice}
-                canManage={canManageIntegrations}
-                reason={permissionReason(ctx.role, "manage_security")}
-              />
-            </>
+          </>
+        ) : null}
+      </Section>
+      {report ? (
+        <Section
+          id="assessments"
+          title="Device assessments"
+          description={`Evaluated ${when(report.evaluated_at)}.`}
+        >
+          {report.devices.length === 0 ? (
+            <EmptyState
+              compact
+              headingLevel={3}
+              title="No active devices yet"
+              body="Each device's results show here once it enrols."
+            />
           ) : (
-            <p className="muted">Loading integrations…</p>
-          )}
-        </div>
-        {report ? (
-          <div className="panel stack">
-            <div>
-              <h2>Device assessments</h2>
-              <p className="muted">Evaluated {when(report.evaluated_at)}.</p>
-            </div>
-            {report.devices.length === 0 ? (
-              <p className="muted">No active devices yet.</p>
-            ) : (
-              <div className="table-wrap">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th scope="col">Device</th>
-                      <th scope="col">Reported</th>
-                      <th scope="col">Enforcement</th>
-                      <th scope="col">Checks</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {report.devices.map((device) => (
-                      <tr key={device.node_id}>
-                        <td>
-                          {device.display_name || device.name}
-                          <div className="muted mono">{device.name}</div>
-                        </td>
-                        <td>
-                          {device.os ?? "OS not reported"} {device.os_version ?? ""}
-                          <div className="muted">
-                            Agent {device.agent_version ?? "not reported"} · inventory{" "}
-                            {when(device.inventory_reported_at)}
-                          </div>
-                        </td>
-                        <td>
-                          <span
-                            className={
-                              device.enforcement.packet_filter === "enforced"
-                                ? "badge online"
-                                : "badge pending"
-                            }
-                          >
-                            {FILTER_LABEL[device.enforcement.packet_filter] ??
-                              device.enforcement.packet_filter}
-                          </span>
-                          {device.enforcement.ssh_users ? (
-                            <div className="muted">SSH user limits verified</div>
-                          ) : null}
-                          {(device.integrations ?? []).map((fact) => (
-                            <div key={fact.integration_id} className="muted">
+            <Table label="Device assessments" mobile="stack">
+              <thead>
+                <tr>
+                  <th scope="col">Device</th>
+                  <th scope="col">Reported</th>
+                  <th scope="col">Enforcement</th>
+                  <th scope="col">Checks</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.devices.map((device) => (
+                  <tr key={device.node_id}>
+                    <Td label="Device">
+                      <div>
+                        <div className="device-primary">{device.display_name || device.name}</div>
+                        {device.display_name ? (
+                          <div className="cell-sub mono">{device.name}</div>
+                        ) : null}
+                      </div>
+                    </Td>
+                    <Td label="Reported">
+                      <div>
+                        {device.os ?? "OS not reported"} {device.os_version ?? ""}
+                        <div className="cell-sub">
+                          Agent {device.agent_version ?? "not reported"} · inventory{" "}
+                          {when(device.inventory_reported_at)}
+                        </div>
+                      </div>
+                    </Td>
+                    <Td label="Enforcement">
+                      <div className="stack-tight">
+                      <Badge
+                        tone={device.enforcement.packet_filter === "enforced" ? "success" : "warning"}
+                      >
+                        {FILTER_LABEL[device.enforcement.packet_filter] ??
+                          device.enforcement.packet_filter}
+                      </Badge>
+                      {device.enforcement.ssh_users ? (
+                        <div className="cell-sub">SSH user limits verified</div>
+                      ) : null}
+                      {(device.integrations ?? []).map((fact) => (
+                        <div key={fact.integration_id} className="cell-sub">
                               {fact.provider}: {signalText(fact)} — source: provider
                               {fact.outage_since ? `, outage since ${when(fact.outage_since)}` : ""}
                             </div>
-                          ))}
-                          {(device.integrations ?? []).some(
-                            (fact) => fact.match.state === "identity_changed",
-                          ) ? (
-                            <ApproveHardwareButton
-                              nodeId={device.node_id}
-                              deviceName={device.display_name || device.name}
-                              canManage={canManageIntegrations}
-                              reason={permissionReason(ctx.role, "manage_security")}
-                            />
-                          ) : null}
-                        </td>
-                        <td>
-                          {device.assessments.length === 0 ? (
-                            <span className="muted">No checks defined</span>
-                          ) : (
-                            <ul className="audit-details">
-                              {device.assessments.map((assessment) => (
-                                <li key={assessment.check}>
-                                  <span className={assessment.passed ? "badge online" : "badge revoked"}>
-                                    {assessment.check}: {assessment.passed ? "passes" : "fails"}
-                                  </span>{" "}
+                      ))}
+                      {(device.integrations ?? []).some(
+                        (fact) => fact.match.state === "identity_changed",
+                      ) ? (
+                        <ApproveHardwareButton
+                          nodeId={device.node_id}
+                          deviceName={device.display_name || device.name}
+                          canManage={canManageIntegrations}
+                          reason={securityReason}
+                        />
+                      ) : null}
+                      </div>
+                    </Td>
+                    <Td label="Checks">
+                      {device.assessments.length === 0 ? (
+                        <span className="muted">No checks defined</span>
+                      ) : (
+                        <ul className="posture-results">
+                          {device.assessments.map((assessment) => (
+                            <li key={assessment.check}>
+                              <Badge tone={assessment.passed ? "success" : "danger"}>
+                                {assessment.check}: {assessment.passed ? "passes" : "fails"}
+                              </Badge>{" "}
                                   {assessment.reasons
                                     .map(
                                       (reason) =>
                                         `${reason.text} (${SOURCE_LABEL[reason.source] ?? reason.source})`,
                                     )
                                     .join("; ")}
-                                  {!assessment.passed && assessment.affected_rules.length ? (
-                                    <div className="muted">
-                                      Loses {assessment.affected_rules.join(", ")}. Remediate by
-                                      upgrading the agent or OS, or renewing the device credential.
-                                    </div>
-                                  ) : null}
-                                  {assessment.passed && assessment.expires_at ? (
-                                    <div className="muted">Lapses {when(assessment.expires_at)}</div>
-                                  ) : null}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        ) : null}
-      </div>
-    </ConsoleShell>
+                              {!assessment.passed && assessment.affected_rules.length ? (
+                                <div className="cell-sub">
+                                  Loses {assessment.affected_rules.join(", ")}. Remediate by
+                                  upgrading the agent or OS, or renewing the device credential.
+                                </div>
+                              ) : null}
+                              {assessment.passed && assessment.expires_at ? (
+                                <div className="cell-sub">Lapses {when(assessment.expires_at)}</div>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          )}
+        </Section>
+      ) : null}
+    </>
   );
 }
