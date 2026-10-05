@@ -1,5 +1,6 @@
+import { errorText } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
-import { OidcError, startOidcLogin } from "@/lib/oidc";
+import { startOidcLogin } from "@/lib/oidc";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -7,14 +8,14 @@ export async function GET(request: Request) {
   const redirectTo = url.searchParams.get("redirect") ?? "/control-center";
   if (!organisationId) {
     return NextResponse.redirect(
-      new URL("/sign-in?error=organisation%20is%20required", url.origin),
+      new URL("/sign-in?error=Choose%20an%20organisation%20to%20sign%20in%20to.", url.origin),
     );
   }
   try {
     const location = await startOidcLogin(organisationId, redirectTo);
     return NextResponse.redirect(location);
   } catch (error) {
-    const message = error instanceof OidcError ? error.message : "OIDC start failed";
+    const message = errorText(error, "Single sign-on couldn't start.", "oidc start");
     return NextResponse.redirect(
       new URL(`/sign-in?error=${encodeURIComponent(message)}`, url.origin),
     );

@@ -1,6 +1,7 @@
 import { ConsoleShell } from "@/components/console-shell";
 import { DeviceActions } from "@/components/device-actions";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
 import { PathMotif } from "@/components/path-motif";
 import { WgOnlyManager } from "@/components/wg-only-manager";
 import { listAllNodes, listAllWgOnlyPeers, type NetworkNode } from "@/lib/coord";
@@ -37,6 +38,9 @@ export default async function DevicesPage() {
   const online = live.filter((node) => node.online && !node.revoked).length;
   const attention = live.filter(needsAttention).length;
   const networks = new Set(live.map((node) => node.organisation_id)).size;
+  // During an outage the counts are unknown, not zero.
+  const count = (value: number) =>
+    inventory.errors.length > 0 && live.length === 0 ? "–" : value;
 
   return (
     <ConsoleShell ctx={ctx} current="/devices">
@@ -51,15 +55,15 @@ export default async function DevicesPage() {
             <p className="eyebrow">Connected places</p>
             <div className="overview-stats">
               <div className="overview-stat">
-                <strong>{live.length}</strong>
+                <strong>{count(live.length)}</strong>
                 <span>Devices</span>
               </div>
               <div className="overview-stat">
-                <strong>{online}</strong>
+                <strong>{count(online)}</strong>
                 <span>Online</span>
               </div>
               <div className="overview-stat">
-                <strong>{attention}</strong>
+                <strong>{count(attention)}</strong>
                 <span>Needs attention</span>
               </div>
               <div className="overview-stat">
@@ -73,12 +77,13 @@ export default async function DevicesPage() {
           </div>
         </section>
         <div className="panel table-panel">
-          {[...blockedErrors, ...inventory.errors].map((error) => (
-            <p className="error" key={error}>
+          {[...new Set([...blockedErrors, ...inventory.errors])].map((error) => (
+            <Alert tone="error" key={error}>
               {error}
-            </p>
+            </Alert>
           ))}
           <DeviceActions
+            loadFailed={inventory.errors.length > 0}
             nodes={inventory.nodes}
             people={memberships.map((row) => ({
               userId: row.userId,

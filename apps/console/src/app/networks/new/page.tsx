@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { NetworkResourceForm } from "@/components/network-resource-form";
@@ -12,7 +13,7 @@ export default async function NewNetworkResourcePage() {
   try {
     choices = await resourceFormChoices(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load devices and policy groups.";
+    error = errorText(err, "Could not load devices and policy groups.");
   }
 
   return (

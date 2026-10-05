@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { requireSecurityAssurance } from "@/lib/auth-policy";
 import { deleteTrafficRecords, putTrafficSettings } from "@/lib/coord-events";
@@ -17,7 +18,7 @@ async function ownerContext() {
 }
 
 function failure(error: unknown, fallback: string): TrafficActionResult {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 export async function saveTrafficSettingsAction(formData: FormData): Promise<TrafficActionResult> {

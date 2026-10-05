@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { authClient } from "@/lib/auth-client";
+import { authErrorMessage } from "@/lib/errors";
 import { TAGLINE } from "@/lib/tagline";
 import { PathMotif } from "./path-motif";
 import { TwoFactorChallenge } from "./two-factor-challenge";
@@ -70,8 +71,10 @@ export function SignInForm({
                   });
                   if (result.error) {
                     setError(
-                      result.error.message ??
+                      authErrorMessage(
+                        result.error,
                         "Sign-in failed. Check your email and password.",
+                      ).message,
                     );
                     return;
                   }

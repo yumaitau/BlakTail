@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { AclEditor } from "@/components/acl-editor";
 import { ConsoleShell } from "@/components/console-shell";
@@ -17,7 +18,7 @@ export default async function AclsPage() {
     const acl = await getAcl(ctx);
     initialAcl = JSON.stringify(acl, null, 2);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load access policy.";
+    error = errorText(err, "Could not load access policy.");
   }
   const memberships = (await listMemberships(ctx.organisationId).catch(() => []))
     .filter((row) => row.status === "active");

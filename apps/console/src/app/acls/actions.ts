@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import type { DeviceTag } from "@/lib/coord";
 import {
   explainAccess,
@@ -75,9 +76,6 @@ export async function explainAccessAction(form: ExplainForm): Promise<ExplainAct
     }
     return { ok: true, data: await explainAccess(ctx, input) };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not explain access.",
-    };
+    return actionFailure(error, "Could not explain access.");
   }
 }

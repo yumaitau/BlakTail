@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, type DeviceTag } from "./coord";
+import { coordFetch, coordError, type DeviceTag } from "./coord";
 import type { IntegrationFact, IntegrationRequirement } from "./coord-posture-integrations";
 import type { ConsoleContext } from "./session";
 
@@ -133,17 +133,9 @@ async function request<T>(
     ctx,
   });
   if (!res.ok) {
-    let message = `Coordinator returned ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) message = body.error;
-    } catch {
-      /* keep status message */
-    }
-    if (res.status === 412) {
-      message = "Someone else changed this posture check. Reload and try again.";
-    }
-    throw new Error(message);
+    throw await coordError(res, {
+      messages: { 412: "Someone else changed this posture check. Reload and try again." },
+    });
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

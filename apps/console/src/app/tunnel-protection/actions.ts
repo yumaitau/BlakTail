@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { requireSecurityAssurance } from "@/lib/auth-policy";
 import type { DeviceTag } from "@/lib/coord";
@@ -61,9 +62,6 @@ export async function savePqPolicyAction(formData: FormData): Promise<PqActionRe
           : "Saved. Devices pick up the policy on their next update; check each peer below for what was actually negotiated.",
     };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Could not save the post-quantum policy.",
-    };
+    return actionFailure(error, "Could not save the post-quantum policy.");
   }
 }

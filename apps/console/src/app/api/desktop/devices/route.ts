@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { listNodes } from "@/lib/coord";
 import {
@@ -36,9 +37,7 @@ export async function GET(request: Request): Promise<Response> {
           return {
             devices: [],
             error: `${organisation.organisationName}: ${
-              error instanceof Error
-                ? error.message
-                : "Could not load devices."
+              errorText(error, "Could not load devices.")
             }`,
           };
         }
@@ -61,7 +60,7 @@ export async function GET(request: Request): Promise<Response> {
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Could not load devices.";
+      errorText(error, "Could not load devices.");
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

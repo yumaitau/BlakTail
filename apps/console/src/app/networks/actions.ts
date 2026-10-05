@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { DeviceTag } from "@/lib/coord";
 import {
@@ -86,7 +87,7 @@ async function managedContext(formData: FormData) {
 }
 
 function failure(error: unknown, fallback: string): { ok: false; error: string } {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 /** Validates against the coordinator (overlap, access, routing peers) without saving. */

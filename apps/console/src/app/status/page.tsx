@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import { getCoordHealth } from "@/lib/coord";
@@ -11,7 +12,7 @@ export default async function StatusPage() {
     health = await getCoordHealth();
   } catch (err) {
     error =
-      err instanceof Error ? err.message : "Could not reach the coordinator.";
+      errorText(err, "Could not reach the coordinator.");
   }
 
   return (

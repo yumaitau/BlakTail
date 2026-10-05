@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   addGroupMapping,
@@ -15,7 +16,7 @@ import { requireConsoleContext } from "@/lib/session";
 type Result<T = void> = { ok: true; data: T } | { ok: false; error: string };
 
 function failure(error: unknown, fallback: string): { ok: false; error: string } {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 export async function saveDirectorySettingsAction(formData: FormData): Promise<Result> {

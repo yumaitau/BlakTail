@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Calendar, Download, Funnel, RefreshCw, Rows3, Search } from "lucide-react";
 import { ConsoleShell } from "@/components/console-shell";
+import { errorText } from "@/lib/server-errors";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { TrafficEventsTable } from "@/components/traffic-events-table";
@@ -87,9 +88,7 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
   const page: FlowsPage | null = flowsResult.status === "fulfilled" ? flowsResult.value : null;
   const error =
     flowsResult.status === "rejected"
-      ? flowsResult.reason instanceof Error
-        ? flowsResult.reason.message
-        : "Could not load traffic events."
+      ? errorText(flowsResult.reason, "Could not load traffic events.")
       : null;
   const summary: TrafficSummary | null =
     summaryResult.status === "fulfilled" ? summaryResult.value : null;

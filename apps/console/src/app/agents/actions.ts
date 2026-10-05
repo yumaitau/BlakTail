@@ -1,5 +1,6 @@
 "use server";
 
+import { errorText } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import {
@@ -19,7 +20,7 @@ import { can } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return errorText(error, fallback);
 }
 
 function lines(value: FormDataEntryValue | null): string[] {

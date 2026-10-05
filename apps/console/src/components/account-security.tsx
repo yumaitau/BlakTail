@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import { authErrorMessage, toUserError } from "@/lib/errors";
 
 type Enrolment = { totpURI: string; backupCodes: string[] };
 
@@ -51,7 +52,7 @@ export function AccountSecurity({
       try {
         await work();
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "That did not work.");
+        setError(toUserError(caught, "That did not work.").message);
       }
     });
   };
@@ -95,7 +96,7 @@ export function AccountSecurity({
             run(async () => {
               const result = await authClient.twoFactor.enable({ password });
               if (result.error || !result.data) {
-                throw new Error(result.error?.message ?? "Could not start set-up.");
+                throw new Error(authErrorMessage(result.error, "Could not start set-up.").message);
               }
               const data = result.data as Partial<Enrolment>;
               if (!data.totpURI) throw new Error("Authenticator set-up was not returned.");
@@ -123,7 +124,7 @@ export function AccountSecurity({
             );
             run(async () => {
               const result = await authClient.twoFactor.verifyTotp({ code });
-              if (result.error) throw new Error(result.error.message ?? "That code was not accepted.");
+              if (result.error) throw new Error(authErrorMessage(result.error, "That code was not accepted.").message);
               setEnrolment(null);
               setNotice("Two-step verification is on.");
               router.refresh();
@@ -169,14 +170,14 @@ export function AccountSecurity({
               if (intent === "codes") {
                 const result = await authClient.twoFactor.generateBackupCodes({ password });
                 if (result.error || !result.data) {
-                  throw new Error(result.error?.message ?? "Could not create recovery codes.");
+                  throw new Error(authErrorMessage(result.error, "Could not create recovery codes.").message);
                 }
                 setCodes((result.data as { backupCodes: string[] }).backupCodes);
                 setNotice("Old recovery codes no longer work.");
                 return;
               }
               const result = await authClient.twoFactor.disable({ password });
-              if (result.error) throw new Error(result.error.message ?? "Could not turn it off.");
+              if (result.error) throw new Error(authErrorMessage(result.error, "Could not turn it off.").message);
               setCodes(null);
               setNotice("Two-step verification is off.");
               router.refresh();

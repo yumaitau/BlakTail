@@ -1,5 +1,6 @@
 "use server";
 
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   createPostureCheck,
@@ -93,7 +94,7 @@ async function managerContext() {
 }
 
 function failure(error: unknown, fallback: string): PostureActionResult {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 export async function createPostureCheckAction(formData: FormData): Promise<PostureActionResult> {
@@ -155,7 +156,7 @@ async function securityContext() {
 }
 
 function integrationFailure(error: unknown, fallback: string): IntegrationActionResult {
-  return { ok: false, error: error instanceof Error ? error.message : fallback };
+  return actionFailure(error, fallback);
 }
 
 export async function createIntegrationAction(formData: FormData): Promise<IntegrationActionResult> {

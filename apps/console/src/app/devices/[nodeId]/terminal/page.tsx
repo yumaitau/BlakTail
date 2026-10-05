@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -21,7 +22,7 @@ async function findDevice(
       return { ctx, detail: await getPeerDetail(ctx, nodeId) };
     } catch (error) {
       if (error instanceof CoordRequestError && error.status === 404) continue;
-      return { error: error instanceof Error ? error.message : "Could not load this device." };
+      return { error: errorText(error, "Could not load this device.") };
     }
   }
   return null;
@@ -104,7 +105,7 @@ export default async function DeviceTerminalPage({
     settings = loaded;
     hostKey = keys.find((key) => key.node_id === detail.node.id);
   } catch (error) {
-    loadError = error instanceof Error ? error.message : "Could not load remote access settings.";
+    loadError = errorText(error, "Could not load remote access settings.");
   }
   const disabledReason = loadError ?? blocker(ctx, detail, settings, hostKey);
 

@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -61,7 +62,7 @@ async function findDetail(
       if (error instanceof CoordRequestError && error.status === 404) continue;
       return {
         error: `${ctx.organisationName}: ${
-          error instanceof Error ? error.message : "Could not load this device."
+          errorText(error, "Could not load this device.")
         }`,
       };
     }
@@ -120,7 +121,7 @@ export default async function DeviceDetailPage({
     (overview) => ({ rows: overview.peers, error: null }),
     (error: unknown) => ({
       rows: [],
-      error: error instanceof Error ? error.message : "Could not load tunnel protection.",
+      error: errorText(error, "Could not load tunnel protection."),
     }),
   );
   const lifecycle = detail.lifecycle.state;

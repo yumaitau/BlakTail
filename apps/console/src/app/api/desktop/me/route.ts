@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import {
   requirePersonContextFromSession,
@@ -39,7 +40,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Could not load desktop session.";
+      errorText(error, "Could not load desktop session.");
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

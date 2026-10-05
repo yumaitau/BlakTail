@@ -2,7 +2,7 @@ import "server-only";
 
 import {
   coordFetch,
-  readError,
+  coordError,
   type DeviceTag,
   type OrgDnsResponse,
   type OrgDnsSettings,
@@ -97,7 +97,7 @@ export async function publishDns(
     throw new Error(DNS_CONFLICT_MESSAGE);
   }
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<OrgDnsResponse>;
 }
@@ -110,7 +110,7 @@ export async function listDnsRevisions(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   const body = (await res.json()) as { revisions: DnsRevision[] };
   return body.revisions;
@@ -125,7 +125,7 @@ export async function getDnsRevision(
     { method: "GET", ctx },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<DnsRevisionDocument>;
 }
@@ -140,7 +140,7 @@ export async function validateDns(
     body: JSON.stringify({ dns }),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<DnsValidation>;
 }
@@ -160,7 +160,7 @@ export async function previewDns(
     ctx,
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<DnsPreview>;
 }

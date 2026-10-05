@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import {
@@ -46,7 +47,7 @@ export default async function AddressesPage() {
   try {
     view = await getIpam(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load address pools.";
+    error = errorText(err, "Could not load address pools.");
   }
   const canManage = can(ctx.role, "manage_networks");
   const graceDays = view ? Math.round(view.reuse_grace_seconds / 86400) : 7;

@@ -3,6 +3,10 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { mintEnrolmentKeyAction, revokeJoinKeyAction } from "@/app/join-keys/actions";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { toast, toastResult } from "./ui/toast";
 import type { JoinKeySummary } from "@/lib/coord-peers";
 import { can, permissionReason, roleLabel, type OrgRole } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
@@ -85,7 +89,7 @@ export function EnrolmentWorkspace({
   const [usageMode, setUsageMode] = useState<"single" | "reusable">("single");
   const [minted, setMinted] = useState<{ key: string; name: string; expiresAt: number } | null>(null);
   const [platform, setPlatform] = useState<Platform>("linux");
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [confirmRevoke, setConfirmRevoke] = useState<JoinKeySummary | null>(null);
   const allowed = can(role, "manage_join_keys");
   const denied = permissionReason(role, "manage_join_keys");
@@ -119,28 +123,34 @@ export function EnrolmentWorkspace({
           onSubmit={(event) => {
             event.preventDefault();
             const formData = new FormData(event.currentTarget);
-            setMessage(null);
+            setFieldErrors({});
             setMinted(null);
             startTransition(async () => {
               const result = await mintEnrolmentKeyAction(formData);
-              if (!result.ok) {
-                setMessage({ text: result.error, error: true });
-                return;
-              }
+              setFieldErrors(
+                toastResult(result, {
+                  success: "Join key minted",
+                  successDescription: "Copy it now. It's shown only once.",
+                  errorToast: false,
+                }),
+              );
+              if (!result.ok) return;
               setMinted(result.data);
               router.refresh();
             });
           }}
         >
           <input type="hidden" name="organisationId" value={organisationId} />
-          <label>
-            Name
-            <input name="name" type="text" maxLength={64} required placeholder="Ranger tablets, June rollout" />
-          </label>
-          <label>
-            Description (optional)
+          <FormField label="Name" required error={fieldErrors.name}>
+            <input name="name" type="text" maxLength={64} placeholder="Ranger tablets, June rollout" />
+          </FormField>
+          <FormField
+            label="Description"
+            hint="Optional. Who or what the key is for."
+            error={fieldErrors.description}
+          >
             <input name="description" type="text" maxLength={200} />
-          </label>
+          </FormField>
           <fieldset className="stack">
             <legend>Uses</legend>
             <label>
@@ -164,10 +174,13 @@ export function EnrolmentWorkspace({
               Several devices (reusable)
             </label>
             {usageMode === "reusable" ? (
-              <label>
-                Maximum uses (blank for no limit before expiry)
+              <FormField
+                label="Maximum uses"
+                hint="Leave blank for no limit before the key expires."
+                error={fieldErrors.maxUses}
+              >
                 <input name="maxUses" type="number" min={1} max={10000} />
-              </label>
+              </FormField>
             ) : null}
           </fieldset>
           <label>
@@ -196,15 +209,12 @@ export function EnrolmentWorkspace({
               grant tags you are not allowed to assign.
             </p>
           </fieldset>
-          <button type="submit" disabled={pending}>
-            {pending ? "Minting…" : "Mint join key"}
-          </button>
+          <div className="actions">
+            <Button type="submit" loading={pending} loadingLabel="Minting…">
+              Mint join key
+            </Button>
+          </div>
         </form>
-        {message ? (
-          <p className={message.error ? "error" : "muted"} role={message.error ? "alert" : "status"}>
-            {message.text}
-          </p>
-        ) : null}
       </section>
 
       {minted ? (
@@ -223,8 +233,8 @@ export function EnrolmentWorkspace({
               className="secondary"
               onClick={() => {
                 void navigator.clipboard?.writeText(minted.key).then(
-                  () => setMessage({ text: "Join key copied.", error: false }),
-                  () => setMessage({ text: "Copy failed; select the key and copy it manually.", error: true }),
+                  () => toast.success("Join key copied"),
+                  () => toast.error("Couldn't copy the key. Select it and copy it manually."),
                 );
               }}
             >
@@ -354,52 +364,30 @@ export function EnrolmentWorkspace({
         )}
       </section>
 
-      {confirmRevoke ? (
-        <div className="confirm-backdrop">
-          <div
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="revoke-key-title"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setConfirmRevoke(null);
-            }}
-          >
-            <h2 id="revoke-key-title">Revoke join key</h2>
-            <p>
-              Revoke “{confirmRevoke.name || "Unnamed key"}” for {organisationName}?
-              No new device can enrol or renew with it. Devices already enrolled
-              keep working.
-            </p>
-            <div className="actions">
-              <button type="button" className="secondary" autoFocus onClick={() => setConfirmRevoke(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger"
-                disabled={pending}
-                onClick={() => {
-                  const formData = new FormData();
-                  formData.set("organisationId", organisationId);
-                  formData.set("keyId", confirmRevoke.id);
-                  setConfirmRevoke(null);
-                  startTransition(async () => {
-                    const result = await revokeJoinKeyAction(formData);
-                    setMessage({
-                      text: result.ok ? "Join key revoked." : result.error,
-                      error: !result.ok,
-                    });
-                    if (result.ok) router.refresh();
-                  });
-                }}
-              >
-                Revoke key
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <ConfirmDialog
+        open={confirmRevoke !== null}
+        title="Revoke join key"
+        description={
+          confirmRevoke
+            ? `No new device can enrol or renew with “${confirmRevoke.name || "Unnamed key"}” for ${organisationName}. Devices already enrolled keep working.`
+            : null
+        }
+        confirmLabel="Revoke key"
+        pending={pending}
+        onCancel={() => setConfirmRevoke(null)}
+        onConfirm={() => {
+          if (!confirmRevoke) return;
+          const formData = new FormData();
+          formData.set("organisationId", organisationId);
+          formData.set("keyId", confirmRevoke.id);
+          startTransition(async () => {
+            const result = await revokeJoinKeyAction(formData);
+            toastResult(result, { success: "Join key revoked" });
+            setConfirmRevoke(null);
+            if (result.ok) router.refresh();
+          });
+        }}
+      />
     </div>
   );
 }

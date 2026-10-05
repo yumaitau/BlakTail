@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import { DnsEditor } from "@/components/dns/dns-editor";
@@ -9,7 +10,7 @@ import { permissionReason, roleLabel } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return errorText(error, fallback);
 }
 
 export default async function DnsPage() {

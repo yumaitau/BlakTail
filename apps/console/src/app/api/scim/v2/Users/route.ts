@@ -1,3 +1,4 @@
+import { SCIM_BODY_LIMIT, readJsonBody } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import { ScimError, listScimUsers, organisationForToken, provisionScimUser } from "@/lib/scim";
 import { parseScimUser, userNameFilter } from "@/lib/scim-core";
@@ -38,7 +39,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const organisationId = await organisationForToken(request.headers.get("authorization"));
-    const input = parseScimUser(await request.json());
+    const input = parseScimUser(await readJsonBody(request, SCIM_BODY_LIMIT));
     if (!input) {
       return NextResponse.json(
         {

@@ -1,3 +1,4 @@
+import { errorText, readJsonBodyOr } from "@/lib/server-errors";
 import { NextResponse } from "next/server";
 import {
   approveNodeRoutes,
@@ -32,7 +33,7 @@ async function mutationContext(request: Request) {
 }
 
 function errorResponse(error: unknown, fallback: string): Response {
-  const message = error instanceof Error ? error.message : fallback;
+  const message = errorText(error, fallback);
   const status =
     error instanceof OrganisationAccessError
       ? 403
@@ -62,7 +63,7 @@ export async function PATCH(
     if (!nodeId) {
       return NextResponse.json({ error: "Choose a device." }, { status: 400 });
     }
-    const body = (await request.json().catch(() => null)) as UpdateBody | null;
+    const body = (await readJsonBodyOr(request, null)) as UpdateBody | null;
     if (body?.operation === "rename") {
       if (
         body.friendlyName !== undefined &&

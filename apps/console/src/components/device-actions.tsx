@@ -13,6 +13,10 @@ import type { AclPerson } from "@/lib/acl";
 import type { NetworkNode } from "@/lib/coord";
 import { can, isOrgRole, roleLabel } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { toastResult } from "./ui/toast";
 
 type StatusFilter = "all" | "online" | "offline" | "attention";
 
@@ -62,15 +66,14 @@ function ownerLabel(node: NetworkNode, people: AclPerson[]): string {
 export function DeviceActions({
   nodes,
   people,
+  loadFailed = false,
 }: {
   nodes: NetworkNode[];
   people: AclPerson[];
+  /** Some networks failed to load: don't claim there are no devices. */
+  loadFailed?: boolean;
 }) {
   const router = useRouter();
-  const [message, setMessage] = useState<{
-    text: string;
-    error: boolean;
-  } | null>(null);
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
@@ -108,6 +111,9 @@ export function DeviceActions({
         .includes(wanted);
     });
   }, [filter, nodes, people, query]);
+
+  // The page already shows why loading failed; an empty state would mislead.
+  if (nodes.length === 0 && loadFailed) return null;
 
   if (nodes.length === 0) {
     return (
@@ -180,7 +186,6 @@ export function DeviceActions({
                     pending={pending}
                     state={state}
                     onToggle={() => setOpenId(open ? null : rowId)}
-                    onMessage={setMessage}
                     onRefresh={() => router.refresh()}
                     onConfirm={setConfirm}
                     startTransition={startTransition}
@@ -191,78 +196,44 @@ export function DeviceActions({
           </table>
         </div>
       )}
-      {message ? (
-        <p
-          className={message.error ? "error" : "muted"}
-          role={message.error ? "alert" : "status"}
-          aria-live="polite"
-        >
-          {message.text}
-        </p>
-      ) : null}
-      {confirm ? (
-        <div className="confirm-backdrop">
-          <div
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="device-confirm-title"
-          >
-            <h2 id="device-confirm-title">
-              {confirm.kind === "revoke"
-                ? "Revoke device"
-                : "Delete from inventory"}
-            </h2>
-            <p>
-              {confirm.kind === "revoke"
-                ? `Revoke ${nodeLabel(confirm.node)} on ${confirm.node.organisation_name}? The device will lose network access.`
-                : `Delete ${nodeLabel(confirm.node)} from ${confirm.node.organisation_name} inventory? This keeps a tombstone for audit and is separate from revoke.`}
-            </p>
-            <div className="actions">
-              <button
-                type="button"
-                className="secondary"
-                autoFocus
-                onClick={() => setConfirm(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger"
-                disabled={pending}
-                onClick={() => {
-                  const node = confirm.node;
-                  const kind = confirm.kind;
-                  const formData = new FormData();
-                  formData.set("nodeId", node.id);
-                  formData.set("organisationId", node.organisation_id);
-                  setMessage(null);
-                  setConfirm(null);
-                  startTransition(async () => {
-                    const result =
-                      kind === "revoke"
-                        ? await revokeDeviceAction(formData)
-                        : await tombstoneDeviceAction(formData);
-                    const label = nodeLabel(node);
-                    setMessage({
-                      text: result.ok
-                        ? kind === "revoke"
-                          ? `${label} revoked. It can no longer use this network.`
-                          : `${label} removed from inventory. The audit tombstone remains.`
-                        : result.error,
-                      error: !result.ok,
-                    });
-                    if (result.ok) router.refresh();
-                  });
-                }}
-              >
-                {confirm.kind === "revoke" ? "Revoke device" : "Delete device"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.kind === "revoke" ? "Revoke device access" : "Delete from inventory"}
+        description={
+          confirm
+            ? confirm.kind === "revoke"
+              ? `${nodeLabel(confirm.node)} will lose access to ${confirm.node.organisation_name} straight away. This can't be undone; the device would need to enrol again.`
+              : `${nodeLabel(confirm.node)} is removed from the ${confirm.node.organisation_name} inventory. An audit tombstone is kept. This is separate from revoking access.`
+            : null
+        }
+        confirmText={confirm?.kind === "revoke" ? nodeLabel(confirm.node) : undefined}
+        confirmLabel={confirm?.kind === "revoke" ? "Revoke access" : "Delete device"}
+        pending={pending}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          if (!confirm) return;
+          const { node, kind } = confirm;
+          const formData = new FormData();
+          formData.set("nodeId", node.id);
+          formData.set("organisationId", node.organisation_id);
+          startTransition(async () => {
+            const result =
+              kind === "revoke"
+                ? await revokeDeviceAction(formData)
+                : await tombstoneDeviceAction(formData);
+            const label = nodeLabel(node);
+            toastResult(result, {
+              success: kind === "revoke" ? "Device access revoked" : "Device removed from inventory",
+              successDescription:
+                kind === "revoke"
+                  ? `${label} can no longer use this network.`
+                  : `${label} is gone from the list. The audit tombstone remains.`,
+            });
+            setConfirm(null);
+            if (result.ok) router.refresh();
+          });
+        }}
+      />
     </div>
   );
 }
@@ -274,7 +245,6 @@ function DeviceRow({
   pending,
   state,
   onToggle,
-  onMessage,
   onRefresh,
   onConfirm,
   startTransition,
@@ -285,11 +255,11 @@ function DeviceRow({
   pending: boolean;
   state: { label: string; className: string };
   onToggle: () => void;
-  onMessage: (message: { text: string; error: boolean } | null) => void;
   onRefresh: () => void;
   onConfirm: (confirm: { kind: "revoke" | "delete"; node: NetworkNode }) => void;
   startTransition: (action: () => void) => void;
 }) {
+  const [nameError, setNameError] = useState<string | null>(null);
   const canEdit = can(node.effective_role, "manage_peers") && !node.revoked && !node.deleted;
   const canApproveRoutes =
     can(node.effective_role, "manage_networks") && !node.revoked && !node.deleted;
@@ -406,21 +376,20 @@ function DeviceRow({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const formData = new FormData(event.currentTarget);
-                    onMessage(null);
-                    startTransition(() => {
-                      void updateDeviceFriendlyNameAction(formData).then(
-                        (result) => {
-                          onMessage({
-                            text: result.ok
-                              ? result.data.friendlyName
-                                ? `${node.name} is now shown as ${result.data.friendlyName}.`
-                                : `${node.name} now uses its original name.`
-                              : result.error,
-                            error: !result.ok,
-                          });
-                          if (result.ok) onRefresh();
-                        },
+                    startTransition(async () => {
+                      const result = await updateDeviceFriendlyNameAction(formData);
+                      setNameError(
+                        toastResult(result, {
+                          success: "Device renamed",
+                          successDescription: result.ok
+                            ? result.data.friendlyName
+                              ? `${node.name} is now shown as ${result.data.friendlyName}.`
+                              : `${node.name} now uses its original name.`
+                            : undefined,
+                          errorToast: false,
+                        }).friendlyName ?? null,
                       );
+                      if (result.ok) onRefresh();
                     });
                   }}
                 >
@@ -430,8 +399,11 @@ function DeviceRow({
                     name="organisationId"
                     value={node.organisation_id}
                   />
-                  <label>
-                    Friendly name
+                  <FormField
+                    label="Friendly name"
+                    hint="Shown in lists. Leave blank to use the device's own name."
+                    error={nameError}
+                  >
                     <input
                       name="friendlyName"
                       type="text"
@@ -440,10 +412,10 @@ function DeviceRow({
                       placeholder={node.name}
                       disabled={pending}
                     />
-                  </label>
-                  <button type="submit" className="secondary" disabled={pending}>
+                  </FormField>
+                  <Button type="submit" variant="secondary" loading={pending} loadingLabel="Saving…">
                     Save name
-                  </button>
+                  </Button>
                 </form>
               ) : null}
 
@@ -486,17 +458,13 @@ function DeviceRow({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const formData = new FormData(event.currentTarget);
-                    onMessage(null);
-                    startTransition(() => {
-                      void approveNodeRoutesAction(formData).then((result) => {
-                        onMessage({
-                          text: result.ok
-                            ? `${nodeLabel(node)} route approvals saved.`
-                            : result.error,
-                          error: !result.ok,
-                        });
-                        if (result.ok) onRefresh();
+                    startTransition(async () => {
+                      const result = await approveNodeRoutesAction(formData);
+                      toastResult(result, {
+                        success: "Route approvals saved",
+                        successDescription: `${nodeLabel(node)} now uses the routes you approved.`,
                       });
+                      if (result.ok) onRefresh();
                     });
                   }}
                 >

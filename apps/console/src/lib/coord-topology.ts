@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError, type DeviceTag } from "./coord";
+import { coordFetch, coordError, type DeviceTag } from "./coord";
 import type { OrgRole } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -94,7 +94,7 @@ export async function getTopology(ctx: ConsoleContext): Promise<Topology> {
     ctx,
     method: "GET",
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<Topology>;
 }
 

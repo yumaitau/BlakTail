@@ -1,5 +1,6 @@
 "use server";
 
+import { errorText } from "@/lib/server-errors";
 import { redirect } from "next/navigation";
 import {
   createDraft,
@@ -46,7 +47,7 @@ function back(path: string, params: Record<string, string>): never {
 }
 
 function failure(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return errorText(error, fallback);
 }
 
 function parseObject(raw: string, label: string): Record<string, unknown> {

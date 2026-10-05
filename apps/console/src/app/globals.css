@@ -59,7 +59,12 @@
   --cc-inactive: #4b5058;
   --cc-dot: #34373d;
 
+  /* Radii: controls 8, panels 10, dialogs and toasts 12. */
+  --radius-sm: 6px;
   --radius: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
   --font-sans:
     "Avenir Next", "Segoe UI Variable", "Segoe UI", "Helvetica Neue",
     ui-sans-serif, system-ui, sans-serif;
@@ -68,6 +73,7 @@
   --topbar-height: 60px;
   --sidebar-width: 15.5rem;
   --sidebar-rail: 4rem;
+  /* Spacing scale (4px base). Use these, not ad-hoc rem values. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -75,6 +81,49 @@
   --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Type scale (size / line height). Product UI: ~1.15 ratio, fixed px. */
+  --text-xs: 12px;
+  --text-xs-lh: 16px;
+  --text-sm: 13px;
+  --text-sm-lh: 18px;
+  --text-base: 14px;
+  --text-base-lh: 21px;
+  --text-md: 15px;
+  --text-md-lh: 22px;
+  --text-lg: 17px;
+  --text-lg-lh: 24px;
+  --text-xl: 20px;
+  --text-xl-lh: 26px;
+  --text-2xl: 24px;
+  --text-2xl-lh: 30px;
+
+  /* Borders and focus */
+  --border-width: 1px;
+  --focus-outline: 2px solid var(--ring);
+  --focus-offset: 2px;
+  --focus-ring: 0 0 0 3px rgba(232, 117, 44, 0.28);
+
+  /* Page containers and gutters. Breakpoints (media queries can't read
+     custom properties): mobile <= 800px (drawer shell), tablet 801-1024px,
+     desktop >= 1025px. */
+  --container-narrow: 40rem;
+  --container-text: 52rem;
+  --container-wide: 76rem;
+  --container-full: 100%;
+  --gutter: clamp(16px, 3vw, 40px);
+  --gutter-mobile: 16px;
+  --touch-target: 40px;
+
+  /* Layers */
+  --z-topbar: 30;
+  --z-drawer: 40;
+  --z-dialog: 50;
+  --z-toast: 70;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --motion: 160ms ease;
   color-scheme: dark;
 }
@@ -91,8 +140,8 @@ body {
 
 body {
   font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-base);
+  line-height: var(--text-base-lh);
   color: var(--foreground);
   background: var(--background);
   -webkit-font-smoothing: antialiased;
@@ -109,8 +158,8 @@ a:hover {
 }
 
 :focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-offset);
 }
 
 button,
@@ -345,11 +394,11 @@ hr {
   grid-area: top;
   position: sticky;
   top: 0;
-  z-index: 30;
+  z-index: var(--z-topbar);
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0 1rem 0 1.1rem;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
   background: var(--background);
   border-bottom: 1px solid var(--border);
 }
@@ -597,7 +646,7 @@ hr {
   grid-area: main;
   position: relative;
   min-width: 0;
-  padding: 1.75rem clamp(1rem, 3vw, 2.5rem) 3rem;
+  padding: var(--space-6) var(--gutter) var(--space-12);
 }
 
 .main:focus {
@@ -798,22 +847,39 @@ hr {
 
 .page-header {
   position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-6);
+  margin-bottom: var(--space-1);
+}
+
+.page-header-text {
   display: grid;
-  gap: 0.3rem;
-  max-width: 52rem;
-  margin-bottom: 0.25rem;
+  gap: var(--space-1);
+  max-width: var(--container-text);
+  min-width: 0;
+  flex: 1 1 24rem;
+}
+
+.page-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 .page-header h1 {
-  font-size: 24px;
+  font-size: var(--text-2xl);
   font-weight: 650;
-  line-height: 1.2;
+  line-height: var(--text-2xl-lh);
   margin: 0;
   letter-spacing: -0.005em;
 }
 
 .page-header .lead {
-  font-size: 14px;
+  font-size: var(--text-base);
   max-width: 46rem;
   margin: 0;
 }
@@ -866,9 +932,9 @@ h3,
 .panel {
   position: relative;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1.15rem 1.25rem;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
 }
 
 .panel.interactive:hover {
@@ -877,20 +943,20 @@ h3,
 
 .stack {
   display: grid;
-  gap: 1rem;
+  gap: var(--space-4);
 }
 
 .row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: var(--space-3);
   align-items: center;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.6rem;
+  gap: var(--space-2);
 }
 
 .callout {
@@ -1354,7 +1420,7 @@ details > summary {
 .confirm-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-dialog);
   display: grid;
   place-items: center;
   padding: 1rem;
@@ -2623,7 +2689,7 @@ details > summary {
   }
 
   .main {
-    padding: 1.25rem 1rem 2.5rem;
+    padding: var(--space-5) var(--gutter-mobile) var(--space-10);
   }
 
   .main-bleed {
@@ -3243,3 +3309,619 @@ a.traffic-name:hover {
   }
 }
 /* ---- end traffic events ------------------------------------------------ */
+
+/* ==========================================================================
+   UI building blocks (components/ui). Tokens live in :root above.
+   See docs/console.md "UI building blocks".
+   ========================================================================== */
+
+/* ---- Button ---- */
+.ui-button {
+  min-height: 36px;
+  position: relative;
+}
+
+.ui-button-sm {
+  min-height: 30px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+button.ghost,
+.button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--gray-300);
+}
+
+button.ghost:hover:not(:disabled),
+.button.ghost:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+  color: var(--foreground);
+}
+
+button[aria-busy="true"] {
+  cursor: progress;
+}
+
+.ui-spinner {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  opacity: 0.85;
+  animation: ui-spin 700ms linear infinite;
+}
+
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Section ---- */
+.ui-section {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.ui-section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+.ui-section-text {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 20rem;
+}
+
+.ui-section-text p {
+  margin: 0;
+  max-width: 65ch;
+}
+
+.ui-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---- Form field ---- */
+.ui-field {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.ui-field-label {
+  display: inline;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--gray-300);
+}
+
+.ui-required {
+  margin-left: 2px;
+  color: var(--primary-hover);
+}
+
+.ui-field-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--text-xs-lh);
+  color: var(--muted-foreground);
+}
+
+.ui-field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-lh);
+  color: #f0948a;
+}
+
+.ui-field-error svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.ui-field.has-error input,
+.ui-field.has-error select,
+.ui-field.has-error textarea,
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: rgba(224, 93, 79, 0.7);
+}
+
+/* ---- Alert ---- */
+.ui-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-elevated);
+}
+
+.ui-alert-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.ui-alert-body {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1;
+}
+
+.ui-alert-body p,
+.ui-alert-text {
+  margin: 0;
+}
+
+.ui-alert-title {
+  font-weight: 600;
+}
+
+.ui-alert-action {
+  flex: none;
+}
+
+.ui-alert-error {
+  border-color: rgba(224, 93, 79, 0.4);
+  background: rgba(224, 93, 79, 0.08);
+}
+
+.ui-alert-error .ui-alert-icon {
+  color: var(--destructive);
+}
+
+.ui-alert-warning {
+  border-color: rgba(215, 161, 62, 0.4);
+  background: rgba(215, 161, 62, 0.08);
+}
+
+.ui-alert-warning .ui-alert-icon {
+  color: var(--warning);
+}
+
+.ui-alert-success {
+  border-color: rgba(63, 184, 119, 0.35);
+  background: rgba(63, 184, 119, 0.07);
+}
+
+.ui-alert-success .ui-alert-icon {
+  color: var(--success);
+}
+
+.ui-alert-info .ui-alert-icon {
+  color: var(--info);
+}
+
+.ui-ref {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--text-xs-lh);
+  color: var(--muted-foreground);
+  user-select: all;
+}
+
+/* ---- Badge additions ---- */
+.badge.no-dot::before {
+  display: none;
+}
+
+.badge.info {
+  color: #a9cbea;
+  border-color: rgba(106, 165, 216, 0.35);
+  background: rgba(106, 165, 216, 0.08);
+}
+
+.badge.info::before {
+  background: var(--info);
+}
+
+/* ---- Table ---- */
+.ui-table-wrap:focus-visible {
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--radius-sm);
+}
+
+.ui-empty-row td {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+.table tbody tr.ui-empty-row:hover {
+  background: none;
+}
+
+/* ---- Empty state ---- */
+.empty-state.compact {
+  padding: var(--space-4);
+  gap: var(--space-2);
+}
+
+.empty-state .actions {
+  margin-top: var(--space-1);
+}
+
+/* ---- Skeleton ---- */
+.skeleton-line {
+  background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.04) 0%,
+      rgba(255, 255, 255, 0.09) 50%,
+      rgba(255, 255, 255, 0.04) 100%
+    )
+    0 0 / 200% 100%;
+  animation: ui-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton-title {
+  height: 1.4rem;
+}
+
+.skeleton-header {
+  gap: var(--space-2);
+}
+
+.skeleton-table {
+  gap: var(--space-3);
+}
+
+.skeleton-head {
+  height: 2rem;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: var(--space-4);
+}
+
+@keyframes ui-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* ---- Confirm dialog ---- */
+.ui-dialog {
+  width: min(30rem, calc(100vw - 2 * var(--gutter-mobile)));
+  max-height: calc(100dvh - 2 * var(--space-6));
+  padding: 0;
+  color: var(--foreground);
+  background: var(--surface-elevated);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.ui-dialog::backdrop {
+  background: rgba(8, 9, 11, 0.66);
+}
+
+.ui-dialog[open] {
+  animation: ui-dialog-in 180ms var(--ease-out);
+}
+
+@keyframes ui-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+.ui-dialog-body {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-6);
+}
+
+.ui-dialog-body h2 {
+  font-size: var(--text-lg);
+  line-height: var(--text-lg-lh);
+}
+
+.ui-dialog-description,
+.ui-dialog-description p {
+  margin: 0;
+  color: var(--gray-300);
+}
+
+.ui-dialog-actions {
+  display: flex;
+  flex-wrap: wrap-reverse;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* ---- Toasts ---- */
+/* Desktop: bottom right, clear of the left sidebar. Mobile: top, under the
+   top bar, clear of the on-screen keyboard and browser toolbars. */
+.toaster {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: var(--z-toast);
+  width: min(24rem, calc(100vw - 2 * var(--space-6)));
+  pointer-events: none;
+}
+
+.toast-region {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.toast-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-2) var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: var(--gray-800);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  animation: toast-in 200ms var(--ease-out);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.toast-icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.toast-success .toast-icon {
+  color: var(--success);
+}
+
+.toast-info .toast-icon {
+  color: var(--info);
+}
+
+.toast-warning {
+  border-color: rgba(215, 161, 62, 0.45);
+}
+
+.toast-warning .toast-icon {
+  color: var(--warning);
+}
+
+.toast-error {
+  border-color: rgba(224, 93, 79, 0.5);
+}
+
+.toast-error .toast-icon {
+  color: var(--destructive);
+}
+
+.toast-body {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.toast-message {
+  margin: 0;
+  font-weight: 600;
+}
+
+.toast-description {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--gray-300);
+}
+
+.toast-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-top: -2px;
+}
+
+@media (max-width: 800px) {
+  .toaster {
+    top: calc(var(--topbar-height) + var(--space-2));
+    bottom: auto;
+    left: var(--gutter-mobile);
+    right: var(--gutter-mobile);
+    width: auto;
+  }
+
+  .toast-close {
+    width: var(--touch-target);
+    height: var(--touch-target);
+    margin: -6px -2px -6px 0;
+  }
+
+  /* Touch targets: at least 40px on phones. */
+  .ui-button,
+  .filter-chip,
+  input:not([type="checkbox"]):not([type="radio"]),
+  select {
+    min-height: var(--touch-target);
+  }
+
+  .icon-button {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .page-header-actions {
+    width: 100%;
+  }
+
+  /* Stacked tables: each row becomes a labelled card. */
+  .table-stack thead {
+    display: none;
+  }
+
+  .table-stack,
+  .table-stack tbody,
+  .table-stack tr,
+  .table-stack td {
+    display: block;
+    width: 100%;
+  }
+
+  .table-stack tr {
+    padding: var(--space-3) 0;
+    border-bottom: var(--border-width) solid var(--border);
+  }
+
+  .table-stack td {
+    display: grid;
+    grid-template-columns: minmax(7rem, 35%) 1fr;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    border: 0;
+  }
+
+  .table-stack td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .table-stack td:not([data-label]) {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Error and not-found pages ---- */
+.status-page {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6) var(--gutter-mobile);
+  background:
+    radial-gradient(circle at 1px 1px, var(--cc-dot) 1px, transparent 0) 0 0 / 16px 16px,
+    var(--background);
+}
+
+.status-page.in-shell {
+  min-height: 60vh;
+  background: none;
+  padding: var(--space-8) 0;
+}
+
+.status-card {
+  width: min(32rem, 100%);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+}
+
+.status-card .path-motif {
+  width: 9rem;
+  height: 3.5rem;
+}
+
+.status-card h1 {
+  font-size: var(--text-xl);
+  line-height: var(--text-xl-lh);
+  margin: 0;
+}
+
+.status-card p {
+  margin: 0;
+}
+
+.status-code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+@media (max-width: 800px) {
+  .status-card {
+    padding: var(--space-6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .ui-dialog[open] {
+    animation: none;
+  }
+
+  .ui-spinner {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  .skeleton-line {
+    animation: none;
+  }
+}
+
+/* ---- Form layout ---- */
+.ui-form {
+  display: grid;
+  gap: var(--space-4);
+  max-width: var(--container-narrow);
+}
+
+.ui-form > .actions {
+  margin-top: var(--space-1);
+}
+
+.device-name-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.device-name-editor .ui-field {
+  flex: 1 1 16rem;
+  max-width: 26rem;
+}

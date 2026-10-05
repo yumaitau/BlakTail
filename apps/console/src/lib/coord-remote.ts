@@ -2,7 +2,7 @@ import "server-only";
 
 import { AssuranceError, getSignInPolicy } from "./auth-policy";
 import { stepUpRefusal } from "./auth-policy-core";
-import { coordFetch, readError } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import { writeConsoleAudit } from "./console-audit";
 import { rawSqlClient } from "./db/client";
 import { needsRemoteRevoke, postUserRevoke, type RevokeSource } from "./remote-revoke-core";
@@ -130,7 +130,7 @@ async function call<T>(
     ctx,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }

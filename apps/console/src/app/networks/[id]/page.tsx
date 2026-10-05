@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ConsoleShell } from "@/components/console-shell";
@@ -31,7 +32,7 @@ export default async function NetworkResourcePage({
   try {
     resource = await getNetworkResource(ctx, id);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load this resource.";
+    error = errorText(err, "Could not load this resource.");
   }
   if (!resource && !error) notFound();
   const canManage = can(ctx.role, "manage_networks");

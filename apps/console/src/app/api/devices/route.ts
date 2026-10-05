@@ -1,3 +1,4 @@
+import { errorText, readJsonBody } from "@/lib/server-errors";
 import { auth } from "@/lib/auth";
 import {
   approveNodeRoutes,
@@ -26,7 +27,7 @@ function errorResponse(error: unknown): Response {
     return Response.json({ error: error.message }, { status: error.status });
   }
   return Response.json(
-    { error: error instanceof Error ? error.message : "Device request failed." },
+    { error: errorText(error, "Device request failed.") },
     { status: 400 },
   );
 }
@@ -55,7 +56,7 @@ export async function PATCH(request: Request): Promise<Response> {
     if (!person) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const nodeId = typeof body.nodeId === "string" ? body.nodeId : "";
@@ -104,7 +105,7 @@ export async function DELETE(request: Request): Promise<Response> {
     if (!person) {
       return Response.json({ error: "Authentication required." }, { status: 401 });
     }
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const organisationId =
       typeof body.organisationId === "string" ? body.organisationId : "";
     const nodeId = typeof body.nodeId === "string" ? body.nodeId : "";

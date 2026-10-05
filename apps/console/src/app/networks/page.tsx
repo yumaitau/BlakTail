@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
 import { EmptyState } from "@/components/empty-state";
@@ -32,7 +33,7 @@ export default async function NetworksPage() {
   try {
     overview = await listNetworks(ctx);
   } catch (err) {
-    error = err instanceof Error ? err.message : "Could not load networks.";
+    error = errorText(err, "Could not load networks.");
   }
   const canManage = can(ctx.role, "manage_networks");
   const peerName = (id: string | null) =>

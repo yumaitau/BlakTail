@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { ConsoleContext } from "./session";
-import { coordFetch, type DeviceTag } from "./coord";
+import { coordFetch, coordError, type DeviceTag } from "./coord";
 import type { OrgRole } from "./roles";
 
 export type ResourceProtocol = "tcp" | "udp" | "icmp";
@@ -146,18 +146,8 @@ async function networksFetch(
   });
 }
 
-async function readError(res: Response): Promise<string> {
-  try {
-    const body = (await res.json()) as { error?: string };
-    if (body.error) return body.error;
-  } catch {
-    /* ignore */
-  }
-  return `Coordinator returned ${res.status}`;
-}
-
 async function expectJson<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
   return res.json() as Promise<T>;
 }
 
@@ -205,7 +195,7 @@ export async function deleteNetworkResource(
     method: "DELETE",
     headers: { "if-match": `"${etag}"` },
   });
-  if (!res.ok) throw new Error(await readError(res));
+  if (!res.ok) throw await coordError(res);
 }
 
 /** Converts a stored resource back into a full-replacement PUT body. */

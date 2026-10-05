@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch, readError, type DeviceTag } from "./coord";
+import { coordFetch, coordError, type DeviceTag } from "./coord";
 import { can } from "./roles";
 import type { ConsoleContext } from "./session";
 
@@ -96,7 +96,7 @@ export async function listServices(
 ): Promise<ServiceWorkspace> {
   const res = await coordFetch(servicesPath(ctx), { method: "GET", ctx });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<ServiceWorkspace>;
 }
@@ -111,7 +111,7 @@ export async function previewService(
     body: JSON.stringify(input),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<ServicePreview>;
 }
@@ -127,7 +127,7 @@ export async function createService(
     body: JSON.stringify(input),
   });
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<PrivateService>;
 }
@@ -148,7 +148,7 @@ export async function updateService(
     );
   }
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
   return res.json() as Promise<PrivateService>;
 }
@@ -163,6 +163,6 @@ export async function deleteService(
     { method: "DELETE", ctx },
   );
   if (!res.ok) {
-    throw new Error(await readError(res));
+    throw await coordError(res);
   }
 }

@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
@@ -34,9 +35,7 @@ export async function GET() {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Could not resolve this session.",
+          errorText(error, "Could not resolve this session."),
       },
       { status: 403 },
     );

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { coordFetch } from "./coord";
+import { coordFetch, coordError } from "./coord";
 import type { ConsoleContext } from "./session";
 
 export type ProviderKind = "intune" | "crowdstrike" | "sentinelone" | "fleetdm" | "huntress";
@@ -116,14 +116,7 @@ async function request<T>(ctx: ConsoleContext, path: string, init: RequestInit =
     ctx,
   });
   if (!res.ok) {
-    let message = `Coordinator returned ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) message = body.error;
-    } catch {
-      /* keep status message */
-    }
-    throw new Error(message);
+    throw await coordError(res);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

@@ -1,3 +1,4 @@
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -45,7 +46,7 @@ export default async function OperationsPage() {
         getConsoleOperations(ctx),
       ]);
     } catch (err) {
-      error = err instanceof Error ? err.message : "Could not load operator health.";
+      error = errorText(err, "Could not load operator health.");
     }
   }
 

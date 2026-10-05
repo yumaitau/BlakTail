@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/server-errors";
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
@@ -30,7 +31,7 @@ function errorResponse(error: unknown): Response {
 export async function POST(request: Request): Promise<Response> {
   try {
     assertSameOrigin(request);
-    const body = (await request.json()) as Record<string, unknown>;
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
     const token = typeof body.token === "string" ? body.token : "";
     const tokenKey = createHash("sha256").update(token).digest("hex");
     await consumeRateLimit(
