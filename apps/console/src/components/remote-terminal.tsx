@@ -5,6 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { startRemoteSessionAction, type StartedSession } from "@/app/remote-access/actions";
+import { Alert } from "./ui/alert";
+import { Button } from "./ui/button";
+import { FormField } from "./ui/form-field";
 
 type Phase = "idle" | "requesting" | "connecting" | "connected" | "closed";
 
@@ -182,9 +185,14 @@ export function RemoteTerminal({
       <p className="muted">
         {organisationName} · {roleName}
       </p>
+      {disabledReason ? (
+        <Alert tone="info" title="A session can't start yet">
+          {disabledReason}
+        </Alert>
+      ) : null}
       {phase === "idle" || phase === "requesting" || phase === "closed" ? (
         <form
-          className="stack"
+          className="ui-form"
           aria-label={`Open an SSH session to ${deviceName}`}
           onSubmit={(event) => {
             event.preventDefault();
@@ -207,53 +215,55 @@ export function RemoteTerminal({
           <input type="hidden" name="organisationId" value={organisationId} />
           <input type="hidden" name="nodeId" value={nodeId} />
           <input type="hidden" name="kind" value="ssh" />
-          <label>
-            Log in as (OS account)
-            <input
-              name="osUser"
-              required
-              autoComplete="off"
-              spellCheck={false}
-              pattern="[A-Za-z_][A-Za-z0-9._-]{0,31}"
-              placeholder="deploy"
-              disabled={disabledReason !== null}
-            />
-          </label>
-          <label>
-            Reason for access (recorded in the audit log)
+          <div className="ui-form-grid">
+            <FormField label="Log in as" hint="The account on the device, e.g. deploy." required>
+              <input
+                name="osUser"
+                className="mono"
+                autoComplete="off"
+                spellCheck={false}
+                pattern="[A-Za-z_][A-Za-z0-9._-]{0,31}"
+                placeholder="deploy"
+                disabled={disabledReason !== null}
+              />
+            </FormField>
+            <FormField label="Session length" hint="Minutes, up to 30." className="field-xs">
+              <input
+                name="durationMinutes"
+                type="number"
+                min={1}
+                max={30}
+                defaultValue={30}
+                disabled={disabledReason !== null}
+              />
+            </FormField>
+          </div>
+          <FormField label="Reason for access" hint="Recorded in the audit log." required>
             <input
               name="reason"
-              required
               minLength={4}
               maxLength={200}
               placeholder="Restart the stock service after the update"
               disabled={disabledReason !== null}
             />
-          </label>
-          <label>
-            Session length (minutes, up to 30)
-            <input
-              name="durationMinutes"
-              type="number"
-              min={1}
-              max={30}
-              defaultValue={30}
+          </FormField>
+          <div className="ui-form-actions">
+            <Button
+              type="submit"
               disabled={disabledReason !== null}
-            />
-          </label>
-          <div className="row">
-            <button type="submit" disabled={disabledReason !== null || phase === "requesting"}>
-              {phase === "requesting" ? "Requesting…" : phase === "closed" ? "Start a new session" : "Open terminal"}
-            </button>
+              loading={phase === "requesting"}
+              loadingLabel="Requesting…"
+            >
+              {phase === "closed" ? "Start a new session" : "Open terminal"}
+            </Button>
           </div>
-          {disabledReason ? <p className="muted">{disabledReason}</p> : null}
         </form>
       ) : null}
       {live ? (
         <div className="row">
-          <button ref={endButton} type="button" className="danger" onClick={end}>
+          <Button ref={endButton} variant="danger" onClick={end}>
             End session
-          </button>
+          </Button>
           <span className="muted">
             Ctrl+Alt+E moves focus out of the terminal. Copy and paste use your browser&apos;s clipboard; file transfer is off.
           </span>
@@ -277,9 +287,9 @@ export function RemoteTerminal({
         </p>
       ) : null}
       {error ? (
-        <p className="error" role="alert">
+        <Alert tone="error" title="The session didn't start">
           {error}
-        </p>
+        </Alert>
       ) : null}
     </div>
   );

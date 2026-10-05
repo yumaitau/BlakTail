@@ -8,7 +8,17 @@ import {
   startRenumberAction,
 } from "@/app/networks/actions";
 import type { RenumberMove, RenumberPlan, RenumberPreview } from "@/lib/coord-ipam";
-import { permissionReason, roleLabel, type OrgRole } from "@/lib/roles";
+import { permissionReason, type OrgRole } from "@/lib/roles";
+import { Alert } from "./ui/alert";
+import { StatusPill } from "./ui/badge";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { LocalTime } from "./ui/local-time";
+import { MonoValue } from "./ui/mono-value";
+import { PermissionNotice } from "./ui/permission-notice";
+import { Table, Td } from "./ui/table";
+import { toastResult } from "./ui/toast";
 
 export type RenumberDevice = { nodeId: string; name: string; address: string };
 
@@ -18,26 +28,28 @@ function addresses(list: string[]): string {
 
 function MovesTable({ moves }: { moves: RenumberMove[] }) {
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Device</th>
-            <th>Current</th>
-            <th>New</th>
+    <Table label="Address moves" mobile="stack">
+      <thead>
+        <tr>
+          <th>Device</th>
+          <th>Current</th>
+          <th>New</th>
+        </tr>
+      </thead>
+      <tbody>
+        {moves.map((move) => (
+          <tr key={move.node_id}>
+            <Td label="Device">{move.name}</Td>
+            <Td label="Current">
+              <MonoValue value={addresses(move.old_addresses)} wrap />
+            </Td>
+            <Td label="New">
+              <MonoValue value={addresses(move.new_addresses)} wrap />
+            </Td>
           </tr>
-        </thead>
-        <tbody>
-          {moves.map((move) => (
-            <tr key={move.node_id}>
-              <td>{move.name}</td>
-              <td className="mono">{addresses(move.old_addresses)}</td>
-              <td className="mono">{addresses(move.new_addresses)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+        ))}
+      </tbody>
+    </Table>
   );
 }
 
@@ -84,17 +96,16 @@ function PreviewSummary({ preview }: { preview: RenumberPreview }) {
       </ul>
       {preview.moves.length ? <MovesTable moves={preview.moves} /> : null}
       {preview.blockers.length ? (
-        <div className="stack" role="alert">
-          <p className="error">This plan cannot start until these are fixed:</p>
+        <Alert tone="error" title="This plan can't start until these are fixed">
           <ul className="stack">
             {preview.blockers.map((blocker) => (
               <li key={`${blocker.kind}:${blocker.detail}`}>
-                <span className="badge warn">{blocker.kind.replaceAll("_", " ")}</span>{" "}
+                <StatusPill tone="danger">{blocker.kind.replaceAll("_", " ")}</StatusPill>{" "}
                 {blocker.detail}
               </li>
             ))}
           </ul>
-        </div>
+        </Alert>
       ) : null}
     </div>
   );
@@ -102,7 +113,6 @@ function PreviewSummary({ preview }: { preview: RenumberPreview }) {
 
 export function RenumberPlanForm({
   organisationId,
-  organisationName,
   role,
   currentPool,
   prefixRange,
@@ -111,7 +121,6 @@ export function RenumberPlanForm({
   devices,
 }: {
   organisationId: string;
-  organisationName: string;
   role: OrgRole;
   currentPool: string;
   prefixRange: [number, number];
@@ -122,12 +131,14 @@ export function RenumberPlanForm({
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
   const [pending, startTransition] = useTransition();
+  const [busy, setBusy] = useState<"preview" | "start" | null>(null);
   const [mode, setMode] = useState<"pool" | "devices">("pool");
   const [preview, setPreview] = useState<RenumberPreview | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const denied = permissionReason(role, "manage_networks");
-  const disabled = Boolean(denied) || pending;
   const [widest, narrowest] = prefixRange;
+  if (denied) return <PermissionNotice reason={denied} />;
 
   const formData = () => {
     const data = new FormData(formRef.current ?? undefined);
@@ -136,170 +147,220 @@ export function RenumberPlanForm({
     return data;
   };
 
-  return (
-    <form
-      ref={formRef}
-      className="stack"
-      // Any edit invalidates the preview, so Start always matches what was shown.
-      onChange={() => setPreview(null)}
-      onSubmit={(event) => {
-        event.preventDefault();
-        setError(null);
-        const data = formData();
-        startTransition(async () => {
-          const result = await previewRenumberAction(data);
-          if (!result.ok) setError(result.error);
-          else setPreview(result.data);
-        });
-      }}
-    >
-      <div className="row">
-        <h3>Plan a renumber</h3>
-        <span className="badge network">{organisationName}</span>
-        <span className="muted">Acting as {roleLabel(role)}</span>
-      </div>
-      <fieldset className="stack" disabled={disabled}>
-        <legend>What changes</legend>
-        <label>
-          <input
-            type="radio"
-            name="modeChoice"
-            checked={mode === "pool"}
-            onChange={() => setMode("pool")}
-          />{" "}
-          Change the IPv4 pool (grow it, or move to another range)
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="modeChoice"
-            checked={mode === "devices"}
-            onChange={() => setMode("devices")}
-          />{" "}
-          Move selected devices to new addresses
-        </label>
-      </fieldset>
-      {mode === "pool" ? (
-        <label>
-          New IPv4 pool
-          <input
-            name="pool"
-            required
-            className="mono"
-            placeholder={currentPool}
-            disabled={disabled}
-          />
-          <span className="muted">
-            A /{narrowest} to /{widest} inside 100.64.0.0/10. Growing{" "}
-            <span className="mono">{currentPool}</span> to a larger pool that contains it
-            moves nobody.
-          </span>
-        </label>
-      ) : (
-        <fieldset className="stack" disabled={disabled}>
-          <legend>Devices to move</legend>
-          {devices.length === 0 ? (
-            <p className="muted">No active device to move.</p>
-          ) : (
-            devices.map((device) => (
-              <div className="row" key={device.nodeId}>
-                <label>
-                  <input type="checkbox" name="device" value={device.nodeId} /> {device.name}{" "}
-                  <span className="mono muted">{device.address}</span>
-                </label>
-                <label>
-                  New address (optional)
-                  <input
-                    name={`address:${device.nodeId}`}
-                    className="mono"
-                    inputMode="decimal"
-                    placeholder="Reservation or next free"
-                  />
-                </label>
-              </div>
-            ))
-          )}
-        </fieldset>
-      )}
-      <label>
-        Dual-address window (hours)
-        <input
-          name="windowHours"
-          type="number"
-          min={minWindowSeconds / 3600}
-          max={720}
-          step="any"
-          defaultValue={defaultWindowSeconds / 3600}
-          disabled={disabled}
-        />
-        <span className="muted">
-          Moved devices keep their old address as well until you complete the plan or the
-          window ends. You can roll back until then.
-        </span>
-      </label>
-      <label>
-        Reason
-        <input name="reason" maxLength={256} disabled={disabled} />
-      </label>
-      <div className="actions">
-        <button type="submit" className="secondary" disabled={disabled} title={denied ?? undefined}>
-          {pending && !preview ? "Checking…" : "Preview impact"}
-        </button>
-        <button
-          type="button"
-          disabled={disabled || !preview || preview.blockers.length > 0}
-          title={denied ?? (preview ? undefined : "Preview the plan first")}
-          onClick={() => {
-            setError(null);
-            const data = formData();
-            startTransition(async () => {
-              const result = await startRenumberAction(data);
-              if (!result.ok) {
-                setError(result.error);
-                return;
-              }
-              setPreview(null);
-              formRef.current?.reset();
-              router.refresh();
-            });
-          }}
-        >
-          {preview && preview.moves.length === 0 ? "Apply pool change" : "Start renumber"}
-        </button>
-      </div>
-      {denied ? <p className="muted">{denied}</p> : null}
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {preview ? <PreviewSummary preview={preview} /> : null}
-    </form>
-  );
-}
+  const start = () => {
+    const data = formData();
+    setBusy("start");
+    startTransition(async () => {
+      const result = await startRenumberAction(data);
+      setBusy(null);
+      setConfirming(false);
+      toastResult(result, {
+        success: preview && preview.moves.length === 0 ? "Pool changed" : "Renumber started",
+        successDescription:
+          preview && preview.moves.length > 0
+            ? "Moved devices answer on both addresses until you complete or roll back."
+            : undefined,
+      });
+      if (!result.ok) return;
+      setPreview(null);
+      formRef.current?.reset();
+      router.refresh();
+    });
+  };
 
-function when(at: number): string {
-  return new Date(at * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Australia/Sydney",
-  });
+  return (
+    <>
+      <form
+        ref={formRef}
+        className="ui-form wide"
+        noValidate
+        // Any edit invalidates the preview, so Start always matches what was shown.
+        onChange={() => setPreview(null)}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const data = formData();
+          if (mode === "pool" && !String(data.get("pool") ?? "").trim()) {
+            setFieldErrors({ pool: "Enter the new IPv4 pool, such as 100.64.0.0/16." });
+            formRef.current?.querySelector<HTMLInputElement>('[name="pool"]')?.focus();
+            return;
+          }
+          setFieldErrors({});
+          setBusy("preview");
+          startTransition(async () => {
+            const result = await previewRenumberAction(data);
+            setBusy(null);
+            if (!result.ok) {
+              setFieldErrors(toastResult(result, { errorToast: true }));
+              return;
+            }
+            setPreview(result.data);
+          });
+        }}
+      >
+        <fieldset className="ui-fieldset" disabled={pending}>
+          <legend>What changes</legend>
+          <div className="ui-choices vertical">
+            <label>
+              <input
+                type="radio"
+                name="modeChoice"
+                checked={mode === "pool"}
+                onChange={() => setMode("pool")}
+              />
+              Change the IPv4 pool (grow it, or move to another range)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="modeChoice"
+                checked={mode === "devices"}
+                onChange={() => setMode("devices")}
+              />
+              Move selected devices to new addresses
+            </label>
+          </div>
+        </fieldset>
+        {mode === "pool" ? (
+          <FormField
+            label="New IPv4 pool"
+            required
+            error={fieldErrors.pool}
+            className="field-sm"
+            hint={
+              <>
+                A /{narrowest} to /{widest} inside 100.64.0.0/10. Growing{" "}
+                <span className="mono">{currentPool}</span> to a larger pool that contains it moves
+                nobody.
+              </>
+            }
+          >
+            <input
+              name="pool"
+              className="mono"
+              placeholder={currentPool}
+              autoComplete="off"
+              disabled={pending}
+            />
+          </FormField>
+        ) : (
+          <fieldset className="ui-fieldset" disabled={pending}>
+            <legend>Devices to move</legend>
+            {devices.length === 0 ? (
+              <p className="ui-field-hint">No active device to move.</p>
+            ) : (
+              <Table label="Devices to move" mobile="stack">
+                <thead>
+                  <tr>
+                    <th>Move</th>
+                    <th>Device</th>
+                    <th>New address</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {devices.map((device) => (
+                    <tr key={device.nodeId}>
+                      <Td label="Move">
+                        <input
+                          type="checkbox"
+                          name="device"
+                          value={device.nodeId}
+                          aria-label={`Move ${device.name}`}
+                        />
+                      </Td>
+                      <Td label="Device">
+                        <div>
+                          {device.name}
+                          <div className="cell-sub mono">{device.address}</div>
+                        </div>
+                      </Td>
+                      <Td label="New address">
+                        <input
+                          name={`address:${device.nodeId}`}
+                          className="mono"
+                          inputMode="decimal"
+                          placeholder="Reservation or next free"
+                          aria-label={`New address for ${device.name} (optional)`}
+                        />
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </fieldset>
+        )}
+        <FormField
+          label="Dual-address window (hours)"
+          className="field-md"
+          hint="Moved devices keep their old address too until you complete the plan or the window ends. You can roll back until then."
+        >
+          <input
+            name="windowHours"
+            type="number"
+            min={minWindowSeconds / 3600}
+            max={720}
+            step="any"
+            defaultValue={defaultWindowSeconds / 3600}
+            disabled={pending}
+          />
+        </FormField>
+        <FormField label="Reason" hint="Recorded in the plan history." className="field-lg">
+          <input name="reason" maxLength={256} disabled={pending} />
+        </FormField>
+        {preview ? <PreviewSummary preview={preview} /> : null}
+        <div className="ui-form-actions">
+          {preview ? (
+            <Button
+              disabled={pending || preview.blockers.length > 0}
+              loading={busy === "start"}
+              loadingLabel="Starting…"
+              onClick={() => setConfirming(true)}
+            >
+              {preview.moves.length === 0 ? "Apply pool change" : "Start renumber"}
+            </Button>
+          ) : null}
+          <Button
+            type="submit"
+            variant={preview ? "secondary" : "primary"}
+            loading={busy === "preview"}
+            loadingLabel="Checking…"
+            disabled={pending}
+          >
+            {preview ? "Preview again" : "Preview impact"}
+          </Button>
+        </div>
+      </form>
+      <ConfirmDialog
+        open={confirming}
+        tone="primary"
+        title={preview && preview.moves.length === 0 ? "Apply the pool change?" : "Start this renumber?"}
+        description={
+          preview && preview.moves.length > 0
+            ? `${preview.moves.length} device${preview.moves.length === 1 ? "" : "s"} get a new address. MagicDNS switches straight away; old addresses keep working until the window ends.`
+            : "No device changes address. The pool change applies at once."
+        }
+        confirmLabel={preview && preview.moves.length === 0 ? "Apply change" : "Start renumber"}
+        pending={busy === "start"}
+        onCancel={() => setConfirming(false)}
+        onConfirm={start}
+      />
+    </>
+  );
 }
 
 export function StagedRenumber({
   organisationId,
-  organisationName,
   role,
   plan,
 }: {
   organisationId: string;
-  organisationName: string;
   role: OrgRole;
   plan: RenumberPlan;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"complete" | "rollback" | null>(null);
+  const [confirmRollback, setConfirmRollback] = useState(false);
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const denied = permissionReason(role, "manage_networks");
 
@@ -312,16 +373,24 @@ export function StagedRenumber({
   const remainingMinutes = Math.max(Math.ceil((plan.window_ends_at - nowSeconds) / 60), 0);
 
   const finish = (how: "complete" | "rollback") => {
-    setError(null);
     const data = new FormData();
     data.set("organisationId", organisationId);
     data.set("planId", plan.id);
     data.set("etag", plan.etag);
     data.set("how", how);
+    setBusy(how);
     startTransition(async () => {
       const result = await finishRenumberAction(data);
-      if (!result.ok) setError(result.error);
-      else router.refresh();
+      setBusy(null);
+      setConfirmRollback(false);
+      toastResult(result, {
+        success: how === "complete" ? "Renumber completed" : "Renumber rolled back",
+        successDescription:
+          how === "complete"
+            ? "Old addresses now wait out the reuse grace period."
+            : "Every moved device is back on its old address.",
+      });
+      if (result.ok) router.refresh();
     });
   };
 
@@ -329,9 +398,7 @@ export function StagedRenumber({
     <div className="stack">
       <div className="row">
         <h3>Renumber in progress</h3>
-        <span className="badge pending">Dual-address window</span>
-        <span className="badge network">{organisationName}</span>
-        <span className="muted">Acting as {roleLabel(role)}</span>
+        <StatusPill tone="warning">Dual-address window</StatusPill>
       </div>
       <p>
         {plan.kind === "pool" ? (
@@ -341,48 +408,51 @@ export function StagedRenumber({
           </>
         ) : null}
         {plan.moves.length} device{plan.moves.length === 1 ? "" : "s"} answer on both addresses
-        until {when(plan.window_ends_at)}; MagicDNS already returns the new ones.
+        until <LocalTime value={plan.window_ends_at} />; MagicDNS already returns the new ones.
         {plan.reason ? ` Reason: ${plan.reason}.` : null}
       </p>
-      <label>
-        Window elapsed
-        <progress max={plan.window_seconds} value={elapsed} />
-        <span className="muted">
-          {remainingMinutes > 0
+      <FormField
+        label="Window elapsed"
+        hint={
+          remainingMinutes > 0
             ? `${remainingMinutes >= 120 ? `${Math.round(remainingMinutes / 60)} hours` : `${remainingMinutes} minutes`} left; it completes automatically at the end.`
-            : "Window ended; the coordinator completes it on the next device check-in."}
-        </span>
-      </label>
+            : "Window ended; the coordinator completes it on the next device check-in."
+        }
+        className="field-lg"
+      >
+        <progress max={plan.window_seconds} value={elapsed} />
+      </FormField>
       <MovesTable moves={plan.moves} />
-      <div className="actions">
-        <button
-          type="button"
-          disabled={Boolean(denied) || pending}
-          title={denied ?? undefined}
-          onClick={() => finish("complete")}
-        >
-          {pending ? "Working…" : "Complete now"}
-        </button>
-        <button
-          type="button"
-          className="quiet-danger"
-          disabled={Boolean(denied) || pending}
-          title={denied ?? undefined}
-          onClick={() => finish("rollback")}
-        >
-          Roll back
-        </button>
-      </div>
       <p className="muted">
         Complete once devices work on their new address; the old address then waits out the
         reuse grace period. Roll back returns every moved device to its old address.
       </p>
-      {denied ? <p className="muted">{denied}</p> : null}
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      ) : null}
+      {denied ? (
+        <PermissionNotice reason={denied} />
+      ) : (
+        <div className="ui-form-actions">
+          <Button
+            disabled={pending}
+            loading={busy === "complete"}
+            loadingLabel="Completing…"
+            onClick={() => finish("complete")}
+          >
+            Complete now
+          </Button>
+          <Button variant="quiet-danger" disabled={pending} onClick={() => setConfirmRollback(true)}>
+            Roll back
+          </Button>
+        </div>
+      )}
+      <ConfirmDialog
+        open={confirmRollback}
+        title="Roll back this renumber?"
+        description="Every moved device returns to its old address, and MagicDNS switches back."
+        confirmLabel="Roll back"
+        pending={busy === "rollback"}
+        onCancel={() => setConfirmRollback(false)}
+        onConfirm={() => finish("rollback")}
+      />
     </div>
   );
 }

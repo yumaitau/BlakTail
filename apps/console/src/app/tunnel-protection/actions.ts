@@ -8,7 +8,9 @@ import { putPqPolicy, type PqMode, type PqRule } from "@/lib/coord-pq";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
-export type PqActionResult = { ok: true; message: string } | { ok: false; error: string };
+export type PqActionResult =
+  | { ok: true; message: string }
+  | { ok: false; error: string; ref?: string; fieldErrors?: Record<string, string> };
 
 const MODES: PqMode[] = ["off", "prefer", "require"];
 const TAGS: DeviceTag[] = ["office", "ranger", "store"];
@@ -46,6 +48,10 @@ export async function savePqPolicyAction(formData: FormData): Promise<PqActionRe
     const newA = tag(formData.get("new_a"));
     const newB = tag(formData.get("new_b"));
     const newMode = mode(formData.get("new_mode"));
+    if ((newA || newB) && !(newA && newB)) {
+      const error = "Choose both tags for the new rule, or set both to None.";
+      return { ok: false, error, fieldErrors: { [newA ? "new_b" : "new_a"]: error } };
+    }
     if (newA && newB && newMode) rules.push({ tags: [newA, newB], mode: newMode });
     const saved = await putPqPolicy(ctx, {
       mode: defaultMode,

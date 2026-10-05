@@ -1,6 +1,6 @@
 "use server";
 
-import { errorText } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import type { DeviceTag } from "@/lib/coord";
@@ -17,8 +17,35 @@ import { requireConsoleContext } from "@/lib/session";
 
 const DEVICE_TAGS: readonly DeviceTag[] = ["office", "ranger", "store"];
 
-function message(error: unknown, fallback: string): string {
-  return errorText(error, fallback);
+const SERVICE_FIELDS = {
+  name: ["name"],
+  port: ["port"],
+  targetNodeId: ["target"],
+  description: ["description"],
+};
+
+function failure(error: unknown, fallback: string): ActionFailure {
+  return actionFailure(error, fallback, "services", { fields: SERVICE_FIELDS });
+}
+
+function invalid(field: string, error: string): ActionFailure {
+  return { ok: false, error, fieldErrors: { [field]: error } };
+}
+
+/** Catches obvious gaps before asking the coordinator. */
+function checkInput(input: ServiceInput): ActionFailure | null {
+  if (!input.name) return invalid("name", "Give the service a name.");
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/u.test(input.name) || input.name.length < 3 || input.name.length > 63) {
+    return invalid(
+      "name",
+      "Use 3 to 63 lowercase letters, digits or hyphens, starting and ending with a letter or digit.",
+    );
+  }
+  if (!input.target_node_id) return invalid("targetNodeId", "Choose the device that serves it.");
+  if (input.port < 1 || input.port > 65535) {
+    return invalid("port", "Enter a port from 1 to 65535.");
+  }
+  return null;
 }
 
 function readInput(formData: FormData): ServiceInput {
@@ -42,9 +69,12 @@ export async function previewServiceAction(
 ): Promise<ActionResult<ServicePreview>> {
   try {
     const ctx = await requireConsoleContext();
-    return { ok: true, data: await previewService(ctx, readInput(formData)) };
+    const input = readInput(formData);
+    const problem = checkInput(input);
+    if (problem) return problem;
+    return { ok: true, data: await previewService(ctx, input) };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not preview this service.") };
+    return failure(error, "Could not preview this service.");
   }
 }
 
@@ -54,11 +84,14 @@ export async function createServiceAction(formData: FormData): Promise<ActionRes
     if (!can(ctx.role, "manage_services")) {
       return { ok: false, error: "Only owners and admins can create private services." };
     }
-    await createService(ctx, readInput(formData));
+    const input = readInput(formData);
+    const problem = checkInput(input);
+    if (problem) return problem;
+    await createService(ctx, input);
     revalidatePath("/services");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not create this service.") };
+    return failure(error, "Could not create this service.");
   }
 }
 
@@ -76,7 +109,7 @@ export async function setServiceEnabledAction(
     revalidatePath("/services");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not update this service.") };
+    return failure(error, "Could not update this service.");
   }
 }
 
@@ -90,6 +123,6 @@ export async function deleteServiceAction(serviceId: string): Promise<ActionResu
     revalidatePath("/services");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not delete this service.") };
+    return failure(error, "Could not delete this service.");
   }
 }

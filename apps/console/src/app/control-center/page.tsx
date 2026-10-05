@@ -1,12 +1,59 @@
-import { errorText } from "@/lib/server-errors";
+import { Suspense } from "react";
 import Link from "next/link";
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { ControlCenter } from "@/components/control-center/control-center";
+import { Alert } from "@/components/ui/alert";
+import { Skeleton } from "@/components/ui/skeleton";
 import { getTopology, type Topology } from "@/lib/coord-topology";
-import { requireConsoleContext, requireOrganisationContext } from "@/lib/session";
+import {
+  requireConsoleContext,
+  requireOrganisationContext,
+  type ConsoleContext,
+} from "@/lib/session";
 
 function one(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+type Initial = {
+  tab?: string;
+  device?: string;
+  selector?: string;
+  network?: string;
+  view?: string;
+};
+
+async function Graph({ ctx, initial }: { ctx: ConsoleContext; initial: Initial }) {
+  let topology: Topology | null = null;
+  let error: string | null = null;
+  try {
+    topology = await getTopology(ctx);
+  } catch (err) {
+    error = errorText(err, "Could not load the topology.");
+  }
+  if (!topology) {
+    return (
+      <div className="cc-error">
+        <Alert
+          tone="error"
+          title="The Control Center couldn't reach the coordinator"
+          action={
+            <Link className="button secondary" href="/status">
+              Check status
+            </Link>
+          }
+        >
+          <p>{error}</p>
+          <p>
+            Devices that are already connected keep working without the coordinator. Reload this
+            page in a moment.
+          </p>
+        </Alert>
+      </div>
+    );
+  }
+  return <ControlCenter topology={topology} initial={initial} />;
 }
 
 export default async function ControlCenterPage({
@@ -20,39 +67,26 @@ export default async function ControlCenterPage({
   const ctx = organisation
     ? await requireOrganisationContext(organisation)
     : await requireConsoleContext();
-
-  let topology: Topology | null = null;
-  let error: string | null = null;
-  try {
-    topology = await getTopology(ctx);
-  } catch (err) {
-    error = errorText(err, "Could not load the topology.");
-  }
+  const initial: Initial = {
+    tab: one(params.tab),
+    device: one(params.device),
+    selector: one(params.selector),
+    network: one(params.network),
+    view: one(params.view),
+  };
 
   return (
     <ConsoleShell ctx={ctx} current="/control-center" bleed>
       <h1 className="visually-hidden">Control Center</h1>
-      {topology ? (
-        <ControlCenter
-          topology={topology}
-          initial={{
-            tab: one(params.tab),
-            device: one(params.device),
-            selector: one(params.selector),
-            network: one(params.network),
-            view: one(params.view),
-          }}
-        />
-      ) : (
-        <div className="cc-error panel" role="alert">
-          <h2>Coordinator unavailable</h2>
-          <p className="error">{error}</p>
-          <p className="muted">
-            This says nothing about whether devices can still reach each other; existing tunnels
-            keep working without the coordinator. See <Link href="/status">Status</Link>.
-          </p>
-        </div>
-      )}
+      <Suspense
+        fallback={
+          <div className="cc-loading">
+            <Skeleton lines={4} label="Loading the Control Center" />
+          </div>
+        }
+      >
+        <Graph ctx={ctx} initial={initial} />
+      </Suspense>
     </ConsoleShell>
   );
 }

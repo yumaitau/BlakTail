@@ -1,6 +1,6 @@
 "use server";
 
-import { errorText } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import {
@@ -19,8 +19,17 @@ import { requireConsoleContext } from "@/lib/session";
 
 const OWNER_ONLY = "Only owners can publish services to the Internet.";
 
-function message(error: unknown, fallback: string): string {
-  return errorText(error, fallback);
+const ROUTE_FIELDS = {
+  fqdn: ["fqdn", "hostname"],
+  confirmFqdn: ["confirm"],
+  allowedDomains: ["email domain"],
+  allowedSources: ["cidr", "source"],
+  abuseContact: ["abuse", "contact"],
+  port: ["port"],
+};
+
+function failure(error: unknown, fallback: string): ActionFailure {
+  return actionFailure(error, fallback, "ingress", { fields: ROUTE_FIELDS });
 }
 
 function int(formData: FormData, name: string, fallback: number): number {
@@ -73,7 +82,7 @@ export async function setIngressEnabledAction(formData: FormData): Promise<Actio
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not change public ingress.") };
+    return failure(error, "Could not change public ingress.");
   }
 }
 
@@ -90,7 +99,7 @@ export async function setIngressDesignationAction(
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not change the ingress designation.") };
+    return failure(error, "Could not change the ingress designation.");
   }
 }
 
@@ -100,11 +109,19 @@ export async function createRouteAction(formData: FormData): Promise<ActionResul
     if (!can(ctx.role, "manage_public_ingress")) {
       return { ok: false, error: OWNER_ONLY };
     }
-    await createRoute(ctx, readRoute(formData));
+    const input = readRoute(formData);
+    if (!input.fqdn) {
+      return { ok: false, error: "Enter the public hostname.", fieldErrors: { fqdn: "Enter the public hostname." } };
+    }
+    if (input.confirm_fqdn.toLowerCase().replace(/\.$/u, "") !== input.fqdn.toLowerCase().replace(/\.$/u, "")) {
+      const error = "Type the same hostname again to confirm.";
+      return { ok: false, error, fieldErrors: { confirmFqdn: error } };
+    }
+    await createRoute(ctx, input);
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not publish this route.") };
+    return failure(error, "Could not publish this route.");
   }
 }
 
@@ -127,7 +144,7 @@ export async function setRouteEnabledAction(
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not change this route.") };
+    return failure(error, "Could not change this route.");
   }
 }
 
@@ -141,7 +158,7 @@ export async function deleteRouteAction(routeId: string): Promise<ActionResult> 
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not delete this route.") };
+    return failure(error, "Could not delete this route.");
   }
 }
 
@@ -158,6 +175,6 @@ export async function emergencyDisableAction(
     revalidatePath("/ingress");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not disable this route.") };
+    return failure(error, "Could not disable this route.");
   }
 }

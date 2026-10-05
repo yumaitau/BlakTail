@@ -13,9 +13,12 @@ import type { AclPerson } from "@/lib/acl";
 import type { NetworkNode } from "@/lib/coord";
 import { can, isOrgRole, roleLabel } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
+import { Badge, StatusPill, type BadgeTone } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
 import { FormField } from "./ui/form-field";
+import { MonoValue } from "./ui/mono-value";
+import { Table } from "./ui/table";
 import { toastResult } from "./ui/toast";
 
 type StatusFilter = "all" | "online" | "offline" | "attention";
@@ -26,15 +29,15 @@ function nodeLabel(node: NetworkNode): string {
 
 function nodeState(node: NetworkNode): {
   label: string;
-  className: string;
+  tone: BadgeTone;
 } {
-  if (node.deleted) return { label: "Deleted", className: "revoked" };
-  if (node.revoked) return { label: "Revoked", className: "revoked" };
-  if (node.suspended) return { label: "Suspended", className: "warn" };
-  if (node.expired) return { label: "Expired", className: "warn" };
-  if (node.expires_soon) return { label: "Expires soon", className: "pending" };
-  if (node.online) return { label: "Online", className: "online" };
-  return { label: "Offline", className: "offline" };
+  if (node.deleted) return { label: "Deleted", tone: "danger" };
+  if (node.revoked) return { label: "Revoked", tone: "danger" };
+  if (node.suspended) return { label: "Suspended", tone: "warning" };
+  if (node.expired) return { label: "Expired", tone: "danger" };
+  if (node.expires_soon) return { label: "Expires soon", tone: "warning" };
+  if (node.online) return { label: "Online", tone: "success" };
+  return { label: "Offline", tone: "muted" };
 }
 
 function needsAttention(node: NetworkNode): boolean {
@@ -119,22 +122,27 @@ export function DeviceActions({
     return (
       <EmptyState
         title="No devices yet"
-        body="Bring your first device onto this network with a join key or browser enrolment."
+        body="Bring your first device onto this network with a join key, or run blaktaild up on it and approve it in the browser."
+        action={
+          <Link className="button" href="/join-keys">
+            Mint a join key
+          </Link>
+        }
       />
     );
   }
 
   return (
     <div className="stack">
-      <div className="table-toolbar">
-        <label className="search-field">
-          Search devices
+      <div className="ui-toolbar">
+        <FormField label="Search devices">
           <input
+            type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Name, DNS, network, or person"
+            placeholder="Name, DNS, network or person"
           />
-        </label>
+        </FormField>
         <div className="filter-row" role="group" aria-label="Device status">
           {(
             [
@@ -157,10 +165,25 @@ export function DeviceActions({
         </div>
       </div>
       {visible.length === 0 ? (
-        <p className="muted">No devices match that search.</p>
+        <EmptyState
+          compact
+          headingLevel={3}
+          title="No devices match"
+          body="Try another name or address, or show every device."
+          action={
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setQuery("");
+                setFilter("all");
+              }}
+            >
+              Clear search and filters
+            </Button>
+          }
+        />
       ) : (
-        <div className="table-wrap">
-          <table className="table device-table">
+        <Table label="Devices" className="device-table">
             <thead>
               <tr>
                 <th>Device</th>
@@ -188,13 +211,11 @@ export function DeviceActions({
                     onToggle={() => setOpenId(open ? null : rowId)}
                     onRefresh={() => router.refresh()}
                     onConfirm={setConfirm}
-                    startTransition={startTransition}
                   />
                 );
               })}
             </tbody>
-          </table>
-        </div>
+        </Table>
       )}
       <ConfirmDialog
         open={confirm !== null}
@@ -206,7 +227,7 @@ export function DeviceActions({
               : `${nodeLabel(confirm.node)} is removed from the ${confirm.node.organisation_name} inventory. An audit tombstone is kept. This is separate from revoking access.`
             : null
         }
-        confirmText={confirm?.kind === "revoke" ? nodeLabel(confirm.node) : undefined}
+        confirmText={confirm ? nodeLabel(confirm.node) : undefined}
         confirmLabel={confirm?.kind === "revoke" ? "Revoke access" : "Delete device"}
         pending={pending}
         onCancel={() => setConfirm(null)}
@@ -242,24 +263,25 @@ function DeviceRow({
   node,
   people,
   open,
-  pending,
+  pending: confirming,
   state,
   onToggle,
   onRefresh,
   onConfirm,
-  startTransition,
 }: {
   node: NetworkNode;
   people: AclPerson[];
   open: boolean;
   pending: boolean;
-  state: { label: string; className: string };
+  state: { label: string; tone: BadgeTone };
   onToggle: () => void;
   onRefresh: () => void;
   onConfirm: (confirm: { kind: "revoke" | "delete"; node: NetworkNode }) => void;
-  startTransition: (action: () => void) => void;
 }) {
   const [nameError, setNameError] = useState<string | null>(null);
+  const [renaming, startRename] = useTransition();
+  const [savingRoutes, startRoutes] = useTransition();
+  const pending = renaming || savingRoutes || confirming;
   const canEdit = can(node.effective_role, "manage_peers") && !node.revoked && !node.deleted;
   const canApproveRoutes =
     can(node.effective_role, "manage_networks") && !node.revoked && !node.deleted;
@@ -282,14 +304,14 @@ function DeviceRow({
           </div>
         </td>
         <td>
-          <span className="badge network">{node.network_account_name}</span>
+          <Badge tone="brand">{node.network_account_name}</Badge>
           <div className="device-sub">{ownerLabel(node, people)}</div>
         </td>
         <td className="device-address">
           {node.allowed_ips.length > 0 ? (
             node.allowed_ips.slice(0, 2).map((ip) => (
-              <div key={ip} className="mono">
-                {ip}
+              <div key={ip}>
+                <MonoValue value={ip} />
               </div>
             ))
           ) : (
@@ -297,18 +319,19 @@ function DeviceRow({
           )}
         </td>
         <td>
-          <span className={`badge ${state.className}`}>{state.label}</span>
+          <StatusPill tone={state.tone}>{state.label}</StatusPill>
         </td>
         <td>
-          <button
-            type="button"
-            className="secondary"
+          <Button
+            size="sm"
+            variant="secondary"
             aria-expanded={open}
             aria-controls={detailsId}
+            aria-label={`${open ? "Hide" : "Show"} details for ${nodeLabel(node)}`}
             onClick={onToggle}
           >
             {open ? "Hide" : "Details"}
-          </button>
+          </Button>
         </td>
       </tr>
       {open ? (
@@ -352,20 +375,26 @@ function DeviceRow({
                 </div>
                 <div>
                   <dt>Addresses</dt>
-                  <dd className="mono">
-                    {node.allowed_ips.join(", ") || "—"}
+                  <dd className="value-list">
+                    {node.allowed_ips.length > 0
+                      ? node.allowed_ips.map((ip) => (
+                          <MonoValue key={ip} value={ip} copy copyLabel={`Copy address ${ip}`} />
+                        ))
+                      : "None"}
                   </dd>
                 </div>
                 <div>
                   <dt>Tags</dt>
                   <dd>
-                    {node.tags.length > 0
-                      ? node.tags.map((tag) => (
-                          <span key={tag} className="badge">
-                            {tag}
-                          </span>
-                        ))
-                      : "None"}
+                    {node.tags.length > 0 ? (
+                      <span className="tag-list">
+                        {node.tags.map((tag) => (
+                          <Badge key={tag}>{tag}</Badge>
+                        ))}
+                      </span>
+                    ) : (
+                      "None"
+                    )}
                   </dd>
                 </div>
               </dl>
@@ -376,7 +405,7 @@ function DeviceRow({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const formData = new FormData(event.currentTarget);
-                    startTransition(async () => {
+                    startRename(async () => {
                       const result = await updateDeviceFriendlyNameAction(formData);
                       setNameError(
                         toastResult(result, {
@@ -413,7 +442,13 @@ function DeviceRow({
                       disabled={pending}
                     />
                   </FormField>
-                  <Button type="submit" variant="secondary" loading={pending} loadingLabel="Saving…">
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    loading={renaming}
+                    disabled={pending}
+                    loadingLabel="Saving…"
+                  >
                     Save name
                   </Button>
                 </form>
@@ -458,7 +493,7 @@ function DeviceRow({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const formData = new FormData(event.currentTarget);
-                    startTransition(async () => {
+                    startRoutes(async () => {
                       const result = await approveNodeRoutesAction(formData);
                       toastResult(result, {
                         success: "Route approvals saved",
@@ -468,13 +503,18 @@ function DeviceRow({
                     });
                   }}
                 >
-                  <p className="eyebrow">Advertised routes</p>
                   <input type="hidden" name="nodeId" value={node.id} />
                   <input
                     type="hidden"
                     name="organisationId"
                     value={node.organisation_id}
                   />
+                  <fieldset className="ui-fieldset">
+                  <legend>Advertised routes</legend>
+                  <p className="ui-field-hint">
+                    Approved routes are offered to every device policy lets reach this one.
+                  </p>
+                  <div className="ui-choices">
                   {node.advertised_routes.map((route) => (
                     <label key={route} className="route-option mono">
                       <input
@@ -488,14 +528,24 @@ function DeviceRow({
                           (node.expired && !node.approved_routes.includes(route))
                         }
                       />
-                      {route === "0.0.0.0/0" ? "Exit node" : route}
+                      {route === "0.0.0.0/0" ? "Exit node (0.0.0.0/0)" : route === "::/0" ? "IPv6 exit node (::/0)" : route}
                     </label>
                   ))}
+                  </div>
                   {canApproveRoutes && (!node.expired || node.approved_routes.length > 0) ? (
-                    <button type="submit" className="secondary" disabled={pending}>
-                      Save routes
-                    </button>
+                    <div className="ui-form-actions">
+                      <Button
+                        type="submit"
+                        variant="secondary"
+                        loading={savingRoutes}
+                        disabled={pending}
+                        loadingLabel="Saving…"
+                      >
+                        Save routes
+                      </Button>
+                    </div>
                   ) : null}
+                  </fieldset>
                 </form>
               ) : (
                 <p className="muted">This device is not advertising routes.</p>
@@ -510,22 +560,26 @@ function DeviceRow({
                     tombstone. Neither action can be undone from this page.
                   </p>
                   <div className="actions">
-                    <button
-                      type="button"
-                      className="danger"
+                    <Button
+                      variant="danger"
                       disabled={pending}
                       onClick={() => onConfirm({ kind: "revoke", node })}
                     >
                       Revoke access
-                    </button>
-                    <button
-                      type="button"
-                      className="quiet-danger"
+                    </Button>
+                    <Button
+                      variant="quiet-danger"
                       disabled={pending}
                       onClick={() => onConfirm({ kind: "delete", node })}
                     >
                       Delete from inventory
-                    </button>
+                    </Button>
+                    <Link
+                      className="button ghost"
+                      href={`/devices/${node.id}?organisation=${encodeURIComponent(node.organisation_id)}`}
+                    >
+                      Suspend or see more
+                    </Link>
                   </div>
                 </div>
               ) : null}

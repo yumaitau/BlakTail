@@ -12,6 +12,15 @@ import type {
   ZoneRecordType,
 } from "@/lib/coord";
 import { lineDiff } from "@/lib/text-diff";
+import { EmptyState } from "../empty-state";
+import { Alert } from "../ui/alert";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
+import { FormField } from "../ui/form-field";
+import { Section } from "../ui/section";
+import { Table, Td } from "../ui/table";
+import { toastResult } from "../ui/toast";
 import { DnsDiff } from "./dns-diff";
 
 const TAGS: DeviceTag[] = ["office", "ranger", "store"];
@@ -85,20 +94,19 @@ function ListField({
 }) {
   const [text, setText] = useState(values.join("\n"));
   return (
-    <label>
-      {label}
+    <FormField label={label} hint={hint}>
       <textarea
         className="mono"
         rows={Math.max(2, Math.min(6, values.length + 1))}
         value={text}
         disabled={disabled}
+        spellCheck={false}
         onChange={(event) => {
           setText(event.target.value);
           onChange(lines(event.target.value));
         }}
       />
-      <span className="muted dns-hint">{hint}</span>
-    </label>
+    </FormField>
   );
 }
 
@@ -121,18 +129,17 @@ function GroupEditor({
 }) {
   return (
     <fieldset className="dns-card stack">
-      <legend>Group {index + 1}</legend>
+      <legend>{group.name || `Group ${index + 1}`}</legend>
       <div className="dns-grid">
-        <label>
-          Name
+        <FormField label="Name" className="field-md">
           <input
             value={group.name}
             maxLength={64}
             disabled={disabled}
             onChange={(event) => onChange({ ...group, name: event.target.value })}
           />
-        </label>
-        <label>
+        </FormField>
+        <label className="dns-toggle">
           <input
             type="checkbox"
             checked={group.enabled}
@@ -161,7 +168,7 @@ function GroupEditor({
         />
       </div>
       <fieldset className="dns-assign">
-        <legend>Applies to</legend>
+        <legend className="ui-field-label">Applies to</legend>
         <label>
           <input
             type="radio"
@@ -203,32 +210,31 @@ function GroupEditor({
             ))
           : null}
       </fieldset>
-      <div className="row">
-        <button
-          type="button"
-          className="secondary"
-          disabled={disabled || index === 0}
-          onClick={() => onMove(-1)}
-        >
-          Move up
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled={disabled || index === count - 1}
-          onClick={() => onMove(1)}
-        >
-          Move down
-        </button>
-        <button
-          type="button"
-          className="quiet-danger"
-          disabled={disabled}
-          onClick={onRemove}
-        >
-          Remove group
-        </button>
-      </div>
+      {disabled ? null : (
+        <div className="ui-form-actions">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={index === 0}
+            onClick={() => onMove(-1)}
+            aria-label={`Move ${group.name || `group ${index + 1}`} up`}
+          >
+            Move up
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={index === count - 1}
+            onClick={() => onMove(1)}
+            aria-label={`Move ${group.name || `group ${index + 1}`} down`}
+          >
+            Move down
+          </Button>
+          <Button variant="quiet-danger" size="sm" onClick={onRemove}>
+            Remove group
+          </Button>
+        </div>
+      )}
     </fieldset>
   );
 }
@@ -251,7 +257,7 @@ function RecordRow({
   const id = `zone-${zoneIndex}-record-${index}`;
   return (
     <tr>
-      <td>
+      <Td label="Name">
         <label className="visually-hidden" htmlFor={`${id}-name`}>
           Record name
         </label>
@@ -262,8 +268,8 @@ function RecordRow({
           disabled={disabled}
           onChange={(event) => onChange({ ...record, name: event.target.value })}
         />
-      </td>
-      <td>
+      </Td>
+      <Td label="Type">
         <label className="visually-hidden" htmlFor={`${id}-type`}>
           Record type
         </label>
@@ -281,8 +287,8 @@ function RecordRow({
             </option>
           ))}
         </select>
-      </td>
-      <td>
+      </Td>
+      <Td label="Value">
         <label className="visually-hidden" htmlFor={`${id}-value`}>
           Record value
         </label>
@@ -293,8 +299,8 @@ function RecordRow({
           disabled={disabled}
           onChange={(event) => onChange({ ...record, value: event.target.value })}
         />
-      </td>
-      <td>
+      </Td>
+      <Td label="TTL (s)">
         <label className="visually-hidden" htmlFor={`${id}-ttl`}>
           TTL in seconds
         </label>
@@ -309,18 +315,19 @@ function RecordRow({
             onChange({ ...record, ttl: Number(event.target.value) })
           }
         />
-      </td>
-      <td>
-        <button
-          type="button"
-          className="quiet-danger"
-          disabled={disabled}
-          onClick={onRemove}
-          aria-label={`Remove ${record.type} record ${record.name || index + 1}`}
-        >
-          Remove
-        </button>
-      </td>
+      </Td>
+      <Td>
+        {disabled ? null : (
+          <Button
+            variant="quiet-danger"
+            size="sm"
+            onClick={onRemove}
+            aria-label={`Remove ${record.type} record ${record.name || index + 1}`}
+          >
+            Remove
+          </Button>
+        )}
+      </Td>
     </tr>
   );
 }
@@ -340,18 +347,19 @@ function ZoneEditor({
 }) {
   return (
     <fieldset className="dns-card stack">
-      <legend>Zone {zone.name || index + 1}</legend>
+      <legend className="mono">{zone.name || `Zone ${index + 1}`}</legend>
       <div className="dns-grid">
-        <label>
-          Zone name
+        <FormField label="Zone name" className="field-md">
           <input
             className="mono"
             value={zone.name}
             disabled={disabled}
+            placeholder="corp.internal"
+            spellCheck={false}
             onChange={(event) => onChange({ ...zone, name: event.target.value })}
           />
-        </label>
-        <label>
+        </FormField>
+        <label className="dns-toggle">
           <input
             type="checkbox"
             checked={zone.enabled}
@@ -361,17 +369,16 @@ function ZoneEditor({
           Enabled
         </label>
       </div>
-      <p className="muted dns-hint">
+      <p className="ui-field-hint">
         Record names may be <span className="mono">@</span> for the zone
         apex, a relative label such as <span className="mono">wiki</span>, or
         a full name. The coordinator stores full names. A name with a CNAME
         cannot hold any other record.
       </p>
       {zone.records.length === 0 ? (
-        <p className="muted">No records in this zone yet.</p>
+        <p className="muted small">No records in this zone yet.</p>
       ) : (
-        <div className="table-wrap">
-          <table className="table">
+          <Table label={`Records in ${zone.name || `zone ${index + 1}`}`} mobile="stack" className="dns-records">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -410,35 +417,30 @@ function ZoneEditor({
                 />
               ))}
             </tbody>
-          </table>
+          </Table>
+      )}
+      {disabled ? null : (
+        <div className="ui-form-actions">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() =>
+              onChange({
+                ...zone,
+                records: [
+                  ...zone.records,
+                  { name: "", type: "A", value: "", ttl: DEFAULT_TTL },
+                ],
+              })
+            }
+          >
+            Add record
+          </Button>
+          <Button variant="quiet-danger" size="sm" onClick={onRemove}>
+            Remove zone
+          </Button>
         </div>
       )}
-      <div className="row">
-        <button
-          type="button"
-          className="secondary"
-          disabled={disabled}
-          onClick={() =>
-            onChange({
-              ...zone,
-              records: [
-                ...zone.records,
-                { name: "", type: "A", value: "", ttl: DEFAULT_TTL },
-              ],
-            })
-          }
-        >
-          Add record
-        </button>
-        <button
-          type="button"
-          className="quiet-danger"
-          disabled={disabled}
-          onClick={onRemove}
-        >
-          Remove zone
-        </button>
-      </div>
     </fieldset>
   );
 }
@@ -464,8 +466,9 @@ export function DnsEditor({
   const [jsonText, setJsonText] = useState(publishedJson);
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"check" | "publish" | null>(null);
+  const [error, setError] = useState<{ message: string; ref?: string } | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [check, setCheck] = useState<{ warnings: string[]; canonical: string } | null>(
     null,
   );
@@ -479,7 +482,7 @@ export function DnsEditor({
     setDraft(next);
     setJsonText(serialiseDns(next));
     setCheck(null);
-    setNotice(null);
+    setError(null);
   }
 
   function setGroups(next: NameserverGroup[]) {
@@ -495,18 +498,34 @@ export function DnsEditor({
     setEditorKey((key) => key + 1);
   }
 
+  const addGroup = () =>
+    setGroups([
+      ...groups,
+      {
+        name: "",
+        resolvers: [],
+        match_domains: [],
+        enabled: true,
+        all_devices: true,
+        tags: [],
+      },
+    ]);
+  const addZone = () => setZones([...zones, { name: "", enabled: true, records: [] }]);
+
   return (
-    <div className="stack">
-      <div className="panel stack" id="editor">
-        <div>
-          <h2>Edit DNS</h2>
-          <p className="muted">
-            Editing <span className="badge network">{organisationName}</span>{" "}
-            as {roleLabel}. Changes stay a draft until you publish; agents
-            pick up each published revision on their next poll.
-          </p>
-          {readOnlyReason ? <p className="muted">{readOnlyReason}</p> : null}
-        </div>
+    <>
+      <Section
+        id="editor"
+        title="Edit DNS"
+        description={
+          readOnlyReason
+            ? `Viewing ${organisationName} as ${roleLabel}.`
+            : `Editing ${organisationName} as ${roleLabel}. Changes stay a draft until you publish; agents pick up each published revision on their next poll.`
+        }
+        actions={
+          dirty ? <Badge tone="warning">Unpublished changes</Badge> : null
+        }
+      >
         <label>
           <input
             type="checkbox"
@@ -516,19 +535,28 @@ export function DnsEditor({
           />
           BlakTail manages device DNS for this organisation
         </label>
-      </div>
+      </Section>
 
-      <div className="panel stack" id="nameserver-groups" key={`groups-${editorKey}`}>
-        <div>
-          <h2>Nameserver groups</h2>
-          <p className="muted">
-            Forward chosen domains to private resolvers for every device or
-            for tagged devices. The longest matching suffix wins; for the
-            same domain, the first group in this list wins.
-          </p>
-        </div>
+      <Section
+        id="nameserver-groups"
+        key={`groups-${editorKey}`}
+        title="Nameserver groups"
+        description="Forward chosen domains to private resolvers for every device or for tagged devices. The longest matching suffix wins; for the same domain, the first group in this list wins."
+        actions={
+          disabled ? null : (
+            <Button variant="secondary" size="sm" onClick={addGroup}>
+              Add nameserver group
+            </Button>
+          )
+        }
+      >
         {groups.length === 0 ? (
-          <p className="muted">No nameserver groups yet.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No nameserver groups yet"
+            body="Add one to send names such as corp.example to your own resolvers."
+          />
         ) : (
           groups.map((group, index) => (
             <GroupEditor
@@ -551,43 +579,28 @@ export function DnsEditor({
             />
           ))
         )}
-        <div>
-          <button
-            type="button"
-            className="secondary"
-            disabled={disabled}
-            onClick={() =>
-              setGroups([
-                ...groups,
-                {
-                  name: "",
-                  resolvers: [],
-                  match_domains: [],
-                  enabled: true,
-                  all_devices: true,
-                  tags: [],
-                },
-              ])
-            }
-          >
-            Add nameserver group
-          </button>
-        </div>
-      </div>
+      </Section>
 
-      <div className="panel stack" id="zones" key={`zones-${editorKey}`}>
-        <div>
-          <h2>Custom zones</h2>
-          <p className="muted">
-            Agents answer these names themselves with A, AAAA, CNAME and TXT
-            records. Unknown names inside a zone return NXDOMAIN rather than
-            leaking to public DNS. Zones cannot use the protected{" "}
-            <span className="mono">.blaktail</span> suffix. Agents older than
-            this release answer only the A and AAAA records.
-          </p>
-        </div>
+      <Section
+        id="zones"
+        key={`zones-${editorKey}`}
+        title="Custom zones"
+        description="Agents answer these names themselves with A, AAAA, CNAME and TXT records. Unknown names inside a zone return NXDOMAIN rather than leaking to public DNS. Zones can't use the protected .blaktail suffix; older agents answer only A and AAAA records."
+        actions={
+          disabled ? null : (
+            <Button variant="secondary" size="sm" onClick={addZone}>
+              Add zone
+            </Button>
+          )
+        }
+      >
         {zones.length === 0 ? (
-          <p className="muted">No custom zones yet.</p>
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No custom zones yet"
+            body="Add a zone such as corp.internal to answer private names on every device."
+          />
         ) : (
           zones.map((zone, index) => (
             <ZoneEditor
@@ -602,26 +615,16 @@ export function DnsEditor({
             />
           ))
         )}
-        <div>
-          <button
-            type="button"
-            className="secondary"
-            disabled={disabled}
-            onClick={() => setZones([...zones, { name: "", enabled: true, records: [] }])}
-          >
-            Add zone
-          </button>
-        </div>
-      </div>
+      </Section>
 
-      <div className="panel stack" id="legacy" key={`legacy-${editorKey}`}>
-        <div>
-          <h2>Split DNS, search domains and extra records</h2>
-          <p className="muted">
-            The original organisation DNS fields. They keep working for every
-            agent version. Split suffixes here apply to every device.
-          </p>
-        </div>
+      <Section
+        id="legacy"
+        key={`legacy-${editorKey}`}
+        title="Split DNS, search domains and extra records"
+        description="The original organisation DNS fields. They keep working for every agent version. Split suffixes here apply to every device."
+      >
+        <div className="ui-form wide">
+        <div className="dns-grid">
         <ListField
           label="Search domains"
           hint="Appended after the MagicDNS domain (six suffixes total)."
@@ -636,8 +639,11 @@ export function DnsEditor({
           disabled={disabled}
           onChange={(global_resolvers) => update({ ...draft, global_resolvers })}
         />
-        <label>
-          Split routes
+        </div>
+        <FormField
+          label="Split routes"
+          hint="One route per line: suffix followed by its resolvers, for example internal.example 10.0.0.53."
+        >
           <textarea
             className="mono"
             rows={Math.max(2, draft.split.length + 1)}
@@ -656,13 +662,11 @@ export function DnsEditor({
               })
             }
           />
-          <span className="muted dns-hint">
-            One route per line: suffix followed by its resolvers, for example{" "}
-            <span className="mono">internal.example 10.0.0.53</span>.
-          </span>
-        </label>
-        <label>
-          Extra A/AAAA records
+        </FormField>
+        <FormField
+          label="Extra A/AAAA records"
+          hint="One record per line: name, A or AAAA, address. Each must sit under a split suffix or search domain. New records belong in a custom zone."
+        >
           <textarea
             className="mono"
             rows={Math.max(2, draft.records.length + 1)}
@@ -685,80 +689,33 @@ export function DnsEditor({
               })
             }
           />
-          <span className="muted dns-hint">
-            One record per line: name, A or AAAA, address. Each must sit under
-            a split suffix or search domain. New records belong in a custom
-            zone.
-          </span>
-        </label>
-      </div>
-
-      <div className="panel stack" id="advanced">
-        <details className="acl-advanced">
-          <summary>Advanced JSON</summary>
-          <div className="stack">
-            <label>
-              Settings JSON
-              <textarea
-                className="mono"
-                rows={16}
-                value={jsonText}
-                disabled={disabled}
-                onChange={(event) => {
-                  setJsonText(event.target.value);
-                  setJsonError(null);
-                }}
-              />
-            </label>
-            {jsonError ? <p className="error">{jsonError}</p> : null}
-            <div>
-              <button
-                type="button"
-                className="secondary"
-                disabled={disabled}
-                onClick={() => {
-                  try {
-                    const parsed = JSON.parse(jsonText) as Partial<OrgDnsSettings>;
-                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                      throw new Error();
-                    }
-                    replaceDraft(normaliseDns(parsed));
-                  } catch {
-                    setJsonError("JSON is not a valid DNS settings object yet.");
-                  }
-                }}
-              >
-                Apply JSON to editor
-              </button>
-            </div>
-          </div>
-        </details>
-      </div>
-
-      <div className="panel stack" id="publish">
-        <div>
-          <h2>Check and publish</h2>
-          <p className="muted">
-            {dirty
-              ? "You have unpublished changes."
-              : "The draft matches the published revision."}
-          </p>
+        </FormField>
         </div>
+      </Section>
+
+      <Section
+        id="publish"
+        title="Check and publish"
+        description={
+          dirty
+            ? "You have unpublished changes. Check them, then publish."
+            : "The draft matches the published revision."
+        }
+      >
         {dirty ? <DnsDiff lines={lineDiff(publishedJson, draftJson)} label="Draft changes" /> : null}
         {check ? (
-          <div className="stack">
-            <p>
-              Check passed.{" "}
-              {check.warnings.length === 0
-                ? "No warnings."
-                : `${check.warnings.length} warning${check.warnings.length === 1 ? "" : "s"}:`}
-            </p>
+          <Alert
+            tone={check.warnings.length === 0 ? "success" : "warning"}
+            title={
+              check.warnings.length === 0
+                ? "Check passed with no warnings"
+                : `Check passed with ${check.warnings.length} warning${check.warnings.length === 1 ? "" : "s"}`
+            }
+          >
             {check.warnings.length > 0 ? (
-              <ul>
+              <ul className="audit-details">
                 {check.warnings.map((warning) => (
-                  <li key={warning}>
-                    <span className="badge pending">Warning</span> {warning}
-                  </li>
+                  <li key={warning}>{warning}</li>
                 ))}
               </ul>
             ) : null}
@@ -766,26 +723,56 @@ export function DnsEditor({
               <summary>Canonical document</summary>
               <pre className="mono dns-pre">{check.canonical}</pre>
             </details>
-          </div>
+          </Alert>
         ) : null}
         {error ? (
-          <p className="error" role="alert">
-            {error}
-          </p>
+          <Alert tone="error" title="These settings can't be published yet" reference={error.ref}>
+            {error.message}
+          </Alert>
         ) : null}
-        {notice ? <p role="status">{notice}</p> : null}
-        <div className="row">
-          <button
-            type="button"
-            className="secondary"
+        <div className="ui-form-actions">
+          {readOnlyReason ? null : (
+            <Button
+              loading={busy === "publish"}
+              loadingLabel="Publishing…"
+              disabled={pending || !dirty}
+              title={dirty ? undefined : "No changes to publish"}
+              onClick={() => {
+                setError(null);
+                setBusy("publish");
+                startTransition(async () => {
+                  const result = await publishDnsAction(draftJson, etag);
+                  setBusy(null);
+                  toastResult(result, {
+                    success: "DNS published",
+                    successDescription: "Agents apply it on their next poll.",
+                    errorToast: false,
+                  });
+                  if (!result.ok) {
+                    setError({ message: result.error, ref: result.ref });
+                    return;
+                  }
+                  router.refresh();
+                });
+              }}
+            >
+              Publish DNS
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            loading={busy === "check"}
+            loadingLabel="Checking…"
             disabled={pending}
             onClick={() => {
               setError(null);
+              setBusy("check");
               startTransition(async () => {
                 const result = await validateDnsAction(draftJson);
+                setBusy(null);
                 if (!result.ok) {
                   setCheck(null);
-                  setError(result.error);
+                  setError({ message: result.error, ref: result.ref });
                   return;
                 }
                 setCheck({
@@ -795,37 +782,73 @@ export function DnsEditor({
               });
             }}
           >
-            {pending ? "Working…" : "Check"}
-          </button>
-          <button
-            type="button"
-            disabled={disabled || !dirty}
-            title={readOnlyReason ?? (dirty ? undefined : "No changes to publish")}
-            onClick={() => {
-              setError(null);
-              startTransition(async () => {
-                const result = await publishDnsAction(draftJson, etag);
-                if (!result.ok) {
-                  setError(result.error);
-                  return;
-                }
-                setNotice("Published. Agents apply it on their next poll.");
-                router.refresh();
-              });
-            }}
-          >
-            {pending ? "Publishing…" : "Publish DNS"}
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            disabled={disabled || !dirty}
-            onClick={() => replaceDraft(published)}
-          >
-            Discard changes
-          </button>
+            Check
+          </Button>
+          {readOnlyReason ? null : (
+            <Button
+              variant="ghost"
+              disabled={pending || !dirty}
+              onClick={() => setConfirmDiscard(true)}
+            >
+              Discard changes
+            </Button>
+          )}
         </div>
-      </div>
-    </div>
+        <details className="acl-advanced" id="advanced">
+          <summary>Advanced JSON</summary>
+          <div className="stack">
+            <FormField
+              label="Settings JSON"
+              hint="Edit the whole document, then apply it to the editor above."
+              error={jsonError}
+            >
+              <textarea
+                className="mono"
+                rows={16}
+                value={jsonText}
+                disabled={disabled}
+                spellCheck={false}
+                onChange={(event) => {
+                  setJsonText(event.target.value);
+                  setJsonError(null);
+                }}
+              />
+            </FormField>
+            <div className="ui-form-actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={disabled}
+                onClick={() => {
+                  try {
+                    const parsed = JSON.parse(jsonText) as Partial<OrgDnsSettings>;
+                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                      throw new Error();
+                    }
+                    replaceDraft(normaliseDns(parsed));
+                  } catch {
+                    setJsonError("This isn't a valid DNS settings object yet. Check the JSON syntax.");
+                  }
+                }}
+              >
+                Apply JSON to editor
+              </Button>
+            </div>
+          </div>
+        </details>
+      </Section>
+
+      <ConfirmDialog
+        open={confirmDiscard}
+        title="Discard DNS changes"
+        description="Your unpublished edits on this page are thrown away and the editor goes back to the published revision."
+        confirmLabel="Discard changes"
+        onCancel={() => setConfirmDiscard(false)}
+        onConfirm={() => {
+          replaceDraft(published);
+          setConfirmDiscard(false);
+        }}
+      />
+    </>
   );
 }
