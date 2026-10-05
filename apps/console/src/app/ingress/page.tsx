@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { listNodes } from "@/lib/coord";
 import { getIngressWorkspace, type IngressWorkspace } from "@/lib/coord-ingress";
 import { listServices } from "@/lib/coord-services";
+import { unixNow } from "@/lib/format-time";
 import { can, permissionReason } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -50,6 +51,7 @@ async function IngressBody({ ctx }: { ctx: ConsoleContext }) {
       services={httpServices}
       ownerReason={permissionReason(ctx.role, "manage_public_ingress")}
       canEmergencyDisable={can(ctx.role, "manage_services") || canManage}
+      now={unixNow()}
     />
   );
 }

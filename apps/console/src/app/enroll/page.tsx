@@ -7,6 +7,7 @@ import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { StatusPage } from "@/components/status-page";
 import { Alert } from "@/components/ui/alert";
+import { LocalTime } from "@/components/ui/local-time";
 import { MonoValue } from "@/components/ui/mono-value";
 import { Section } from "@/components/ui/section";
 import { auth } from "@/lib/auth";
@@ -114,12 +115,7 @@ export default async function EnrollPage({
             <div>
               <dt>Expires</dt>
               <dd>
-                <time dateTime={new Date(request.expires_at * 1000).toISOString()}>
-                  {new Date(request.expires_at * 1000).toLocaleString("en-AU", {
-                    dateStyle: "medium",
-                    timeStyle: "short",
-                  })}
-                </time>
+                <LocalTime value={request.expires_at} />
               </dd>
             </div>
             <div>

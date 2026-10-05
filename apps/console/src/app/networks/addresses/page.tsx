@@ -15,12 +15,14 @@ import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { StatusPill, type BadgeTone } from "@/components/ui/badge";
+import { LocalTime } from "@/components/ui/local-time";
 import { MonoValue } from "@/components/ui/mono-value";
 import { PermissionNotice } from "@/components/ui/permission-notice";
 import { Section } from "@/components/ui/section";
 import { SkeletonTable } from "@/components/ui/skeleton";
 import { Table, Td } from "@/components/ui/table";
 import { getIpam, type AddressState, type IpamView, type ReservationState } from "@/lib/coord-ipam";
+import { unixNow } from "@/lib/format-time";
 import { can, permissionReason } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
@@ -40,13 +42,8 @@ const reservationStateLabel: Record<ReservationState, { label: string; tone: Bad
   conflict: { label: "Conflict", tone: "danger" },
 };
 
-function date(at: number | null): string {
-  if (!at) return "—";
-  return new Date(at * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Australia/Sydney",
-  });
+function date(at: number | null) {
+  return <LocalTime value={at} fallback="—" />;
 }
 
 async function AddressesBody({ ctx }: { ctx: ConsoleContext }) {
@@ -136,6 +133,7 @@ async function AddressesBody({ ctx }: { ctx: ConsoleContext }) {
             organisationId={ctx.organisationId}
             role={ctx.role}
             plan={view.renumber.staged}
+            now={unixNow()}
           />
         ) : canManage ? (
           <RenumberPlanForm

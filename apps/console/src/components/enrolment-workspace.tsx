@@ -20,14 +20,6 @@ import { EmptyState } from "./empty-state";
 
 type Platform = "linux" | "macos" | "iphone";
 
-function when(value: number | null): string {
-  if (!value) return "Never";
-  return new Date(value * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
 const stateLabel: Record<JoinKeySummary["state"], { label: string; tone: BadgeTone }> = {
   active: { label: "Active", tone: "success" },
   expired: { label: "Expired", tone: "muted" },
@@ -241,7 +233,12 @@ export function EnrolmentWorkspace({
         <Section
           id="minted"
           title={`Copy “${minted.name}” now`}
-          description={`This is the only time the secret is shown. It expires ${when(minted.expiresAt)}. Don't paste it into chat, tickets, URLs or QR codes.`}
+          description={
+            <>
+              This is the only time the secret is shown. It expires <LocalTime value={minted.expiresAt} />. Don&apos;t
+              paste it into chat, tickets, URLs or QR codes.
+            </>
+          }
           className="secret-panel"
         >
           <div className="secret-value">

@@ -29,7 +29,8 @@ import {
   PublishForm,
   RebaseButton,
 } from "../draft-forms";
-import { draftStatus, surfaceLabel, surfaceNoun, when } from "../format";
+import { LocalTime } from "@/components/ui/local-time";
+import { draftStatus, surfaceLabel, surfaceNoun } from "../format";
 
 type Search = {
   preview?: string;
@@ -376,7 +377,12 @@ export default async function ChangeDraftPage({
         <PageHeader
           eyebrow={ctx.organisationName}
           title={draft.title}
-          description={`Changes ${draft.surfaces.map(surfaceNoun).join(" and ")}. Created by ${draft.created_by_name || draft.created_by} on ${when(draft.created_at)}.`}
+          description={
+            <>
+              Changes {draft.surfaces.map(surfaceNoun).join(" and ")}. Created by{" "}
+              {draft.created_by_name || draft.created_by} on <LocalTime value={draft.created_at} fallback="—" />.
+            </>
+          }
           actions={editable ? <DiscardButton draft={ref} title={draft.title} /> : null}
         />
         {!draft.payload ? (
@@ -402,7 +408,16 @@ export default async function ChangeDraftPage({
             <div>
               <dt>{open ? "Expires" : "Closed"}</dt>
               <dd>
-                {open ? when(draft.expires_at) : `${when(draft.closed_at)}${draft.closed_by && draft.closed_by === draft.created_by && draft.created_by_name ? ` by ${draft.created_by_name}` : ""}`}
+                {open ? (
+                  <LocalTime value={draft.expires_at} fallback="—" />
+                ) : (
+                  <>
+                    <LocalTime value={draft.closed_at} fallback="—" />
+                    {draft.closed_by && draft.closed_by === draft.created_by && draft.created_by_name
+                      ? ` by ${draft.created_by_name}`
+                      : ""}
+                  </>
+                )}
               </dd>
             </div>
             <div>
@@ -413,7 +428,7 @@ export default async function ChangeDraftPage({
                 ) : (
                   <MonoValue value={draft.updated_by} />
                 )}{" "}
-                · {when(draft.updated_at)}
+                · <LocalTime value={draft.updated_at} fallback="—" />
               </dd>
             </div>
           </dl>

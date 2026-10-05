@@ -1,6 +1,7 @@
 import type { ServiceCa } from "@/lib/coord-services";
 import { EmptyState } from "../empty-state";
 import { CopyButton } from "../ui/copy-button";
+import { LocalTime } from "../ui/local-time";
 import { MonoValue } from "../ui/mono-value";
 import { Section } from "../ui/section";
 
@@ -39,9 +40,7 @@ export function ServiceCaPanel({ ca }: { ca: ServiceCa | null }) {
             <div>
               <dt>Expires</dt>
               <dd>
-                {new Date(ca.not_after * 1000).toLocaleDateString("en-AU", {
-                  dateStyle: "medium",
-                })}
+                <LocalTime value={ca.not_after} dateOnly />
               </dd>
             </div>
           </dl>

@@ -23,11 +23,3 @@ export const draftStatus: Record<ChangeDraft["status"], { label: string; tone: B
   discarded: { label: "Discarded", tone: "muted" },
   expired: { label: "Expired", tone: "muted" },
 };
-
-export function when(seconds: number | null | undefined): string {
-  if (!seconds) return "—";
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}

@@ -17,6 +17,7 @@ import { Badge, StatusPill, type BadgeTone } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
 import { FormField } from "./ui/form-field";
+import { LocalTime } from "./ui/local-time";
 import { MonoValue } from "./ui/mono-value";
 import { Table } from "./ui/table";
 import { toastResult } from "./ui/toast";
@@ -49,14 +50,6 @@ function needsAttention(node: NetworkNode): boolean {
       node.expires_soon ||
       node.advertised_routes.some((route) => !node.approved_routes.includes(route)))
   );
-}
-
-function formatSeen(value: number | null | undefined): string {
-  if (!value) return "Never";
-  return new Date(value * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 }
 
 function ownerLabel(node: NetworkNode, people: AclPerson[]): string {
@@ -345,21 +338,12 @@ function DeviceRow({
                 </div>
                 <div>
                   <dt>Last seen</dt>
-                  <dd>{formatSeen(node.last_seen_at)}</dd>
+                  <dd><LocalTime value={node.last_seen_at} /></dd>
                 </div>
                 <div>
                   <dt>Credential</dt>
                   <dd>
-                    <time
-                      dateTime={new Date(
-                        node.credential_expires_at * 1000,
-                      ).toISOString()}
-                    >
-                      {new Date(node.credential_expires_at * 1000).toLocaleDateString(
-                        "en-AU",
-                        { dateStyle: "medium" },
-                      )}
-                    </time>
+                    <LocalTime value={node.credential_expires_at} dateOnly />
                   </dd>
                 </div>
                 <div>

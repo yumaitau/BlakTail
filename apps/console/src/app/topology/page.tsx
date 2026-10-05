@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { StatusPill, type BadgeTone } from "@/components/ui/badge";
+import { LocalTime } from "@/components/ui/local-time";
 import { Section } from "@/components/ui/section";
 import { SkeletonTable } from "@/components/ui/skeleton";
 import { Table, Td } from "@/components/ui/table";
@@ -61,12 +62,8 @@ const filterLabel: Record<TopologyNode["packet_filter"], string> = {
   not_enforced: "Not enforced",
 };
 
-function when(seconds: number | null): string {
-  if (!seconds) return "never";
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+function when(seconds: number | null) {
+  return <LocalTime value={seconds} fallback="never" />;
 }
 
 function pick<T extends string>(value: string | undefined, allowed: readonly T[]): T | "" {
@@ -134,7 +131,12 @@ async function TopologyBody({ ctx, params }: { ctx: ConsoleContext; params: Para
       <Section
         id="planes"
         title="Control plane and data plane"
-        description={`Coordinator answered ${when(topology.generated_at)}. Path types come from what each agent last reported; reports older than ten minutes show as not measured.`}
+        description={
+          <>
+            Coordinator answered {when(topology.generated_at)}. Path types come from what each agent last
+            reported; reports older than ten minutes show as not measured.
+          </>
+        }
       >
         <dl className="stat-grid">
           <div>
@@ -345,7 +347,7 @@ async function TopologyBody({ ctx, params }: { ctx: ConsoleContext; params: Para
                     {transportLabel[node.transport.state]}
                     <div className="cell-sub">
                       {node.transport.reported_at
-                        ? `${node.transport.stale ? "Stale report" : "Reported"} ${when(node.transport.reported_at)}`
+                        ? <>{node.transport.stale ? "Stale report" : "Reported"} {when(node.transport.reported_at)}</>
                         : "No report"}
                     </div>
                   </Td>

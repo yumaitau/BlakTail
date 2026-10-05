@@ -14,7 +14,8 @@ import { listDrafts, type ChangeDraft } from "@/lib/coord-changes";
 import { can, permissionReason } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 import { NewDraftForm } from "./draft-forms";
-import { SURFACES, draftStatus, surfaceLabel, when } from "./format";
+import { LocalTime } from "@/components/ui/local-time";
+import { SURFACES, draftStatus, surfaceLabel } from "./format";
 
 async function DraftList({ ctx }: { ctx: ConsoleContext }) {
   let drafts: ChangeDraft[] = [];
@@ -66,8 +67,8 @@ async function DraftList({ ctx }: { ctx: ConsoleContext }) {
               </Td>
               <Td label="Changes">{draft.surfaces.map(surfaceLabel).join(", ")}</Td>
               <Td label="Created by">{draft.created_by_name || draft.created_by}</Td>
-              <Td label="Updated">{when(draft.updated_at)}</Td>
-              <Td label="Expires">{draft.status === "open" ? when(draft.expires_at) : "—"}</Td>
+              <Td label="Updated"><LocalTime value={draft.updated_at} fallback="—" /></Td>
+              <Td label="Expires">{draft.status === "open" ? <LocalTime value={draft.expires_at} fallback="—" /> : "—"}</Td>
             </tr>
           );
         })}
