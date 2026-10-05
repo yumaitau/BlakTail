@@ -3537,13 +3537,6 @@ a.traffic-name:hover {
   margin-top: 0;
 }
 
-@media (max-width: 800px) {
-  .form-row > .ui-button,
-  .form-row > .actions {
-    margin-top: 0;
-  }
-}
-
 .form-row > .ui-field {
   flex: 1 1 14rem;
   min-width: 0;
