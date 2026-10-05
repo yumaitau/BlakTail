@@ -6,11 +6,14 @@ import {
   deleteNetworkResourceAction,
   setNetworkResourceEnabledAction,
 } from "@/app/networks/actions";
-import { can, permissionReason, roleLabel, type OrgRole } from "@/lib/roles";
+import { can, type OrgRole } from "@/lib/roles";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { toastResult } from "./ui/toast";
 
+/** Enable, disable and delete for one network resource (page header actions). */
 export function NetworkResourceActions({
   organisationId,
-  organisationName,
   role,
   resourceId,
   resourceName,
@@ -18,7 +21,6 @@ export function NetworkResourceActions({
   enabled,
 }: {
   organisationId: string;
-  organisationName: string;
   role: OrgRole;
   resourceId: string;
   resourceName: string;
@@ -27,10 +29,8 @@ export function NetworkResourceActions({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const allowed = can(role, "manage_networks");
-  const reason = permissionReason(role, "manage_networks");
+  const [confirm, setConfirm] = useState<"disable" | "delete" | null>(null);
+  if (!can(role, "manage_networks")) return null;
 
   function payload(extra: Record<string, string> = {}): FormData {
     const data = new FormData();
@@ -41,80 +41,71 @@ export function NetworkResourceActions({
     return data;
   }
 
+  function setEnabled(next: boolean) {
+    startTransition(async () => {
+      const result = await setNetworkResourceEnabledAction(payload({ enabled: String(next) }));
+      toastResult(result, {
+        success: next ? "Resource enabled" : "Resource disabled",
+        successDescription: next
+          ? `${resourceName} is offered to clients again on their next sync.`
+          : `${resourceName} is withdrawn from clients on their next sync.`,
+      });
+      setConfirm(null);
+      if (result.ok) router.refresh();
+    });
+  }
+
   return (
-    <div className="stack">
-      <div className="row">
-        <span className="badge network">{organisationName}</span>
-        <span className="muted">Acting as {roleLabel(role)}</span>
-      </div>
-      <div className="actions">
-        <button
-          type="button"
-          className="secondary"
-          disabled={!allowed || pending}
-          title={reason ?? undefined}
-          onClick={() => {
-            setError(null);
-            startTransition(async () => {
-              const result = await setNetworkResourceEnabledAction(
-                payload({ enabled: String(!enabled) }),
-              );
-              if (!result.ok) setError(result.error);
-              else router.refresh();
-            });
-          }}
+    <>
+      {enabled ? (
+        <Button variant="secondary" disabled={pending} onClick={() => setConfirm("disable")}>
+          Disable
+        </Button>
+      ) : (
+        <Button
+          variant="secondary"
+          loading={pending && confirm === null}
+          loadingLabel="Enabling…"
+          onClick={() => setEnabled(true)}
         >
-          {enabled ? "Disable and withdraw routes" : "Enable"}
-        </button>
-        {confirming ? (
-          <>
-            <button
-              type="button"
-              className="danger"
-              disabled={!allowed || pending}
-              onClick={() => {
-                setError(null);
-                startTransition(async () => {
-                  const result = await deleteNetworkResourceAction(payload());
-                  if (!result.ok) {
-                    setError(result.error);
-                    return;
-                  }
-                  router.push("/networks");
-                  router.refresh();
-                });
-              }}
-            >
-              Delete {resourceName}
-            </button>
-            <button type="button" className="secondary" onClick={() => setConfirming(false)}>
-              Keep it
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="quiet-danger"
-            disabled={!allowed || pending}
-            title={reason ?? undefined}
-            onClick={() => setConfirming(true)}
-          >
-            Delete…
-          </button>
-        )}
-      </div>
-      {confirming ? (
-        <p className="muted" role="alert">
-          Deleting withdraws this route from every client on their next sync
-          (within about 25 seconds). This cannot be undone.
-        </p>
-      ) : null}
-      {reason ? <p className="muted">{reason}</p> : null}
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      ) : null}
-    </div>
+          Enable
+        </Button>
+      )}
+      <Button variant="quiet-danger" disabled={pending} onClick={() => setConfirm("delete")}>
+        Delete
+      </Button>
+      <ConfirmDialog
+        open={confirm === "disable"}
+        title="Disable this resource?"
+        description={`${resourceName} is withdrawn from every client on its next sync (within about 25 seconds). You can enable it again later.`}
+        confirmLabel="Disable resource"
+        tone="primary"
+        pending={pending}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => setEnabled(false)}
+      />
+      <ConfirmDialog
+        open={confirm === "delete"}
+        title="Delete network resource"
+        description={`${resourceName} is withdrawn from every client on its next sync and its settings are removed. This can't be undone.`}
+        confirmText={resourceName}
+        confirmLabel="Delete resource"
+        pending={pending}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          startTransition(async () => {
+            const result = await deleteNetworkResourceAction(payload());
+            toastResult(result, {
+              success: "Resource deleted",
+              successDescription: `${resourceName} is no longer routed.`,
+            });
+            setConfirm(null);
+            if (!result.ok) return;
+            router.push("/networks");
+            router.refresh();
+          });
+        }}
+      />
+    </>
   );
 }

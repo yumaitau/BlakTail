@@ -1,8 +1,14 @@
 import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
+import { Suspense } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
+import { Badge, StatusPill } from "@/components/ui/badge";
+import { MonoValue } from "@/components/ui/mono-value";
+import { Section } from "@/components/ui/section";
+import { SkeletonTable } from "@/components/ui/skeleton";
 import { PeerLifecycle } from "@/components/peer-lifecycle";
 import { PqPeerTable } from "@/components/pq-peer-table";
 import {
@@ -39,10 +45,33 @@ function age(seconds: number | null): string {
 }
 
 const heartbeatLabel = {
-  online: { label: "Online", className: "online" },
-  stale: { label: "Stale heartbeat", className: "warn" },
-  never: { label: "Never seen", className: "offline" },
+  online: { label: "Online", tone: "success" },
+  stale: { label: "Stale heartbeat", tone: "danger" },
+  never: { label: "Never seen", tone: "muted" },
 } as const;
+
+/** "node.routes_updated" → "Routes updated". */
+function auditLabel(action: string): string {
+  const words = action.replace(/^node\./u, "").replace(/[._]/gu, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : action;
+}
+
+async function TunnelProtection({ ctx, nodeId }: { ctx: ConsoleContext; nodeId: string }) {
+  const protection = await getPqOverview(ctx, nodeId).then(
+    (overview) => ({ rows: overview.peers, error: null }),
+    (error: unknown) => ({
+      rows: [],
+      error: errorText(error, "Could not load tunnel protection."),
+    }),
+  );
+  return protection.error ? (
+    <Alert tone="error" title="Couldn't load tunnel protection">
+      {protection.error}
+    </Alert>
+  ) : (
+    <PqPeerTable rows={protection.rows} />
+  );
+}
 
 const transportLabel = {
   direct: "Direct UDP",
@@ -91,20 +120,30 @@ export default async function DeviceDetailPage({
     return (
       <ConsoleShell ctx={person} current="/devices">
         <div className="stack">
-          <PageHeader eyebrow="Devices" title="Device not found" />
-          <div className="panel">
-            {found && "error" in found ? (
-              <p className="error" role="alert">
-                {found.error}
-              </p>
-            ) : (
+          <Link className="back-link" href="/devices">
+            ← All devices
+          </Link>
+          <PageHeader
+            eyebrow="Devices"
+            title={found ? "Device unavailable" : "Device not found"}
+          />
+          {found && "error" in found ? (
+            <Alert tone="error" title="Couldn't load this device">
+              {found.error}
+            </Alert>
+          ) : (
+            <div className="panel">
               <EmptyState
-                title="No device with that id in your networks"
+                title="No device with that ID in your networks"
                 body="It may have been deleted, or it belongs to a network account you cannot open."
-                action={<Link href="/devices">Back to all devices</Link>}
+                action={
+                  <Link className="button secondary" href="/devices">
+                    Back to all devices
+                  </Link>
+                }
               />
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </ConsoleShell>
     );
@@ -117,67 +156,83 @@ export default async function DeviceDetailPage({
     (row) => row.userId === node.user_id,
   );
   const heartbeat = heartbeatLabel[detail.heartbeat.state];
-  const protection = await getPqOverview(ctx, node.id).then(
-    (overview) => ({ rows: overview.peers, error: null }),
-    (error: unknown) => ({
-      rows: [],
-      error: errorText(error, "Could not load tunnel protection."),
-    }),
-  );
   const lifecycle = detail.lifecycle.state;
 
   return (
     <ConsoleShell ctx={person} current="/devices">
       <div className="stack">
-        <p>
-          <Link href="/devices">← All devices</Link>
-        </p>
+        <Link className="back-link" href="/devices">
+          ← All devices
+        </Link>
         <PageHeader
           eyebrow={ctx.organisationName}
           title={label}
           description={`Technical name ${node.name}. Times use this browser's clock; online and stale are decided by coordinator time.`}
+          actions={
+            lifecycle === "active" ? (
+              <>
+                <Link
+                  className="button secondary"
+                  href={`/devices/${node.id}/terminal?organisation=${ctx.organisationId}`}
+                >
+                  Open terminal (SSH)
+                </Link>
+                <Link
+                  className="button secondary"
+                  href={`/devices/${node.id}/desktop?organisation=${ctx.organisationId}`}
+                >
+                  Open remote desktop (RDP)
+                </Link>
+              </>
+            ) : undefined
+          }
         />
 
-        {lifecycle === "active" ? (
-          <p className="row">
-            <Link href={`/devices/${node.id}/terminal?organisation=${ctx.organisationId}`}>Open browser terminal (SSH)</Link>
-            <Link href={`/devices/${node.id}/desktop?organisation=${ctx.organisationId}`}>Open remote desktop (RDP)</Link>
-          </p>
-        ) : null}
-
-        {lifecycle !== "active" ? (
-          <p className={lifecycle === "suspended" ? "error" : "muted"} role="status">
-            {lifecycle === "suspended"
-              ? `Suspended ${when(detail.lifecycle.suspended_at)}. It is excluded from every peer map until resumed.`
-              : `This device is ${lifecycle}.`}
-          </p>
+        {lifecycle === "suspended" ? (
+          <Alert tone="warning" title="Suspended">
+            Suspended {when(detail.lifecycle.suspended_at)}. It is left out of every peer map until
+            you resume it.
+          </Alert>
+        ) : lifecycle !== "active" ? (
+          <Alert tone="info" title={lifecycle === "revoked" ? "Revoked" : "Deleted"}>
+            This device is {lifecycle}. It can no longer use {ctx.organisationName}.
+          </Alert>
         ) : null}
 
         {detail.version.status === "below_minimum" ? (
-          <p className="error" role="status">
-            Agent {detail.version.agent_version} is older than the minimum this
-            coordinator supports ({detail.version.minimum_version}). Follow the{" "}
+          <Alert tone="warning" title="Agent needs an upgrade">
+            Agent {detail.version.agent_version} is older than the minimum this coordinator
+            supports ({detail.version.minimum_version}). Follow the{" "}
             <a href={UPGRADE_GUIDE_URL}>upgrade guide</a>.
-          </p>
+          </Alert>
         ) : null}
 
-        <section className="panel stack" aria-labelledby="identity-title">
-          <h2 id="identity-title">Identity</h2>
+        <Section id="identity" title="Identity">
           <dl className="details">
             <div>
-              <dt>Node id</dt>
-              <dd className="mono">{node.id}</dd>
+              <dt>Node ID</dt>
+              <dd>
+                <MonoValue value={node.id} copy copyLabel="Copy node ID" />
+              </dd>
             </div>
             <div>
               <dt>Owner</dt>
               <dd>
                 {owner ? owner.name || owner.email : node.user_id || "Unknown"}
-                <div className="muted">Enrolled as {isOrgRole(node.user_role) ? roleLabel(node.user_role) : node.user_role}</div>
+                <div className="cell-sub">
+                  Enrolled as {isOrgRole(node.user_role) ? roleLabel(node.user_role) : node.user_role}
+                </div>
               </dd>
             </div>
             <div>
               <dt>WireGuard key fingerprint</dt>
-              <dd className="mono">{detail.public_key_fingerprint}</dd>
+              <dd>
+                <MonoValue
+                  value={detail.public_key_fingerprint}
+                  copy
+                  copyLabel="Copy key fingerprint"
+                />
+              </dd>
             </div>
             <div>
               <dt>Friendly name</dt>
@@ -189,22 +244,36 @@ export default async function DeviceDetailPage({
             </div>
             <div>
               <dt>MagicDNS</dt>
-              <dd className="mono">{node.dns_name || "—"}</dd>
+              <dd>
+                {node.dns_name ? (
+                  <MonoValue value={node.dns_name} copy copyLabel="Copy MagicDNS name" />
+                ) : (
+                  "Not assigned"
+                )}
+              </dd>
             </div>
             <div>
               <dt>Addresses</dt>
-              <dd className="mono">{node.allowed_ips.join(", ") || "—"}</dd>
+              <dd className="value-list">
+                {node.allowed_ips.length > 0
+                  ? node.allowed_ips.map((ip) => (
+                      <MonoValue key={ip} value={ip} copy copyLabel={`Copy address ${ip}`} />
+                    ))
+                  : "None"}
+              </dd>
             </div>
             <div>
               <dt>Tags</dt>
               <dd>
-                {node.tags.length > 0
-                  ? node.tags.map((tag) => (
-                      <span key={tag} className="badge">
-                        {tag}
-                      </span>
-                    ))
-                  : "None"}
+                {node.tags.length > 0 ? (
+                  <span className="tag-list">
+                    {node.tags.map((tag) => (
+                      <Badge key={tag}>{tag}</Badge>
+                    ))}
+                  </span>
+                ) : (
+                  "None"
+                )}
               </dd>
             </div>
             <div>
@@ -212,17 +281,16 @@ export default async function DeviceDetailPage({
               <dd>{when(node.created_at)}</dd>
             </div>
           </dl>
-        </section>
+        </Section>
 
-        <section className="panel stack" aria-labelledby="health-title">
-          <h2 id="health-title">Health and connectivity</h2>
+        <Section id="health" title="Health and connectivity">
           <dl className="details">
             <div>
               <dt>Last heartbeat</dt>
               <dd>
-                <span className={`badge ${heartbeat.className}`}>{heartbeat.label}</span>{" "}
+                <StatusPill tone={heartbeat.tone}>{heartbeat.label}</StatusPill>{" "}
                 {when(detail.heartbeat.last_seen_at)}
-                <div className="muted">
+                <div className="cell-sub">
                   {age(detail.heartbeat.age_seconds)}
                   {` · online means a heartbeat within ${detail.heartbeat.online_window_seconds} seconds`}
                 </div>
@@ -232,7 +300,7 @@ export default async function DeviceDetailPage({
               <dt>Transport</dt>
               <dd>
                 {transportLabel[detail.transport.state]}
-                <div className="muted">
+                <div className="cell-sub">
                   {detail.transport.reported_at
                     ? `Reported by the agent ${when(detail.transport.reported_at)} from fresh WireGuard handshakes`
                     : "This agent has not reported a measured path. Older agents and idle tunnels report nothing."}
@@ -242,9 +310,13 @@ export default async function DeviceDetailPage({
             <div>
               <dt>Relay-observed UDP endpoint</dt>
               <dd>
-                <span className="mono">{detail.transport.relay_endpoint || "—"}</span>
+                {detail.transport.relay_endpoint ? (
+                  <MonoValue value={detail.transport.relay_endpoint} />
+                ) : (
+                  "Not observed"
+                )}
                 {detail.transport.relay_endpoint_updated_at ? (
-                  <div className="muted">
+                  <div className="cell-sub">
                     Updated {when(detail.transport.relay_endpoint_updated_at)}
                   </div>
                 ) : null}
@@ -255,9 +327,12 @@ export default async function DeviceDetailPage({
               <dd>
                 {when(node.credential_expires_at)}
                 {node.expired ? (
-                  <div className="error">Expired: run blaktaild reauth with a fresh join key.</div>
+                  <div className="cell-sub">
+                    <StatusPill tone="danger">Expired</StatusPill> Run{" "}
+                    <span className="mono">blaktaild reauth</span> with a fresh join key.
+                  </div>
                 ) : node.expires_soon ? (
-                  <div className="muted">Expires within 14 days.</div>
+                  <div className="cell-sub">Expires within 14 days.</div>
                 ) : null}
               </dd>
             </div>
@@ -273,7 +348,7 @@ export default async function DeviceDetailPage({
               <dt>Agent version</dt>
               <dd>
                 <span className="mono">{detail.version.agent_version || "Not reported"}</span>
-                <div className="muted">
+                <div className="cell-sub">
                   {detail.version.status === "below_minimum"
                     ? "Upgrade required."
                     : detail.version.status === "unknown"
@@ -285,46 +360,58 @@ export default async function DeviceDetailPage({
               </dd>
             </div>
           </dl>
-        </section>
+        </Section>
 
-        <section className="panel stack" aria-labelledby="protection-title">
-          <h2 id="protection-title">Tunnel protection per peer</h2>
-          <p className="muted">
-            What this device&apos;s agent reports it negotiated with each peer. Policy is set on{" "}
-            <Link href="/tunnel-protection">Tunnel protection</Link> for {ctx.organisationName}.
-          </p>
-          {protection.error ? (
-            <p className="error" role="alert">
-              {protection.error}
-            </p>
-          ) : (
-            <PqPeerTable rows={protection.rows} />
-          )}
-        </section>
+        <Section
+          id="protection"
+          title="Tunnel protection per peer"
+          description={
+            <>
+              What this device&apos;s agent reports it negotiated with each peer. Policy is set on{" "}
+              <Link href="/tunnel-protection">Tunnel protection</Link> for {ctx.organisationName}.
+            </>
+          }
+        >
+          <Suspense fallback={<SkeletonTable rows={3} label="Loading tunnel protection" />}>
+            <TunnelProtection ctx={ctx} nodeId={node.id} />
+          </Suspense>
+        </Section>
 
-        <section className="panel stack" aria-labelledby="routes-title">
-          <h2 id="routes-title">Routes and policy</h2>
+        <Section id="routes" title="Routes and policy">
           <dl className="details">
             <div>
               <dt>Advertised routes</dt>
-              <dd className="mono">{node.advertised_routes.join(", ") || "None"}</dd>
+              <dd>
+                {node.advertised_routes.length > 0 ? (
+                  <MonoValue value={node.advertised_routes.join(", ")} wrap />
+                ) : (
+                  "None"
+                )}
+              </dd>
             </div>
             <div>
               <dt>Approved routes</dt>
-              <dd className="mono">
-                {node.approved_routes
-                  .map((route) => (route === "0.0.0.0/0" ? "exit node" : route))
-                  .join(", ") || "None"}
+              <dd>
+                {node.approved_routes.length > 0 ? (
+                  <MonoValue
+                    value={node.approved_routes
+                      .map((route) => (route === "0.0.0.0/0" ? "exit node" : route))
+                      .join(", ")}
+                    wrap
+                  />
+                ) : (
+                  "None"
+                )}
               </dd>
             </div>
           </dl>
           <p className="muted">
-            Approve routes from the device row on <Link href="/devices">Devices</Link>.
+            Approve routes from the device&apos;s details on <Link href="/devices">Devices</Link>.
             Which peers can reach this device is decided by tags and the{" "}
             <Link href="/acls">access policy</Link> for {ctx.organisationName}.
           </p>
-          <nav aria-label="Related pages for this device">
-            <ul className="audit-details">
+          <nav className="stack" aria-label="Related pages for this device">
+            <ul className="link-list">
               <li>
                 <Link href={`/topology?node=${node.id}&organisation=${ctx.organisationId}`}>
                   Who this device can reach, and who can reach it
@@ -347,7 +434,7 @@ export default async function DeviceDetailPage({
               the switcher; make sure it is {ctx.organisationName}.
             </p>
           </nav>
-        </section>
+        </Section>
 
         <PeerLifecycle
           nodeId={node.id}
@@ -360,23 +447,29 @@ export default async function DeviceDetailPage({
           tags={node.tags}
         />
 
-        <section className="panel stack" aria-labelledby="audit-title">
-          <h2 id="audit-title">Recent changes to this device</h2>
+        <Section id="audit" title="Recent changes to this device">
           {detail.audit.length === 0 ? (
-            <p className="muted">
-              No audited changes in the latest {ctx.organisationName} audit window.
-            </p>
+            <EmptyState
+              compact
+              headingLevel={3}
+              title="No recent changes"
+              body={`Nothing was audited for this device in the latest ${ctx.organisationName} audit window.`}
+            />
           ) : (
             <ol className="audit-trail">
               {detail.audit.map((event) => (
                 <li key={event.id} className="audit-event">
                   <span className="audit-node" aria-hidden="true" />
-                  <strong>{event.action}</strong>
+                  <strong title={event.action}>{auditLabel(event.action)}</strong>
                   <div>
                     {event.actor_email || event.actor_name || event.actor_user_id}
                     {event.actor_role ? ` · ${event.actor_role}` : ""}
                   </div>
-                  <div className="muted mono">{new Date(event.created_at * 1000).toISOString()}</div>
+                  <div className="cell-sub">
+                    <time dateTime={new Date(event.created_at * 1000).toISOString()}>
+                      {when(event.created_at)}
+                    </time>
+                  </div>
                 </li>
               ))}
             </ol>
@@ -385,7 +478,7 @@ export default async function DeviceDetailPage({
             The full trail is on the <Link href="/audit">audit log</Link> for the
             organisation selected in the switcher.
           </p>
-        </section>
+        </Section>
       </div>
     </ConsoleShell>
   );

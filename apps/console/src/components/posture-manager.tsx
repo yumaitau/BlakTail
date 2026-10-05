@@ -9,8 +9,22 @@ import {
   type PostureActionResult,
 } from "@/app/posture/actions";
 import type { PostureCheck, PostureDefinition } from "@/lib/coord-policy";
+import { EmptyState } from "./empty-state";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { Section } from "./ui/section";
+import { toastResult } from "./ui/toast";
 
 const OS_FAMILIES = ["linux", "macos", "ios", "android", "windows"];
+const OS_LABEL: Record<string, string> = {
+  linux: "Linux",
+  macos: "macOS",
+  ios: "iOS",
+  android: "Android",
+  windows: "Windows",
+};
 
 export type IntegrationOption = { id: string; name: string; provider: string };
 
@@ -40,9 +54,11 @@ function describeDefinition(
   }
   if (definition.require_approved_peer) parts.push("Device active with an unexpired credential");
   if (definition.min_agent_version) parts.push(`Agent ${definition.min_agent_version} or later`);
-  if (definition.os_families?.length) parts.push(`OS is ${definition.os_families.join(" or ")}`);
+  if (definition.os_families?.length) {
+    parts.push(`OS is ${definition.os_families.map((family) => OS_LABEL[family] ?? family).join(" or ")}`);
+  }
   for (const [family, version] of Object.entries(definition.min_os_versions ?? {})) {
-    parts.push(`${family} ${version} or later`);
+    parts.push(`${OS_LABEL[family] ?? family} ${version} or later`);
   }
   if (definition.max_credential_age_secs !== undefined) {
     parts.push(`Credential renewed within ${hours(definition.max_credential_age_secs)} h`);
@@ -63,32 +79,43 @@ function CheckForm({
   disabled,
   integrations,
   onDone,
+  onCancel,
 }: {
   check?: PostureCheck;
   disabled: boolean;
   integrations: IntegrationOption[];
   onDone: () => void;
+  onCancel?: () => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const definition = check?.definition ?? { on_missing_data: "fail" };
   const prefix = check ? `edit-${check.id}` : "new";
   return (
     <form
-      className="stack"
+      className="ui-form wide"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
-        const form = new FormData(event.currentTarget);
-        setError(null);
+        const formElement = event.currentTarget;
+        const form = new FormData(formElement);
+        setErrors({});
         startTransition(async () => {
           const result: PostureActionResult = check
             ? await updatePostureCheckAction(form)
             : await createPostureCheckAction(form);
-          if (!result.ok) {
-            setError(result.error);
-            return;
-          }
+          setErrors(
+            toastResult(result, {
+              success: check ? "Posture check updated" : "Posture check created",
+              successDescription: check
+                ? `${check.name} is now version ${check.version + 1}.`
+                : "Name it in an allow or SSH rule to start gating access.",
+              errorToast: false,
+            }),
+          );
+          if (!result.ok) return;
+          if (!check) formElement.reset();
           onDone();
           router.refresh();
         });
@@ -99,24 +126,65 @@ function CheckForm({
           <input type="hidden" name="id" value={check.id} />
           <input type="hidden" name="version" value={check.version} />
         </>
-      ) : (
-        <label>
-          Name
-          <input name="name" required pattern="[a-z][a-z0-9-]{0,31}" placeholder="baseline" disabled={disabled} />
-        </label>
-      )}
-      <label>
-        Description
-        <input name="description" maxLength={200} defaultValue={definition.description ?? ""} disabled={disabled} />
-      </label>
-      <div className="acl-rule-grid">
-        <label className="acl-selector">
-          <span>Minimum agent version</span>
-          <input name="min_agent_version" placeholder="0.2.0" defaultValue={definition.min_agent_version ?? ""} disabled={disabled} />
-        </label>
-        <fieldset className="acl-selector" disabled={disabled}>
+      ) : null}
+      <div className="ui-form-grid">
+        {check ? null : (
+          <FormField
+            label="Name"
+            hint="Lowercase letters, digits and hyphens. Rules refer to it by this name."
+            required
+            error={errors.name}
+          >
+            <input
+              name="name"
+              className="mono"
+              maxLength={32}
+              placeholder="baseline"
+              autoComplete="off"
+              spellCheck={false}
+              disabled={disabled}
+            />
+          </FormField>
+        )}
+        <FormField label="Description" hint="Optional. Shown to admins." error={errors.description}>
+          <input
+            name="description"
+            maxLength={200}
+            defaultValue={definition.description ?? ""}
+            disabled={disabled}
+          />
+        </FormField>
+      </div>
+
+      <fieldset className="ui-fieldset" disabled={disabled}>
+        <legend>Device reports</legend>
+        <div className="ui-form-grid">
+          <FormField label="Minimum agent version" error={errors.min_agent_version}>
+            <input
+              name="min_agent_version"
+              className="mono"
+              placeholder="0.2.0"
+              defaultValue={definition.min_agent_version ?? ""}
+            />
+          </FormField>
+          <FormField
+            label="Minimum OS versions"
+            hint="Comma-separated, for example macos=14.0, linux=22.04."
+            error={errors.min_os_versions}
+          >
+            <input
+              name="min_os_versions"
+              className="mono"
+              placeholder="macos=14.0, linux=22.04"
+              defaultValue={Object.entries(definition.min_os_versions ?? {})
+                .map(([family, version]) => `${family}=${version}`)
+                .join(", ")}
+            />
+          </FormField>
+        </div>
+        <fieldset className="acl-selector">
           <legend>Allowed operating systems</legend>
-          <div className="acl-options">
+          <div className="ui-choices">
             {OS_FAMILIES.map((family) => (
               <label key={family}>
                 <input
@@ -125,109 +193,126 @@ function CheckForm({
                   value={family}
                   defaultChecked={definition.os_families?.includes(family)}
                 />
-                {family}
+                {OS_LABEL[family]}
               </label>
             ))}
           </div>
         </fieldset>
-        <label className="acl-selector">
-          <span>Minimum OS versions</span>
-          <input
-            name="min_os_versions"
-            placeholder="macos=14.0, linux=22.04"
-            defaultValue={Object.entries(definition.min_os_versions ?? {})
-              .map(([family, version]) => `${family}=${version}`)
-              .join(", ")}
-            disabled={disabled}
-          />
-        </label>
-        <label className="acl-selector">
-          <span>Credential renewed within (hours)</span>
-          <input
-            name="max_credential_age_hours"
-            inputMode="decimal"
-            placeholder="168"
-            defaultValue={hours(definition.max_credential_age_secs)}
-            disabled={disabled}
-          />
-        </label>
-        <label className="acl-selector">
-          <span>Inventory reported within (hours)</span>
-          <input
-            name="max_report_age_hours"
-            inputMode="decimal"
-            placeholder="24"
-            defaultValue={hours(definition.max_report_age_secs)}
-            disabled={disabled}
-          />
-        </label>
-        <label className="acl-selector">
-          <span>When data is missing or stale</span>
-          <select name="on_missing_data" defaultValue={definition.on_missing_data ?? "fail"} disabled={disabled}>
-            <option value="fail">Fail the check (fail-closed)</option>
-            <option value="pass">Pass the check (fail-open)</option>
-          </select>
-        </label>
-      </div>
-      {integrations.length ? (
-        <fieldset className="acl-rule-grid" disabled={disabled}>
-          <legend>Device-health provider</legend>
-          <label className="acl-selector">
-            <span>Require a healthy record from</span>
-            <select name="integration_id" defaultValue={definition.integration?.integration_id ?? ""}>
-              <option value="">No provider requirement</option>
-              {integrations.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.provider} ({option.name})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="acl-selector">
-            <span>Provider data confirmed within (minutes)</span>
+      </fieldset>
+
+      <fieldset className="ui-fieldset" disabled={disabled}>
+        <legend>Freshness</legend>
+        <div className="ui-form-grid">
+          <FormField
+            label="Credential renewed within"
+            hint="Hours. Leave blank for no limit."
+            error={errors.max_credential_age_hours}
+          >
             <input
-              name="integration_max_age_minutes"
-              type="number"
-              min={1}
-              defaultValue={Math.round((definition.integration?.max_age_secs ?? 3600) / 60)}
+              name="max_credential_age_hours"
+              inputMode="decimal"
+              placeholder="168"
+              defaultValue={hours(definition.max_credential_age_secs)}
             />
-          </label>
-          <label className="acl-selector">
-            <span>Provider last saw the device within (hours, optional)</span>
+          </FormField>
+          <FormField
+            label="Inventory reported within"
+            hint="Hours. Leave blank for no limit."
+            error={errors.max_report_age_hours}
+          >
             <input
-              name="integration_last_seen_hours"
+              name="max_report_age_hours"
               inputMode="decimal"
               placeholder="24"
-              defaultValue={hours(definition.integration?.max_last_seen_secs)}
+              defaultValue={hours(definition.max_report_age_secs)}
             />
-          </label>
-          <label className="acl-selector">
-            <span>During a provider outage</span>
-            <select name="integration_on_outage" defaultValue={definition.integration?.on_outage ?? "fail"}>
-              <option value="fail">Fail once data is stale (fail-closed)</option>
-              <option value="pass">Keep last known passing devices (fail-open)</option>
+          </FormField>
+          <FormField label="When data is missing or stale">
+            <select name="on_missing_data" defaultValue={definition.on_missing_data ?? "fail"}>
+              <option value="fail">Fail the check (fail-closed)</option>
+              <option value="pass">Pass the check (fail-open)</option>
             </select>
-          </label>
+          </FormField>
+        </div>
+        <label>
+          <input
+            type="checkbox"
+            name="require_approved_peer"
+            defaultChecked={definition.require_approved_peer ?? false}
+          />
+          Require an active device with an unexpired credential
+        </label>
+      </fieldset>
+
+      {integrations.length ? (
+        <fieldset className="ui-fieldset" disabled={disabled}>
+          <legend>Device-health provider</legend>
+          <div className="ui-form-grid">
+            <FormField label="Require a healthy record from">
+              <select
+                name="integration_id"
+                defaultValue={definition.integration?.integration_id ?? ""}
+              >
+                <option value="">No provider requirement</option>
+                {integrations.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.provider} ({option.name})
+                  </option>
+                ))}
+              </select>
+            </FormField>
+            <FormField
+              label="Provider data confirmed within"
+              hint="Minutes."
+              error={errors.integration_max_age_minutes}
+            >
+              <input
+                name="integration_max_age_minutes"
+                type="number"
+                min={1}
+                defaultValue={Math.round((definition.integration?.max_age_secs ?? 3600) / 60)}
+              />
+            </FormField>
+            <FormField
+              label="Provider last saw the device within"
+              hint="Hours, optional."
+              error={errors.integration_last_seen_hours}
+            >
+              <input
+                name="integration_last_seen_hours"
+                inputMode="decimal"
+                placeholder="24"
+                defaultValue={hours(definition.integration?.max_last_seen_secs)}
+              />
+            </FormField>
+            <FormField label="During a provider outage">
+              <select
+                name="integration_on_outage"
+                defaultValue={definition.integration?.on_outage ?? "fail"}
+              >
+                <option value="fail">Fail once data is stale (fail-closed)</option>
+                <option value="pass">Keep last known passing devices (fail-open)</option>
+              </select>
+            </FormField>
+          </div>
         </fieldset>
       ) : null}
-      <label>
-        <input
-          type="checkbox"
-          name="require_approved_peer"
-          defaultChecked={definition.require_approved_peer ?? false}
+
+      <div className="ui-form-actions">
+        <Button
+          type="submit"
           disabled={disabled}
-        />{" "}
-        Require an active device with an unexpired credential
-      </label>
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      <div className="actions">
-        <button type="submit" disabled={disabled || pending} id={`${prefix}-submit`}>
-          {pending ? "Saving…" : check ? `Save version ${check.version + 1}` : "Create posture check"}
-        </button>
+          loading={pending}
+          loadingLabel="Saving…"
+          id={`${prefix}-submit`}
+        >
+          {check ? `Save version ${check.version + 1}` : "Create posture check"}
+        </Button>
+        {onCancel ? (
+          <Button variant="secondary" onClick={onCancel} disabled={pending}>
+            Cancel
+          </Button>
+        ) : null}
       </div>
     </form>
   );
@@ -236,97 +321,145 @@ function CheckForm({
 export function PostureManager({
   checks,
   canManage,
-  reason,
   integrations = [],
 }: {
   checks: PostureCheck[];
   canManage: boolean;
-  reason: string | null;
   integrations?: IntegrationOption[];
 }) {
   const router = useRouter();
   const [editing, setEditing] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<PostureCheck | null>(null);
   const [pending, startTransition] = useTransition();
   return (
-    <div className="stack">
-      {checks.length === 0 ? (
-        <p className="muted">
-          No posture checks yet. A check does nothing until an allow rule names it.
-        </p>
-      ) : (
-        <ul className="acl-rule-list">
-          {checks.map((check) => (
-            <li key={check.id} className="acl-rule">
-              <div className="acl-rule-head">
-                <h3>
-                  {check.name} <span className="badge">version {check.version}</span>
-                </h3>
-                {canManage ? (
-                  <div className="row">
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => setEditing(editing === check.id ? null : check.id)}
-                    >
-                      {editing === check.id ? "Cancel" : "Edit"}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      disabled={pending || check.referenced_by.length > 0}
-                      title={
-                        check.referenced_by.length > 0
-                          ? "Remove it from access policy before deleting."
-                          : undefined
-                      }
-                      onClick={() => {
-                        setError(null);
-                        startTransition(async () => {
-                          const result = await deletePostureCheckAction(check.id);
-                          if (!result.ok) setError(result.error);
-                          else router.refresh();
-                        });
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
+    <>
+      <Section
+        id="checks"
+        title="Checks"
+        description="A check does nothing until an allow or SSH rule names it."
+        actions={
+          checks.length > 0 ? (
+            <Badge dot={false}>
+              {checks.length} {checks.length === 1 ? "check" : "checks"}
+            </Badge>
+          ) : null
+        }
+      >
+        {checks.length === 0 ? (
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No posture checks yet"
+            body={
+              canManage
+                ? "Create one below, then name it in an allow rule on the Access page."
+                : "When an admin creates one, it shows here with the devices it affects."
+            }
+          />
+        ) : (
+          <ul className="acl-rule-list">
+            {checks.map((check) => (
+              <li key={check.id} className="acl-rule">
+                <div className="acl-rule-head">
+                  <h3 className="posture-name">
+                    <span className="mono">{check.name}</span>
+                    <Badge dot={false}>Version {check.version}</Badge>
+                    {check.referenced_by.length ? (
+                      <Badge tone="success">In use</Badge>
+                    ) : (
+                      <Badge tone="muted">Not used</Badge>
+                    )}
+                  </h3>
+                  {canManage ? (
+                    <div className="cell-actions">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        aria-expanded={editing === check.id}
+                        onClick={() => setEditing(editing === check.id ? null : check.id)}
+                      >
+                        {editing === check.id ? "Close editor" : "Edit"}
+                      </Button>
+                      <Button
+                        variant="quiet-danger"
+                        size="sm"
+                        disabled={pending || check.referenced_by.length > 0}
+                        title={
+                          check.referenced_by.length > 0
+                            ? "Remove it from the access policy before deleting."
+                            : undefined
+                        }
+                        onClick={() => setConfirmDelete(check)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+                {check.definition.description ? (
+                  <p className="posture-description">{check.definition.description}</p>
                 ) : null}
-              </div>
-              {check.definition.description ? <p>{check.definition.description}</p> : null}
-              <ul className="audit-details">
-                {describeDefinition(check.definition, integrations).map((part) => (
-                  <li key={part}>{part}</li>
-                ))}
-              </ul>
-              <p className="muted">
-                {check.referenced_by.length
-                  ? `Gates ${check.referenced_by.join(", ")} in the published policy.`
-                  : "Not referenced by the published policy."}
-              </p>
-              {editing === check.id ? (
-                <CheckForm
-                  check={check}
-                  disabled={!canManage}
-                  integrations={integrations}
-                  onDone={() => setEditing(null)}
-                />
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
+                <ul className="audit-details">
+                  {describeDefinition(check.definition, integrations).map((part) => (
+                    <li key={part}>{part}</li>
+                  ))}
+                </ul>
+                <p className="muted small">
+                  {check.referenced_by.length
+                    ? `Gates ${check.referenced_by.join(", ")} in the published policy. Remove it there before deleting.`
+                    : "Not referenced by the published policy."}
+                </p>
+                {editing === check.id ? (
+                  <CheckForm
+                    check={check}
+                    disabled={!canManage}
+                    integrations={integrations}
+                    onDone={() => setEditing(null)}
+                    onCancel={() => setEditing(null)}
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      {canManage ? (
+        <Section
+          id="new-check"
+          title="New posture check"
+          description="Set at least one requirement. Leave the rest blank."
+        >
+          <CheckForm disabled={false} integrations={integrations} onDone={() => undefined} />
+        </Section>
       ) : null}
-      <div>
-        <h2>New posture check</h2>
-        {reason ? <p className="muted">{reason}</p> : null}
-        <CheckForm disabled={!canManage} integrations={integrations} onDone={() => undefined} />
-      </div>
-    </div>
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete posture check"
+        description={
+          confirmDelete
+            ? `${confirmDelete.name} and all its versions are deleted. No rule uses it, so access doesn't change.`
+            : null
+        }
+        confirmText={confirmDelete?.name}
+        confirmLabel="Delete check"
+        pending={pending}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => {
+          if (!confirmDelete) return;
+          const check = confirmDelete;
+          startTransition(async () => {
+            const result = await deletePostureCheckAction(check.id);
+            toastResult(result, {
+              success: "Posture check deleted",
+              successDescription: `${check.name} is gone.`,
+            });
+            setConfirmDelete(null);
+            if (result.ok) router.refresh();
+          });
+        }}
+      />
+    </>
   );
 }

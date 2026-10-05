@@ -1,4 +1,5 @@
 import type { ChangeDraft, ChangeSurface } from "@/lib/coord-changes";
+import type { BadgeTone } from "@/components/ui/badge";
 import type { Permission } from "@/lib/roles";
 
 export const SURFACES: { value: ChangeSurface; label: string; permission: Permission }[] = [
@@ -7,15 +8,20 @@ export const SURFACES: { value: ChangeSurface; label: string; permission: Permis
   { value: "dns", label: "DNS", permission: "manage_dns" },
 ];
 
+/** Lower-case noun for sentences: "Changes the access policy and DNS." */
+export function surfaceNoun(value: ChangeSurface): string {
+  return value === "policy" ? "the access policy" : value === "dns" ? "DNS" : "network resources";
+}
+
 export function surfaceLabel(value: ChangeSurface): string {
   return SURFACES.find((surface) => surface.value === value)?.label ?? value;
 }
 
-export const statusBadge: Record<ChangeDraft["status"], string> = {
-  open: "pending",
-  published: "online",
-  discarded: "offline",
-  expired: "offline",
+export const draftStatus: Record<ChangeDraft["status"], { label: string; tone: BadgeTone }> = {
+  open: { label: "Open", tone: "warning" },
+  published: { label: "Published", tone: "success" },
+  discarded: { label: "Discarded", tone: "muted" },
+  expired: { label: "Expired", tone: "muted" },
 };
 
 export function when(seconds: number | null | undefined): string {

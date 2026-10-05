@@ -1,6 +1,21 @@
 import Link from "next/link";
 import { EmptyState } from "@/components/empty-state";
+import { StatusPill, type BadgeTone } from "@/components/ui/badge";
+import { Table, Td } from "@/components/ui/table";
 import { protectionLabel, type PqPeerProtection } from "@/lib/coord-pq";
+
+const TONE: Record<string, BadgeTone> = {
+  online: "success",
+  warn: "danger",
+  offline: "muted",
+  "": "neutral",
+};
+
+const MODE_LABEL: Record<string, string> = {
+  off: "Off",
+  prefer: "Prefer",
+  require: "Require",
+};
 
 /** Per-peer negotiated protection, as each agent reported it. */
 export function PqPeerTable({
@@ -15,17 +30,19 @@ export function PqPeerTable({
   if (rows.length === 0) {
     return (
       <EmptyState
+        compact
+        headingLevel={3}
         title="No reports yet"
         body="Agents report per-peer protection once the organisation policy is prefer or require. Until then every tunnel is classical WireGuard."
       />
     );
   }
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <caption className="muted">
-          Reported by the agent on each device. Stale means no report for five minutes.
-        </caption>
+    <>
+      <p className="muted small">
+        Reported by the agent on each device. Stale means no report for five minutes.
+      </p>
+      <Table label="Per-peer tunnel protection" mobile="stack">
         <thead>
           <tr>
             {showDevice ? <th scope="col">Device</th> : null}
@@ -41,26 +58,30 @@ export function PqPeerTable({
             return (
               <tr key={`${row.node_id}-${row.peer_id}`}>
                 {showDevice ? (
-                  <td>
+                  <Td label="Device">
                     <Link href={`/devices/${row.node_id}`}>
                       {deviceNames?.get(row.node_id) ?? row.node_id}
                     </Link>
-                  </td>
+                  </Td>
                 ) : null}
-                <td>
+                <Td label="Peer">
                   <Link href={`/devices/${row.peer_id}`}>{row.peer_name}</Link>
-                </td>
-                <td>
-                  <span className={shown.tone ? `badge ${shown.tone}` : "badge"}>{shown.label}</span>
-                  {row.stale ? <div className="muted">Stale report</div> : null}
-                </td>
-                <td>{row.mode}</td>
-                <td className="muted">{shown.detail}</td>
+                </Td>
+                <Td label="Protection">
+                  <div>
+                    <StatusPill tone={TONE[shown.tone] ?? "neutral"}>{shown.label}</StatusPill>
+                    {row.stale ? <div className="cell-sub">Stale report</div> : null}
+                  </div>
+                </Td>
+                <Td label="Policy">{MODE_LABEL[row.mode] ?? row.mode}</Td>
+                <Td label="Detail" className="muted">
+                  {shown.detail}
+                </Td>
               </tr>
             );
           })}
         </tbody>
-      </table>
-    </div>
+      </Table>
+    </>
   );
 }

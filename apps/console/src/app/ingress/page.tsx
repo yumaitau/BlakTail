@@ -1,15 +1,18 @@
+import { Suspense } from "react";
 import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
 import { IngressManager } from "@/components/ingress/ingress-manager";
 import { PageHeader } from "@/components/page-header";
+import { Alert } from "@/components/ui/alert";
+import { Section } from "@/components/ui/section";
+import { Skeleton } from "@/components/ui/skeleton";
 import { listNodes } from "@/lib/coord";
 import { getIngressWorkspace, type IngressWorkspace } from "@/lib/coord-ingress";
 import { listServices } from "@/lib/coord-services";
-import { can, permissionReason, roleLabel } from "@/lib/roles";
-import { requireConsoleContext } from "@/lib/session";
+import { can, permissionReason } from "@/lib/roles";
+import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
-export default async function IngressPage() {
-  const ctx = await requireConsoleContext();
+async function IngressBody({ ctx }: { ctx: ConsoleContext }) {
   let workspace: IngressWorkspace | null = null;
   let error: string | null = null;
   try {
@@ -17,12 +20,19 @@ export default async function IngressPage() {
   } catch (err) {
     error = errorText(err, "Could not load public ingress.");
   }
+  if (!workspace) {
+    return (
+      <Alert tone="error" title="Couldn't load public ingress">
+        {error}
+      </Alert>
+    );
+  }
   const canManage = can(ctx.role, "manage_public_ingress");
   const [nodes, services] = canManage
     ? await Promise.all([
         listNodes(ctx).catch(() => []),
         listServices(ctx)
-          .then((workspace) => workspace.services)
+          .then((result) => result.services)
           .catch(() => []),
       ])
     : [[], []];
@@ -34,32 +44,36 @@ export default async function IngressPage() {
     .map((service) => ({ id: service.id, label: `${service.name} (${service.fqdn})` }));
 
   return (
+    <IngressManager
+      workspace={workspace}
+      devices={devices}
+      services={httpServices}
+      ownerReason={permissionReason(ctx.role, "manage_public_ingress")}
+      canEmergencyDisable={can(ctx.role, "manage_services") || canManage}
+    />
+  );
+}
+
+export default async function IngressPage() {
+  const ctx = await requireConsoleContext();
+
+  return (
     <ConsoleShell ctx={ctx} current="/ingress">
       <div className="stack">
         <PageHeader
           eyebrow="Services"
           title="Public ingress"
-          description="PUBLIC: routes here put a service on the Internet through an ingress host your organisation runs onshore. Anyone who can reach the ingress can reach the route, subject to its sign-in and limits. Private services stay on the Private services page."
+          description="Routes here put a service on the Internet through an ingress host your organisation runs onshore. Anyone who can reach the ingress can reach the route, subject to its sign-in and limits. Private services stay on the Private services page."
         />
-        {workspace ? (
-          <IngressManager
-            workspace={workspace}
-            devices={devices}
-            services={httpServices}
-            organisationName={ctx.organisationName}
-            roleLabel={roleLabel(ctx.role).toLowerCase()}
-            ownerReason={permissionReason(ctx.role, "manage_public_ingress")}
-            canEmergencyDisable={
-              can(ctx.role, "manage_services") || can(ctx.role, "manage_public_ingress")
-            }
-          />
-        ) : (
-          <div className="panel stack">
-            <h2>Public ingress unavailable</h2>
-            <p className="error">{error}</p>
-            <p className="muted">Check that the coordinator is reachable, then reload this page.</p>
-          </div>
-        )}
+        <Suspense
+          fallback={
+            <Section title="Organisation setting">
+              <Skeleton lines={4} label="Loading public ingress" />
+            </Section>
+          }
+        >
+          <IngressBody ctx={ctx} />
+        </Suspense>
       </div>
     </ConsoleShell>
   );

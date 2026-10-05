@@ -470,8 +470,19 @@ function ControlCenterInner({
             {emptyMessage ? (
               <div className="cc-empty" role="status">
                 <p>{emptyMessage}</p>
-                {topology.nodes.length === 0 ? <Link href="/join-keys">Create a join key</Link> : null}
-                {tab === "networks" && topology.resources.length === 0 ? <Link href="/networks/new">New resource</Link> : null}
+                {topology.nodes.length === 0 ? (
+                  <Link className="button" href="/join-keys">
+                    Create a join key
+                  </Link>
+                ) : tab === "networks" && topology.resources.length === 0 ? (
+                  <Link className="button" href="/networks/new">
+                    New resource
+                  </Link>
+                ) : graph.nodes.length > 0 && graph.edges.length === 0 ? (
+                  <Link className="button secondary" href="/acls">
+                    Review access policy
+                  </Link>
+                ) : null}
               </div>
             ) : null}
           </div>

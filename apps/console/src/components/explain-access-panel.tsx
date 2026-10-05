@@ -5,6 +5,12 @@ import { explainAccessAction, type ExplainForm } from "@/app/acls/actions";
 import type { ExplainResult } from "@/lib/coord-policy";
 import { ACL_ROLES, ACL_TAGS, personLabel, type AclPerson } from "@/lib/acl";
 import { roleLabel } from "@/lib/roles";
+import { EmptyState } from "./empty-state";
+import { Alert } from "./ui/alert";
+import { Badge, type BadgeTone } from "./ui/badge";
+import { Button } from "./ui/button";
+import { FormField } from "./ui/form-field";
+import { Section } from "./ui/section";
 
 export type ExplainDevice = { id: string; label: string; os: string | null };
 
@@ -25,17 +31,17 @@ const ENFORCEMENT: Record<ExplainResult["enforcement"]["state"], string> = {
   unknown: "Enforcement not proven on this device",
 };
 
-function verdict(result: ExplainResult): { text: string; badge: string } {
+function verdict(result: ExplainResult): { text: string; tone: BadgeTone } {
   const enforced =
     result.enforcement.state === "device_enforced" || result.enforcement.state === "peer_map";
   if (result.decision === "allow") {
     return enforced
-      ? { text: "Allowed and enforced on the destination", badge: "badge online" }
-      : { text: "Allowed by policy, but not enforced on this device", badge: "badge pending" };
+      ? { text: "Allowed and enforced on the destination", tone: "success" }
+      : { text: "Allowed by policy, but not enforced on this device", tone: "warning" };
   }
   return enforced
-    ? { text: "Denied and enforced", badge: "badge revoked" }
-    : { text: "Denied by policy, but this device does not enforce it", badge: "badge pending" };
+    ? { text: "Denied and enforced", tone: "danger" }
+    : { text: "Denied by policy, but this device does not enforce it", tone: "warning" };
 }
 
 export function ExplainAccessPanel({
@@ -68,27 +74,26 @@ export function ExplainAccessPanel({
 
   if (devices.length === 0) {
     return (
-      <section className="acl-section" aria-labelledby="explain-heading">
-        <h2 id="explain-heading">Explain access</h2>
-        <p className="muted">Enrol a device first. Explanations need a destination device.</p>
-      </section>
+      <Section id="explain" title="Explain access">
+        <EmptyState
+          compact
+          headingLevel={3}
+          title="No devices to explain yet"
+          body="Explanations need a destination device. Enrol one with a join key, then come back."
+        />
+      </Section>
     );
   }
 
   return (
-    <section className="acl-section" aria-labelledby="explain-heading">
-      <div>
-        <h2 id="explain-heading">Explain access</h2>
-        <p className="muted">
-          The coordinator re-runs its evaluator and peer-map compiler against the
-          published policy for {organisationName}. Nothing is sent over the
-          network, and unsaved edits in the editor are not included. Your{" "}
-          {roleLabel(role as "owner" | "admin" | "member").toLowerCase()} role
-          can explain; it never changes policy.
-        </p>
-      </div>
+    <Section
+      id="explain"
+      title="Explain access"
+      description={`Check whether one device can reach another under the published policy for ${organisationName}. Nothing is sent over the network, unsaved edits above are not included, and your ${roleLabel(role as "owner" | "admin" | "member").toLowerCase()} role never changes policy here.`}
+    >
       <form
-        className="stack"
+        className="ui-form wide"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           setError(null);
@@ -103,9 +108,9 @@ export function ExplainAccessPanel({
           });
         }}
       >
-        <fieldset className="acl-selector">
+        <fieldset className="ui-fieldset">
           <legend>Source</legend>
-          <div className="acl-options">
+          <div className="ui-choices">
             <label>
               <input
                 type="radio"
@@ -125,10 +130,8 @@ export function ExplainAccessPanel({
               A person, role or tags
             </label>
           </div>
-        </fieldset>
         {form.sourceMode === "device" ? (
-          <label>
-            Source device
+          <FormField label="Source device" className="field-lg">
             <select
               value={form.sourceNodeId}
               onChange={(event) => update({ sourceNodeId: event.target.value })}
@@ -139,11 +142,10 @@ export function ExplainAccessPanel({
                 </option>
               ))}
             </select>
-          </label>
+          </FormField>
         ) : (
-          <div className="acl-rule-grid">
-            <label className="acl-selector">
-              <span>Person</span>
+          <div className="ui-form-grid">
+            <FormField label="Person">
               <select
                 value={form.sourceUser}
                 onChange={(event) => update({ sourceUser: event.target.value })}
@@ -155,9 +157,8 @@ export function ExplainAccessPanel({
                   </option>
                 ))}
               </select>
-            </label>
-            <label className="acl-selector">
-              <span>Role</span>
+            </FormField>
+            <FormField label="Role">
               <select
                 value={form.sourceRole}
                 onChange={(event) => update({ sourceRole: event.target.value })}
@@ -168,10 +169,10 @@ export function ExplainAccessPanel({
                   </option>
                 ))}
               </select>
-            </label>
+            </FormField>
             <fieldset className="acl-selector">
               <legend>Tags</legend>
-              <div className="acl-options">
+              <div className="ui-choices">
                 {ACL_TAGS.map((tag) => (
                   <label key={tag}>
                     <input
@@ -192,9 +193,10 @@ export function ExplainAccessPanel({
             </fieldset>
           </div>
         )}
-        <div className="acl-rule-grid">
-          <label className="acl-selector">
-            <span>Destination device</span>
+        </fieldset>
+        <fieldset className="ui-fieldset">
+          <legend>Destination</legend>
+          <FormField label="Destination device" className="field-lg">
             <select
               value={form.destinationNodeId}
               onChange={(event) => update({ destinationNodeId: event.target.value })}
@@ -205,9 +207,9 @@ export function ExplainAccessPanel({
                 </option>
               ))}
             </select>
-          </label>
-          <label className="acl-selector">
-            <span>Protocol</span>
+          </FormField>
+          <div className="ui-form-grid">
+          <FormField label="Protocol">
             <select
               value={form.protocol}
               disabled={sshMode}
@@ -218,40 +220,46 @@ export function ExplainAccessPanel({
               <option value="udp">UDP</option>
               <option value="icmp">ICMP</option>
             </select>
-          </label>
-          <label className="acl-selector">
-            <span>Port</span>
+          </FormField>
+          <FormField label="Port" hint="Leave blank for any port.">
             <input
+              className="mono"
               inputMode="numeric"
               value={form.port}
               disabled={sshMode || form.protocol === "icmp"}
               placeholder="443"
               onChange={(event) => update({ port: event.target.value })}
             />
-          </label>
-          <label className="acl-selector">
-            <span>Or SSH login</span>
+          </FormField>
+          <FormField label="Or SSH login" hint="Checks SSH rules instead of a port.">
             <input
+              className="mono"
               value={form.sshUser}
               placeholder="deploy"
               autoComplete="off"
               onChange={(event) => update({ sshUser: event.target.value })}
             />
-          </label>
-        </div>
-        <div className="actions">
-          <button type="submit" disabled={pending} data-testid="explain-access">
-            {pending ? "Explaining…" : "Explain access"}
-          </button>
+          </FormField>
+          </div>
+        </fieldset>
+        <div className="ui-form-actions">
+          <Button
+            type="submit"
+            loading={pending}
+            loadingLabel="Explaining…"
+            data-testid="explain-access"
+          >
+            Explain access
+          </Button>
         </div>
       </form>
       {error ? (
-        <p className="error" role="alert">
+        <Alert tone="error" title="Couldn't explain this access">
           {error}
-        </p>
+        </Alert>
       ) : null}
       {result ? <ExplainResultView result={result} /> : null}
-    </section>
+    </Section>
   );
 }
 
@@ -260,22 +268,22 @@ function ExplainResultView({ result }: { result: ExplainResult }) {
   return (
     <div className="stack" aria-live="polite" data-testid="explain-result">
       <div className="row">
-        <span className={outcome.badge}>{outcome.text}</span>
+        <Badge tone={outcome.tone}>{outcome.text}</Badge>
       </div>
       <div className="row" aria-label="Result labels">
-        <span className="badge">Simulated: no traffic sent</span>
-        <span className="badge network">Published policy, revision {result.policy.revision}</span>
-        <span
-          className={
+        <Badge>Simulated: no traffic sent</Badge>
+        <Badge tone="brand">Published policy, revision {result.policy.revision}</Badge>
+        <Badge
+          tone={
             result.enforcement.state === "device_enforced" || result.enforcement.state === "peer_map"
-              ? "badge online"
-              : "badge pending"
+              ? "success"
+              : "warning"
           }
         >
           {result.dst_host
             ? `Routing peer: ${result.enforcement.state === "device_enforced" ? "forwarding enforced" : result.enforcement.state === "peer_map" ? "no route distributed" : "forwarding not enforced — upgrade agent"}`
             : `Device: ${ENFORCEMENT[result.enforcement.state]}`}
-        </span>
+        </Badge>
       </div>
       <dl className="details">
         <div>
@@ -322,9 +330,9 @@ function ExplainResultView({ result }: { result: ExplainResult }) {
               <ul className="audit-details">
                 {result.source.posture.map((entry) => (
                   <li key={entry.check}>
-                    <span className={entry.passed ? "badge online" : "badge revoked"}>
+                    <Badge tone={entry.passed ? "success" : "danger"}>
                       {entry.check}: {entry.passed ? "passes" : "fails"}
-                    </span>{" "}
+                    </Badge>{" "}
                     {entry.reasons.join("; ")}
                   </li>
                 ))}

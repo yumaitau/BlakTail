@@ -17,8 +17,15 @@ import type {
   ProviderKind,
   SyncReport,
 } from "@/lib/coord-posture-integrations";
+import { EmptyState } from "./empty-state";
+import { Badge, type BadgeTone } from "./ui/badge";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { MonoValue } from "./ui/mono-value";
+import { toast, toastResult } from "./ui/toast";
 
-function when(seconds: number | null): string {
+function whenText(seconds: number | null): string {
   if (!seconds) return "never";
   return new Date(seconds * 1000).toLocaleString("en-AU", {
     dateStyle: "medium",
@@ -26,11 +33,32 @@ function when(seconds: number | null): string {
   });
 }
 
-function reportText(report: SyncReport | undefined): string | null {
-  if (!report) return null;
-  return report.ok
-    ? `Connected. ${report.devices} provider device${report.devices === 1 ? "" : "s"} synced.`
-    : `Connection failed: ${report.error ?? report.error_code ?? "unknown error"}`;
+/** Server and browser format dates differently; the browser's text wins. */
+function when(seconds: number | null) {
+  if (!seconds) return "never";
+  return (
+    <time dateTime={new Date(seconds * 1000).toISOString()} suppressHydrationWarning>
+      {whenText(seconds)}
+    </time>
+  );
+}
+
+/** Toast the outcome of a connection test that the action itself survived. */
+function toastReport(report: SyncReport | undefined, success: string) {
+  if (!report) {
+    toast.success(success);
+    return;
+  }
+  if (report.ok) {
+    toast.success(success, {
+      description: `Connected. ${report.devices} provider device${report.devices === 1 ? "" : "s"} synced.`,
+    });
+  } else {
+    toast.warning("The provider didn't accept the connection", {
+      description:
+        "Check the credential and the access it was granted, then test again. The last error is shown on the integration.",
+    });
+  }
 }
 
 function ProviderNotice({ provider }: { provider: ProviderInfo }) {
@@ -56,46 +84,48 @@ function ProviderNotice({ provider }: { provider: ProviderInfo }) {
 function AddIntegration({
   providers,
   residencyNotice,
-  disabled,
 }: {
   providers: ProviderInfo[];
   residencyNotice: string;
-  disabled: boolean;
 }) {
   const router = useRouter();
   const [kind, setKind] = useState<ProviderKind | "">("");
   const [pending, startTransition] = useTransition();
-  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const provider = providers.find((candidate) => candidate.kind === kind);
   return (
     <form
-      className="stack"
+      className="ui-form wide"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         const form = event.currentTarget;
         const data = new FormData(form);
-        setMessage(null);
+        if (data.get("privacy_acknowledged") !== "on") {
+          setErrors({
+            privacy_acknowledged: "Read the data notice and confirm the organisation approved it.",
+          });
+          return;
+        }
+        setErrors({});
         startTransition(async () => {
           const result: IntegrationActionResult = await createIntegrationAction(data);
           if (!result.ok) {
-            setMessage({ error: true, text: result.error });
+            setErrors(toastResult(result));
             return;
           }
           form.reset();
           setKind("");
-          setMessage({ error: !result.report?.ok, text: reportText(result.report) ?? "Saved." });
+          toastReport(result.report, "Provider connected");
           router.refresh();
         });
       }}
     >
-      <label>
-        Provider
+      <FormField label="Provider" className="field-md">
         <select
           name="kind"
-          required
           value={kind}
           onChange={(event) => setKind(event.target.value as ProviderKind | "")}
-          disabled={disabled}
         >
           <option value="">Choose a provider</option>
           {providers.map((option) => (
@@ -104,94 +134,96 @@ function AddIntegration({
             </option>
           ))}
         </select>
-      </label>
+      </FormField>
       {provider ? (
         <>
-          <ProviderNotice provider={provider} />
-          <p className="muted">{residencyNotice}</p>
-          <div className="acl-rule-grid">
-            <label className="acl-selector">
-              <span>Name</span>
-              <input name="name" required maxLength={64} defaultValue={provider.kind} disabled={disabled} />
-            </label>
-            {provider.fields.map((field) =>
-              field.options?.length ? (
-                <label key={field.name} className="acl-selector">
-                  <span>{field.label}</span>
-                  <select name={field.name} required disabled={disabled} aria-describedby={`help-${field.name}`}>
-                    {field.options.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                  <small id={`help-${field.name}`} className="muted">
-                    {field.help}
-                  </small>
-                </label>
-              ) : (
-                <label key={field.name} className="acl-selector">
-                  <span>{field.label}</span>
-                  <input
-                    name={field.name}
-                    required
-                    autoComplete="off"
-                    disabled={disabled}
-                    aria-describedby={`help-${field.name}`}
-                  />
-                  <small id={`help-${field.name}`} className="muted">
-                    {field.help}
-                  </small>
-                </label>
-              ),
-            )}
-            <label className="acl-selector">
-              <span>{provider.secret_label}</span>
-              <input
-                name="secret"
-                type="password"
-                required
-                minLength={8}
-                autoComplete="new-password"
-                disabled={disabled}
-                aria-describedby="help-secret"
-              />
-              <small id="help-secret" className="muted">
-                Write-only. Sealed at rest and never shown again.
-              </small>
-            </label>
-            <label className="acl-selector">
-              <span>Sync every (minutes)</span>
-              <input
-                name="interval_minutes"
-                type="number"
-                min={5}
-                max={1440}
-                defaultValue={15}
-                disabled={disabled}
-              />
-            </label>
+          <div className="callout">
+            <ProviderNotice provider={provider} />
+            <p className="muted">{residencyNotice}</p>
           </div>
-          <label>
-            <input type="checkbox" name="match_hostname" disabled={disabled} /> Also match on hostname
-            when no serial number or MAC address matches (weaker: users choose hostnames)
-          </label>
-          <label>
-            <input type="checkbox" name="privacy_acknowledged" required disabled={disabled} /> I have read
-            what this integration collects and where the data comes from, and the organisation has
-            approved it.
-          </label>
-          <div className="actions">
-            <button type="submit" disabled={disabled || pending}>
-              {pending ? "Connecting…" : "Connect and test"}
-            </button>
+          <fieldset className="ui-fieldset">
+            <legend>Connection</legend>
+            <div className="ui-form-grid">
+              <FormField label="Name" required error={errors.name}>
+                <input name="name" maxLength={64} defaultValue={provider.kind} />
+              </FormField>
+              {provider.fields.map((field) =>
+                field.options?.length ? (
+                  <FormField
+                    key={field.name}
+                    label={field.label}
+                    hint={field.help}
+                    required
+                    error={errors[field.name]}
+                  >
+                    <select name={field.name}>
+                      {field.options.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </FormField>
+                ) : (
+                  <FormField
+                    key={field.name}
+                    label={field.label}
+                    hint={field.help}
+                    required
+                    error={errors[field.name]}
+                  >
+                    <input name={field.name} autoComplete="off" spellCheck={false} />
+                  </FormField>
+                ),
+              )}
+              <FormField
+                label={provider.secret_label}
+                hint="Write-only. Sealed at rest and never shown again."
+                required
+                error={errors.secret}
+              >
+                <input name="secret" type="password" minLength={8} autoComplete="new-password" />
+              </FormField>
+              <FormField
+                label="Sync every"
+                hint="Minutes, 5 to 1440."
+                error={errors.interval_minutes}
+              >
+                <input name="interval_minutes" type="number" min={5} max={1440} defaultValue={15} />
+              </FormField>
+            </div>
+            <label>
+              <input type="checkbox" name="match_hostname" />
+              Also match on hostname when no serial number or MAC address matches (weaker: users
+              choose hostnames)
+            </label>
+          </fieldset>
+          <div className={errors.privacy_acknowledged ? "ui-field has-error" : "ui-field"}>
+            <label>
+              <input
+                type="checkbox"
+                name="privacy_acknowledged"
+                aria-invalid={errors.privacy_acknowledged ? true : undefined}
+                aria-describedby={errors.privacy_acknowledged ? "privacy-ack-error" : undefined}
+              />
+              I have read what this integration collects and where the data comes from, and the
+              organisation has approved it.
+            </label>
+            {errors.privacy_acknowledged ? (
+              <p id="privacy-ack-error" className="ui-field-error">
+                {errors.privacy_acknowledged}
+              </p>
+            ) : null}
+          </div>
+          <div className="ui-form-actions">
+            <Button type="submit" loading={pending} loadingLabel="Connecting…">
+              Connect and test
+            </Button>
+            <Button variant="secondary" disabled={pending} onClick={() => setKind("")}>
+              Cancel
+            </Button>
           </div>
         </>
-      ) : null}
-      {message ? (
-        <p className={message.error ? "error" : "muted"} role={message.error ? "alert" : "status"}>
-          {message.text}
-        </p>
       ) : null}
     </form>
   );
@@ -208,68 +240,98 @@ function IntegrationCard({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
-  const run = (action: () => Promise<IntegrationActionResult>) => {
-    setMessage(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const run = (
+    label: string,
+    success: string,
+    action: () => Promise<IntegrationActionResult>,
+    after?: () => void,
+  ) => {
+    setBusy(label);
     startTransition(async () => {
       const result = await action();
+      setBusy(null);
+      after?.();
       if (!result.ok) {
-        setMessage({ error: true, text: result.error });
+        toastResult(result);
         return;
       }
-      const text = reportText(result.report);
-      if (text) setMessage({ error: !result.report?.ok, text });
+      toastReport(result.report, success);
       router.refresh();
     });
   };
-  const status = !integration.enabled
-    ? { label: "Disabled", className: "badge pending" }
+  const status: { label: string; tone: BadgeTone } = !integration.enabled
+    ? { label: "Disabled", tone: "muted" }
     : integration.outage_since
-      ? { label: `Outage since ${when(integration.outage_since)}`, className: "badge revoked" }
+      ? { label: `Outage since ${whenText(integration.outage_since)}`, tone: "danger" }
       : integration.last_success_at
-        ? { label: "Healthy", className: "badge online" }
-        : { label: "Not yet synced", className: "badge pending" };
+        ? { label: "Healthy", tone: "success" }
+        : { label: "Not yet synced", tone: "warning" };
   return (
     <li className="acl-rule">
       <div className="acl-rule-head">
-        <h3>
-          {integration.name} <span className="badge">{integration.provider}</span>{" "}
-          <span className={status.className}>{status.label}</span>
+        <h3 className="posture-name">
+          {integration.name}
+          <Badge dot={false}>{integration.provider}</Badge>
+          <Badge tone={status.tone}>{status.label}</Badge>
         </h3>
         {canManage ? (
-          <div className="row">
-            <button type="button" className="secondary" disabled={pending} onClick={() => run(() => syncIntegrationAction(integration.id))}>
-              {pending ? "Working…" : "Test connection"}
-            </button>
-            <button
-              type="button"
-              className="secondary"
+          <div className="cell-actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={busy === "sync"}
+              loadingLabel="Testing…"
               disabled={pending}
-              onClick={() => run(() => setIntegrationEnabledAction(integration.id, !integration.enabled))}
+              onClick={() =>
+                run("sync", "Connection tested", () => syncIntegrationAction(integration.id))
+              }
+            >
+              Test connection
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={busy === "toggle"}
+              disabled={pending}
+              onClick={() =>
+                run(
+                  "toggle",
+                  integration.enabled ? "Integration disabled" : "Integration enabled",
+                  () => setIntegrationEnabledAction(integration.id, !integration.enabled),
+                )
+              }
             >
               {integration.enabled ? "Disable" : "Enable"}
-            </button>
-            <button type="button" className="secondary" disabled={pending} onClick={() => setRotating(!rotating)}>
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={pending}
+              aria-expanded={rotating}
+              onClick={() => setRotating(!rotating)}
+            >
               {rotating ? "Cancel" : "Replace secret"}
-            </button>
-            <button
-              type="button"
-              className="secondary"
+            </Button>
+            <Button
+              variant="quiet-danger"
+              size="sm"
               disabled={pending || integration.referenced_by.length > 0}
               title={
                 integration.referenced_by.length
                   ? "Remove it from posture checks before deleting."
                   : undefined
               }
-              onClick={() => run(() => deleteIntegrationAction(integration.id))}
+              onClick={() => setConfirmRemove(true)}
             >
               Remove
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
-      <dl className="audit-details">
+      <dl className="details">
         <div>
           <dt>Last sync</dt>
           <dd>
@@ -298,8 +360,10 @@ function IntegrationCard({
         ) : null}
         {integration.secret_fingerprint ? (
           <div>
-            <dt>Secret</dt>
-            <dd className="mono">{integration.secret_fingerprint}</dd>
+            <dt>Secret fingerprint</dt>
+            <dd>
+              <MonoValue value={integration.secret_fingerprint} />
+            </dd>
           </div>
         ) : null}
         <div>
@@ -322,29 +386,43 @@ function IntegrationCard({
       ) : null}
       {rotating && canManage ? (
         <form
-          className="row"
+          className="device-name-editor"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
             const data = new FormData(event.currentTarget);
-            run(() => rotateIntegrationSecretAction(data));
-            setRotating(false);
+            if (String(data.get("secret") ?? "").length < 8) {
+              toast.error("Enter the new secret. It's at least 8 characters.");
+              return;
+            }
+            run("rotate", "Secret replaced", () => rotateIntegrationSecretAction(data), () =>
+              setRotating(false),
+            );
           }}
         >
           <input type="hidden" name="id" value={integration.id} />
-          <label>
-            New {provider?.secret_label.toLowerCase() ?? "secret"}
-            <input name="secret" type="password" required minLength={8} autoComplete="new-password" />
-          </label>
-          <button type="submit" disabled={pending}>
+          <FormField label={`New ${provider?.secret_label.toLowerCase() ?? "secret"}`} required>
+            <input name="secret" type="password" minLength={8} autoComplete="new-password" />
+          </FormField>
+          <Button type="submit" loading={busy === "rotate"} loadingLabel="Testing…" disabled={pending}>
             Save and test
-          </button>
+          </Button>
         </form>
       ) : null}
-      {message ? (
-        <p className={message.error ? "error" : "muted"} role={message.error ? "alert" : "status"}>
-          {message.text}
-        </p>
-      ) : null}
+      <ConfirmDialog
+        open={confirmRemove}
+        title="Remove integration"
+        description={`BlakTail stops polling ${integration.provider} and deletes the stored credential and device records for ${integration.name}. No posture check uses it, so access doesn't change.`}
+        confirmText={integration.name}
+        confirmLabel="Remove integration"
+        pending={busy === "remove"}
+        onCancel={() => setConfirmRemove(false)}
+        onConfirm={() =>
+          run("remove", "Integration removed", () => deleteIntegrationAction(integration.id), () =>
+            setConfirmRemove(false),
+          )
+        }
+      />
     </li>
   );
 }
@@ -354,18 +432,25 @@ export function PostureIntegrations({
   integrations,
   residencyNotice,
   canManage,
-  reason,
 }: {
   providers: ProviderInfo[];
   integrations: PostureIntegration[];
   residencyNotice: string;
   canManage: boolean;
-  reason: string | null;
 }) {
   return (
     <div className="stack">
       {integrations.length === 0 ? (
-        <p className="muted">No device-health providers connected.</p>
+        <EmptyState
+          compact
+          headingLevel={3}
+          title="No device-health providers connected"
+          body={
+            canManage
+              ? "Connect an MDM or EDR below to require a healthy provider record in a posture check."
+              : "An owner can connect an MDM or EDR your organisation already runs."
+          }
+        />
       ) : (
         <ul className="acl-rule-list">
           {integrations.map((integration) => (
@@ -378,11 +463,12 @@ export function PostureIntegrations({
           ))}
         </ul>
       )}
-      <div>
-        <h3>Connect a provider</h3>
-        {reason ? <p className="muted">{reason}</p> : null}
-        <AddIntegration providers={providers} residencyNotice={residencyNotice} disabled={!canManage} />
-      </div>
+      {canManage ? (
+        <div className="stack">
+          <h3>Connect a provider</h3>
+          <AddIntegration providers={providers} residencyNotice={residencyNotice} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -401,42 +487,40 @@ export function ApproveHardwareButton({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
   return (
     <div className="stack">
-      <button
-        type="button"
-        className="secondary"
+      <Button
+        variant="secondary"
+        size="sm"
         disabled={!canManage || pending}
         title={canManage ? undefined : (reason ?? undefined)}
         aria-label={`Approve new hardware identifiers for ${deviceName}`}
-        onClick={() => {
-          if (
-            !window.confirm(
-              `Approve ${deviceName}'s new serial number or MAC addresses? Only do this after a known hardware change. Another device that already holds an identifier keeps its provider match.`,
-            )
-          ) {
-            return;
-          }
-          setError(null);
+        onClick={() => setOpen(true)}
+      >
+        Approve hardware change
+      </Button>
+      {!canManage && reason ? <span className="muted small">{reason}</span> : null}
+      <ConfirmDialog
+        open={open}
+        tone="primary"
+        title="Approve hardware change"
+        description={`Approve ${deviceName}'s new serial number or MAC addresses? Only do this after a known hardware change. Another device that already holds an identifier keeps its provider match.`}
+        confirmLabel="Approve change"
+        pending={pending}
+        onCancel={() => setOpen(false)}
+        onConfirm={() =>
           startTransition(async () => {
             const result = await approveHardwareAction(nodeId);
-            if (!result.ok) {
-              setError(result.error);
-              return;
-            }
-            router.refresh();
-          });
-        }}
-      >
-        {pending ? "Approving…" : "Approve hardware change"}
-      </button>
-      {!canManage && reason ? <span className="muted">{reason}</span> : null}
-      {error ? (
-        <span className="error" role="alert">
-          {error}
-        </span>
-      ) : null}
+            toastResult(result, {
+              success: "Hardware change approved",
+              successDescription: `${deviceName} can match its provider record again.`,
+            });
+            setOpen(false);
+            if (result.ok) router.refresh();
+          })
+        }
+      />
     </div>
   );
 }

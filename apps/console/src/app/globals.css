@@ -3925,3 +3925,717 @@ textarea[aria-invalid="true"] {
   flex: 1 1 16rem;
   max-width: 26rem;
 }
+
+/* ---- Network pages polish ----------------------------------------------
+   Shared by devices, join keys, access, networks, DNS, services, ingress,
+   changes and enrolment. */
+
+/* Technical values: mono, truncated with a title, optional copy button. */
+.mono-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.mono-value-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono-value.wrap .mono-value-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.copy-button {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.truncate {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Forms: grouped fieldsets, short fields side by side, actions at the end. */
+.ui-form.wide {
+  max-width: var(--container-text);
+}
+
+.ui-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.ui-fieldset {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-4);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius);
+}
+
+.ui-fieldset > legend {
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.ui-fieldset > .ui-field-hint,
+.ui-fieldset > p.muted {
+  margin: 0;
+}
+
+.ui-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+.ui-choices.vertical {
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ui-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.ui-form-actions .muted {
+  font-size: var(--text-sm);
+}
+
+.field-xs {
+  max-width: 9rem;
+}
+
+.field-sm {
+  max-width: 16rem;
+}
+
+.field-md {
+  max-width: 26rem;
+}
+
+.field-lg {
+  max-width: 36rem;
+}
+
+/* Inline toolbar of filters above a table. */
+.ui-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.ui-toolbar .ui-field {
+  flex: 1 1 18rem;
+  max-width: 26rem;
+}
+
+/* Row actions in a table cell. */
+.cell-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.cell-sub {
+  margin-top: var(--space-1);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  line-height: var(--text-xs-lh);
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+/* "Back to list" link above a detail page header. */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: fit-content;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  color: var(--foreground);
+}
+
+/* Summary numbers at the top of a page. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.stat-grid > div {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.stat-grid dt {
+  order: 2;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+
+.stat-grid dd {
+  order: 1;
+  margin: 0;
+  font-size: var(--text-xl);
+  line-height: var(--text-xl-lh);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.permission-notice .ui-alert-icon {
+  color: var(--muted-foreground);
+}
+
+/* Code blocks never widen the page. */
+.ui-section pre,
+.panel pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+@media (max-width: 800px) {
+  .copy-button {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .field-xs,
+  .field-sm,
+  .field-md,
+  .field-lg,
+  .ui-toolbar .ui-field {
+    max-width: none;
+  }
+
+  .ui-form-actions > .ui-button {
+    flex: 1 1 auto;
+  }
+
+  .cell-actions {
+    justify-content: flex-start;
+  }
+
+  .table-stack td .cell-actions {
+    justify-content: flex-start;
+  }
+}
+/* ---- end network pages polish ---- */
+
+/* ---- polish-net networks (networks, services, ingress) ---- */
+/* Grid children must be allowed to shrink so wide tables scroll inside
+   their own container instead of widening the page. */
+.stack > *,
+.ui-section > *,
+.ui-form > * {
+  min-width: 0;
+}
+
+.route-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+
+.wizard-steps {
+  margin: 0;
+}
+
+.network-editor > summary {
+  width: fit-content;
+}
+
+.network-editor[open] > summary {
+  margin-bottom: var(--space-4);
+}
+
+.ui-form .table-wrap .ui-field {
+  max-width: 7rem;
+}
+
+.ca-pem {
+  min-height: 10rem;
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 800px) {
+  .public-route-head .mono-value {
+    flex-basis: 100%;
+  }
+}
+/* ---- end polish-net networks ---- */
+
+/* ---- polish-net policy (access, posture, tunnel protection, DNS) ---- */
+.acl-layout {
+  gap: var(--space-4);
+}
+
+.acl-rule-head {
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.acl-rule-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted-foreground);
+  min-width: 4.5rem;
+}
+
+.acl-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.acl-action select {
+  width: auto;
+  min-width: 7rem;
+}
+
+.acl-rule-head > .ui-button {
+  margin-left: auto;
+}
+
+.acl-group-head {
+  align-items: center;
+}
+
+.acl-group-head > .ui-button {
+  margin-left: auto;
+}
+
+.acl-add-group {
+  align-items: flex-start;
+}
+
+.acl-add-group .ui-field {
+  flex: 1 1 14rem;
+  max-width: 22rem;
+}
+
+.acl-add-group > .ui-button {
+  margin-top: calc(var(--text-sm-lh) + var(--space-1));
+}
+
+.acl-selector-label {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.acl-members .badge {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.acl-advanced > summary {
+  font-size: var(--text-sm);
+}
+
+.dns-card > legend,
+.ui-fieldset .ui-fieldset > legend {
+  font-weight: 600;
+}
+
+@media (max-width: 800px) {
+  .acl-rule-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4) var(--space-3);
+  }
+
+  .acl-add-group > .ui-button {
+    margin-top: 0;
+    width: 100%;
+  }
+
+  .acl-add-group .ui-field {
+    max-width: none;
+  }
+}
+/* ---- end polish-net policy ---- */
+
+/* ---- polish-net changes and topology ---- */
+.cc-error,
+.cc-loading {
+  width: min(40rem, calc(100% - 2 * var(--gutter-mobile)));
+  margin: var(--space-6) auto;
+}
+
+.cc-empty .button {
+  margin-top: var(--space-1);
+}
+
+.topology-filters {
+  flex: 1 1 36rem;
+}
+
+.topology-groups {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.topology-group {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.topology-group h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.topology-edges {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.topology-edges li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-lh);
+}
+
+.topology-edges li .badge {
+  flex: none;
+}
+@media (max-width: 800px) {
+  .topology-edges li {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  /* Stacked tables: keep every value (and its sub-line) in the value
+     column, and let pills keep their natural width. */
+  .table-stack td[data-label] > * {
+    grid-column: 2;
+  }
+
+  .table-stack td > .badge,
+  .table-stack td > .mono-value {
+    justify-self: start;
+  }
+}
+.preview-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 9rem) minmax(0, 7rem);
+}
+
+@media (max-width: 800px) {
+  .preview-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .table-stack td[data-label] > .cell-sub {
+    margin-top: calc(-1 * var(--space-1));
+  }
+}
+/* ---- end polish-net changes and topology ---- */
+
+/* ---- polish-net devices ---- */
+.value-list {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.device-address .mono-value {
+  max-width: 16rem;
+}
+
+.route-approval {
+  display: grid;
+  gap: var(--space-3);
+}
+
+@media (max-width: 800px) {
+  .device-address .mono-value {
+    max-width: 100%;
+  }
+}
+/* ---- end polish-net devices ---- */
+
+/* ---- polish-net stacked tables ---- */
+@media (max-width: 800px) {
+  /* Cell contents sit beside their label and keep their natural width. */
+  .table-stack td {
+    align-items: start;
+    justify-items: start;
+  }
+
+  .table-stack td > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .stat-grid > div {
+    padding: var(--space-3);
+  }
+}
+/* ---- end polish-net stacked tables ---- */
+
+/* ---- polish-net detail lists ---- */
+/* `.details div` is meant for the dt/dd rows only; nested divs in a value are plain blocks. */
+.details dd div {
+  display: block;
+}
+
+.details dd .value-list {
+  display: grid;
+}
+
+.link-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+.link-list li::marker {
+  color: var(--muted-foreground);
+}
+/* ---- end polish-net detail lists ---- */
+
+/* ---- polish-net vertical rhythm ---- */
+/* Grid gaps own the spacing inside sections and stacks; default paragraph
+   and list margins would otherwise double it. */
+.ui-section > p,
+.ui-section > ul,
+.ui-section > ol,
+.stack > p,
+.stack > ul,
+.stack > ol,
+.ui-form > p,
+.ui-fieldset > p {
+  margin: 0;
+}
+/* ---- end polish-net vertical rhythm ---- */
+
+/* ---- polish-net networks 2 ---- */
+/* Wizard steps hide with the hidden attribute; grid display must not override it. */
+.ui-form [hidden],
+.ui-fieldset[hidden] {
+  display: none !important;
+}
+
+.metric-input {
+  max-width: 6rem;
+}
+
+.pem-block {
+  margin-top: var(--space-3);
+}
+/* ---- end polish-net networks 2 ---- */
+
+/* ---- polish-net secrets and code ---- */
+.secret-panel {
+  border-color: rgba(232, 117, 44, 0.45);
+}
+
+.secret-value {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.secret-value code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+
+.code-block {
+  position: relative;
+  min-width: 0;
+}
+
+.code-block pre {
+  margin: 0;
+  padding-right: var(--space-12);
+  font-size: var(--text-sm);
+}
+
+.code-block .copy-button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  background: var(--surface);
+}
+/* ---- end polish-net secrets and code ---- */
+
+/* ---- polish-net policy, part 2 ---- */
+.stack-tight {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+}
+
+.posture-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.posture-description {
+  margin: 0;
+}
+
+.posture-results {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acl-rule-head > .cell-actions {
+  margin-left: auto;
+}
+
+.pq-rule-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 10rem)) auto;
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.pq-remove {
+  padding-bottom: var(--space-2);
+}
+
+.dns-toggle {
+  align-self: end;
+  padding-bottom: var(--space-2);
+}
+
+.dns-card > legend {
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--foreground);
+}
+
+.dns-assign {
+  align-items: center;
+}
+
+.dns-records td {
+  vertical-align: middle;
+}
+
+.dns-records input[type="number"] {
+  max-width: 7rem;
+}
+
+@media (max-width: 800px) {
+  .pq-rule-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pq-remove {
+    padding-bottom: 0;
+  }
+
+  .dns-records input[type="number"] {
+    max-width: none;
+  }
+
+  .acl-rule-head > .cell-actions,
+  .acl-rule-head > .ui-button {
+    margin-left: 0;
+  }
+}
+/* ---- end polish-net policy, part 2 ---- */
+
+/* ---- polish-net networks 3 ---- */
+.details dt,
+.details dd {
+  min-width: 0;
+}
+/* ---- end polish-net networks 3 ---- */
+
+/* ---- polish-net policy, part 3 ---- */
+.acl-options {
+  align-content: start;
+}
+
+.acl-selector {
+  align-content: start;
+}
+/* ---- end polish-net policy, part 3 ---- */
+
+/* ---- polish-net policy, part 4 ---- */
+.acl-members .badge {
+  display: inline-flex;
+  align-items: center;
+}
+
+.acl-members .chip-remove {
+  flex: none;
+  white-space: nowrap;
+}
+/* ---- end polish-net policy, part 4 ---- */
+.nowrap { white-space: nowrap; }

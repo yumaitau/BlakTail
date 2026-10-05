@@ -3,8 +3,12 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ConsoleShell } from "@/components/console-shell";
 import { EnrollmentApproval } from "@/components/enrollment-approval";
+import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
-import { Wordmark } from "@/components/wordmark";
+import { StatusPage } from "@/components/status-page";
+import { Alert } from "@/components/ui/alert";
+import { MonoValue } from "@/components/ui/mono-value";
+import { Section } from "@/components/ui/section";
 import { auth } from "@/lib/auth";
 import { getDeviceAuthorization } from "@/lib/coord";
 import { requireConsoleContext } from "@/lib/session";
@@ -26,17 +30,22 @@ export default async function EnrollPage({
   const code = deviceCode((await searchParams).code);
   if (!code) {
     return (
-      <main className="sign-in">
-        <div className="sign-in-card panel">
-          <Wordmark href="/sign-in" />
-          <h1>Invalid device link</h1>
-          <p className="error">
-            This enrollment link has no valid eight-character device code. Run
-            <span className="mono"> blaktaild up </span>
-            again and open the new link.
-          </p>
-        </div>
-      </main>
+      <StatusPage
+        code="Enrolment"
+        title="This device link isn't valid"
+        body={
+          <>
+            The link needs the eight-character code that{" "}
+            <span className="mono nowrap">blaktaild up</span>{" "}
+            prints. Run it again on the device and open the new link.
+          </>
+        }
+        actions={
+          <Link className="button secondary" href="/devices">
+            Go to devices
+          </Link>
+        }
+      />
     );
   }
 
@@ -58,14 +67,14 @@ export default async function EnrollPage({
   if (!request) {
     return (
       <ConsoleShell ctx={ctx} current="/devices">
-        <div className="panel stack">
-          <h1>Enrollment unavailable</h1>
-          <p className="error" role="alert">
+        <div className="stack">
+          <PageHeader eyebrow="Enrolment" title="Enrolment unavailable" />
+          <Alert tone="error" title="This device request can't be opened">
             {loadError}
-          </p>
+          </Alert>
           <p className="muted">
-            Run <span className="mono">blaktaild up</span> again to create a
-            fresh link.
+            The request may have expired. Run <span className="mono">blaktaild up</span> again on
+            the device to get a fresh link.
           </p>
         </div>
       </ConsoleShell>
@@ -86,8 +95,11 @@ export default async function EnrollPage({
           <li aria-current="step">Approve</li>
           <li>Joined</li>
         </ol>
-        <section className="panel stack" aria-labelledby="device-heading">
-          <h2 id="device-heading">{request.name}</h2>
+        <Section
+          id="device"
+          title={request.name}
+          description="Check these match what the terminal shows."
+        >
           <dl className="details">
             <div>
               <dt>Device code</dt>
@@ -95,7 +107,9 @@ export default async function EnrollPage({
             </div>
             <div>
               <dt>WireGuard key fingerprint</dt>
-              <dd className="mono">{request.public_key_fingerprint}</dd>
+              <dd>
+                <MonoValue value={request.public_key_fingerprint} wrap />
+              </dd>
             </div>
             <div>
               <dt>Expires</dt>
@@ -118,7 +132,7 @@ export default async function EnrollPage({
             role={ctx.role}
             alreadyApproved={request.approved}
           />
-        </section>
+        </Section>
       </div>
     </ConsoleShell>
   );
