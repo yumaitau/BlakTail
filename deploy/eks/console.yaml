@@ -52,6 +52,8 @@ metadata:
   labels: {app: blaktail-console}
 spec:
   replicas: 2
+  # Give the ALB time to register new targets before old pods go.
+  minReadySeconds: 15
   selector:
     matchLabels: {app: blaktail-console}
   strategy:
@@ -60,6 +62,7 @@ spec:
     metadata:
       labels: {app: blaktail-console}
     spec:
+      terminationGracePeriodSeconds: 45
       nodeSelector:
         kubernetes.io/arch: arm64
         karpenter.sh/capacity-type: on-demand
@@ -72,6 +75,10 @@ spec:
       containers:
         - name: console
           image: blaktail/console
+          lifecycle:
+            # Keep serving while the ALB deregisters this pod.
+            preStop:
+              sleep: {seconds: 20}
           ports:
             - {name: http, containerPort: 3000}
           envFrom:
@@ -116,6 +123,9 @@ metadata:
   namespace: blaktail
   annotations:
     alb.ingress.kubernetes.io/healthcheck-path: /sign-in
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=15
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
 spec:
   selector: {app: blaktail-console}
   ports:
