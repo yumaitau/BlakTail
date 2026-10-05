@@ -13,10 +13,10 @@ resources:
 images:
   - name: blaktail/coord
     newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/coord
-    newTag: f8821c406b12
+    newTag: a988bda9d132
   - name: blaktail/console
     newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/console
-    newTag: f8821c406b12
+    newTag: a988bda9d132
   - name: blaktail/relay
     newName: 959038055523.dkr.ecr.ap-southeast-2.amazonaws.com/blaktail/relay
-    newTag: f8821c406b12
+    newTag: a988bda9d132
