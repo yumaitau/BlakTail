@@ -93,8 +93,9 @@ const STATUS: Record<RouteStatus, { label: string; tone: BadgeTone; detail: stri
   },
 };
 
-function days(seconds: number): number {
-  return Math.floor((seconds * 1000 - Date.now()) / 86_400_000);
+/** Whole days from `now` (the server's render time, so hydration matches). */
+function days(seconds: number, now: number): number {
+  return Math.floor((seconds - now) / 86_400);
 }
 
 export function IngressManager({
@@ -103,12 +104,15 @@ export function IngressManager({
   services,
   ownerReason,
   canEmergencyDisable,
+  now,
 }: {
   workspace: IngressWorkspace;
   devices: Option[];
   services: Option[];
   ownerReason: string | null;
   canEmergencyDisable: boolean;
+  /** Unix seconds when the page was rendered; the reference for "N days". */
+  now: number;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -159,6 +163,7 @@ export function IngressManager({
                 route={route}
                 isOwner={isOwner}
                 canEmergencyDisable={canEmergencyDisable}
+                now={now}
                 {...shared}
               />
             ))}
@@ -319,6 +324,7 @@ function RouteCard({
   route,
   isOwner,
   canEmergencyDisable,
+  now,
   pending,
   busy,
   run,
@@ -326,6 +332,7 @@ function RouteCard({
   route: PublicRoute;
   isOwner: boolean;
   canEmergencyDisable: boolean;
+  now: number;
   pending: boolean;
   busy: string | null;
   run: Run;
@@ -412,10 +419,10 @@ function RouteCard({
                     <div>
                       {ingress.certificate_not_after ? (
                         <span
-                          className={days(ingress.certificate_not_after) < 14 ? "error" : undefined}
+                          className={days(ingress.certificate_not_after, now) < 14 ? "error" : undefined}
                         >
                           Expires <LocalTime value={ingress.certificate_not_after} /> (
-                          {days(ingress.certificate_not_after)} days)
+                          {days(ingress.certificate_not_after, now)} days)
                         </span>
                       ) : (
                         <span className="muted">Not reported</span>

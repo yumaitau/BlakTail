@@ -32,3 +32,11 @@ export function formatDateTime(value: TimeInput, empty = "—"): string {
   const minutes = String(date.getUTCMinutes()).padStart(2, "0");
   return `${formatDate(date)}, ${hours}:${minutes} UTC`;
 }
+
+/**
+ * Unix seconds now. Server pages hand this to client components as a fixed
+ * reference for relative text ("in 12 days"), so hydration renders the same.
+ */
+export function unixNow(): number {
+  return Math.floor(Date.now() / 1000);
+}

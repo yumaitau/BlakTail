@@ -1,4 +1,4 @@
-import { Suspense } from "react";
+import { Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { LocalTime } from "@/components/ui/local-time";
 import { PermissionNotice } from "@/components/ui/permission-notice";
 import { Section } from "@/components/ui/section";
 import { Skeleton, SkeletonTable } from "@/components/ui/skeleton";
@@ -26,11 +27,8 @@ import {
 import { can, permissionReason } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
-function when(seconds: number): string {
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+function when(seconds: number) {
+  return <LocalTime value={seconds} />;
 }
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -45,7 +43,7 @@ const MATCHED_BY: Record<string, string> = {
   hostname: "hostname",
 };
 
-function signalText(fact: IntegrationFact): string {
+function signalText(fact: IntegrationFact): ReactNode {
   const match = fact.match;
   if (!fact.enabled) return "integration disabled";
   if (match.state === "unmatched") return "no matching provider record";
@@ -54,8 +52,12 @@ function signalText(fact: IntegrationFact): string {
     return "hardware identifiers changed or already held by another device; awaiting approval";
   }
   if (match.state === "contested") return "provider record held by a device that reported it first";
-  const seen = match.last_seen_at ? `, provider last saw it ${when(match.last_seen_at)}` : "";
-  return `${match.status} (matched by ${MATCHED_BY[match.matched_by] ?? match.matched_by}, synced ${when(match.synced_at)}${seen})`;
+  return (
+    <>
+      {match.status} (matched by {MATCHED_BY[match.matched_by] ?? match.matched_by}, synced {when(match.synced_at)}
+      {match.last_seen_at ? <>, provider last saw it {when(match.last_seen_at)}</> : null})
+    </>
+  );
 }
 
 const FILTER_LABEL: Record<string, string> = {
@@ -172,7 +174,7 @@ async function PostureWorkspace({ ctx }: { ctx: ConsoleContext }) {
         <Section
           id="assessments"
           title="Device assessments"
-          description={`Evaluated ${when(report.evaluated_at)}.`}
+          description={<>Evaluated {when(report.evaluated_at)}.</>}
         >
           {report.devices.length === 0 ? (
             <EmptyState
@@ -225,7 +227,7 @@ async function PostureWorkspace({ ctx }: { ctx: ConsoleContext }) {
                       {(device.integrations ?? []).map((fact) => (
                         <div key={fact.integration_id} className="cell-sub">
                               {fact.provider}: {signalText(fact)} — source: provider
-                              {fact.outage_since ? `, outage since ${when(fact.outage_since)}` : ""}
+                              {fact.outage_since ? <>, outage since {when(fact.outage_since)}</> : null}
                             </div>
                       ))}
                       {(device.integrations ?? []).some(

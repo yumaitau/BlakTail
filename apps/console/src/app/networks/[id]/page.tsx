@@ -8,6 +8,7 @@ import { NetworkResourceForm } from "@/components/network-resource-form";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { StatusPill } from "@/components/ui/badge";
+import { LocalTime } from "@/components/ui/local-time";
 import { MonoValue } from "@/components/ui/mono-value";
 import { PermissionNotice } from "@/components/ui/permission-notice";
 import { Section } from "@/components/ui/section";
@@ -211,9 +212,7 @@ export default async function NetworkResourcePage({
                             </div>
                           </Td>
                           <Td label="Lease expires">
-                            {new Date(lease.expires_at * 1000).toLocaleTimeString("en-AU", {
-                              timeZone: "Australia/Sydney",
-                            })}
+                            <LocalTime value={lease.expires_at} />
                           </Td>
                         </tr>
                       ))}

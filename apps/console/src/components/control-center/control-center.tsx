@@ -34,6 +34,7 @@ import {
 } from "@/lib/control-center";
 import { type FlowNode, nodeSize, nodeType, nodeTypes } from "./graph-nodes";
 import { Picker, type PickerOption } from "./picker";
+import { LocalTime } from "../ui/local-time";
 
 type Tab = "devices" | "groups" | "networks";
 
@@ -406,7 +407,7 @@ function ControlCenterInner({
         <div className="cc-toolbar-end">
           <span className="cc-meta" title="When the coordinator computed this view">
             Policy rev {topology.policy.revision} ·{" "}
-            {new Date(topology.generated_at * 1000).toLocaleTimeString("en-AU", { timeStyle: "short" })}
+            <LocalTime value={topology.generated_at} />
           </span>
           <button
             type="button"

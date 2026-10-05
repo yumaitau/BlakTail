@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
   approveHardwareAction,
@@ -22,25 +22,12 @@ import { Badge, type BadgeTone } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
 import { FormField } from "./ui/form-field";
+import { LocalTime } from "./ui/local-time";
 import { MonoValue } from "./ui/mono-value";
 import { toast, toastResult } from "./ui/toast";
 
-function whenText(seconds: number | null): string {
-  if (!seconds) return "never";
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-/** Server and browser format dates differently; the browser's text wins. */
 function when(seconds: number | null) {
-  if (!seconds) return "never";
-  return (
-    <time dateTime={new Date(seconds * 1000).toISOString()} suppressHydrationWarning>
-      {whenText(seconds)}
-    </time>
-  );
+  return <LocalTime value={seconds} fallback="never" />;
 }
 
 /** Toast the outcome of a connection test that the action itself survived. */
@@ -262,10 +249,10 @@ function IntegrationCard({
       router.refresh();
     });
   };
-  const status: { label: string; tone: BadgeTone } = !integration.enabled
+  const status: { label: ReactNode; tone: BadgeTone } = !integration.enabled
     ? { label: "Disabled", tone: "muted" }
     : integration.outage_since
-      ? { label: `Outage since ${whenText(integration.outage_since)}`, tone: "danger" }
+      ? { label: <>Outage since {when(integration.outage_since)}</>, tone: "danger" }
       : integration.last_success_at
         ? { label: "Healthy", tone: "success" }
         : { label: "Not yet synced", tone: "warning" };

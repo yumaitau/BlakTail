@@ -352,16 +352,19 @@ export function StagedRenumber({
   organisationId,
   role,
   plan,
+  now,
 }: {
   organisationId: string;
   role: OrgRole;
   plan: RenumberPlan;
+  /** Unix seconds when the page was rendered, so hydration matches; ticks on in the browser. */
+  now: number;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<"complete" | "rollback" | null>(null);
   const [confirmRollback, setConfirmRollback] = useState(false);
-  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
+  const [nowSeconds, setNowSeconds] = useState(now);
   const denied = permissionReason(role, "manage_networks");
 
   useEffect(() => {

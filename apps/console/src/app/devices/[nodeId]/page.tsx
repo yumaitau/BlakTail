@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { Badge, StatusPill } from "@/components/ui/badge";
+import { LocalTime } from "@/components/ui/local-time";
 import { MonoValue } from "@/components/ui/mono-value";
 import { Section } from "@/components/ui/section";
 import { SkeletonTable } from "@/components/ui/skeleton";
@@ -28,12 +29,8 @@ import {
 const UPGRADE_GUIDE_URL =
   "https://github.com/jusso-dev/BlakTail/blob/main/docs/upgrades.md";
 
-function when(value: number | null | undefined): string {
-  if (!value) return "Never";
-  return new Date(value * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+function when(value: number | null | undefined) {
+  return <LocalTime value={value} />;
 }
 
 function age(seconds: number | null): string {
@@ -302,7 +299,7 @@ export default async function DeviceDetailPage({
                 {transportLabel[detail.transport.state]}
                 <div className="cell-sub">
                   {detail.transport.reported_at
-                    ? `Reported by the agent ${when(detail.transport.reported_at)} from fresh WireGuard handshakes`
+                    ? <>Reported by the agent {when(detail.transport.reported_at)} from fresh WireGuard handshakes</>
                     : "This agent has not reported a measured path. Older agents and idle tunnels report nothing."}
                 </div>
               </dd>
@@ -466,9 +463,7 @@ export default async function DeviceDetailPage({
                     {event.actor_role ? ` · ${event.actor_role}` : ""}
                   </div>
                   <div className="cell-sub">
-                    <time dateTime={new Date(event.created_at * 1000).toISOString()}>
-                      {when(event.created_at)}
-                    </time>
+                    {when(event.created_at)}
                   </div>
                 </li>
               ))}

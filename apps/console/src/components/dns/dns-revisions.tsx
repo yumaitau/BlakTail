@@ -11,18 +11,12 @@ import { Alert } from "../ui/alert";
 import { StatusPill } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
+import { LocalTime } from "../ui/local-time";
 import { Section } from "../ui/section";
 import { Table, Td } from "../ui/table";
 import { toastResult } from "../ui/toast";
 import { DnsDiff } from "./dns-diff";
 import { normaliseDns, serialiseDns } from "./dns-editor";
-
-function when(seconds: number): string {
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
 
 export function DnsRevisions({
   revisions,
@@ -103,13 +97,7 @@ export function DnsRevisions({
                   </div>
                 </Td>
                 <Td label="Published">
-                  {/* Server and browser format dates differently; the browser wins. */}
-                  <time
-                    dateTime={new Date(revision.created_at * 1000).toISOString()}
-                    suppressHydrationWarning
-                  >
-                    {when(revision.created_at)}
-                  </time>
+                  <LocalTime value={revision.created_at} />
                 </Td>
                 <Td label="Contents" className="muted">
                   {revision.summary.nameserver_groups} groups · {revision.summary.zones} zones (
