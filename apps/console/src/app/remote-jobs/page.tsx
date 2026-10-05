@@ -1,8 +1,20 @@
+import { Suspense } from "react";
 import { errorText } from "@/lib/server-errors";
 import Link from "next/link";
 import { ConsoleShell } from "@/components/console-shell";
-import { EmptyState } from "@/components/empty-state";
-import { PageHeader } from "@/components/page-header";
+import {
+  Alert,
+  Card,
+  EmptyState,
+  LocalTime,
+  PageHeader,
+  Section,
+  SkeletonTable,
+  StatusPill,
+  Table,
+  Td,
+  type BadgeTone,
+} from "@/components/ui";
 import {
   DisableTemplateButton,
   JobTemplateForm,
@@ -11,29 +23,22 @@ import {
 } from "@/components/remote-jobs-manager";
 import { listNodes, type CoordNode } from "@/lib/coord";
 import { listJobRuns, listJobTemplates, type JobRun, type JobTemplate } from "@/lib/coord-remote";
+import { listMemberships } from "@/lib/oidc";
 import { can, permissionReason, roleLabel } from "@/lib/roles";
-import { requireConsoleContext } from "@/lib/session";
+import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
-function when(seconds: number | null): string {
-  if (!seconds) return "—";
-  return new Date(seconds * 1000).toLocaleString("en-AU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-const STATUS_BADGE: Record<JobRun["status"], string> = {
-  pending_approval: "badge pending",
-  approved: "badge pending",
-  running: "badge online",
-  succeeded: "badge online",
-  failed: "badge warn",
-  timed_out: "badge warn",
-  output_capped: "badge warn",
-  cancelled: "badge",
-  rejected: "badge revoked",
-  expired: "badge",
-  error: "badge revoked",
+const STATUS: Record<JobRun["status"], { label: string; tone: BadgeTone }> = {
+  pending_approval: { label: "Waiting for approval", tone: "warning" },
+  approved: { label: "Approved", tone: "info" },
+  running: { label: "Running", tone: "info" },
+  succeeded: { label: "Succeeded", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+  timed_out: { label: "Timed out", tone: "danger" },
+  output_capped: { label: "Output cut off", tone: "warning" },
+  cancelled: { label: "Cancelled", tone: "muted" },
+  rejected: { label: "Rejected", tone: "muted" },
+  expired: { label: "Expired", tone: "muted" },
+  error: { label: "Error", tone: "danger" },
 };
 
 function decisions(run: JobRun, canApprove: boolean, canCancel: boolean) {
@@ -53,165 +58,192 @@ function decisions(run: JobRun, canApprove: boolean, canCancel: boolean) {
 export default async function RemoteJobsPage() {
   const ctx = await requireConsoleContext();
   const denied = permissionReason(ctx.role, "use_remote_sessions");
-  const ownerDenied = permissionReason(ctx.role, "manage_remote_jobs");
-  let templates: JobTemplate[] = [];
-  let runs: JobRun[] = [];
-  let nodes: CoordNode[] = [];
-  let error: string | null = null;
-  if (!denied) {
-    try {
-      [templates, runs, nodes] = await Promise.all([
-        listJobTemplates(ctx),
-        listJobRuns(ctx),
-        listNodes(ctx),
-      ]);
-    } catch (err) {
-      error = errorText(err, "Could not load remote jobs.");
-    }
-  }
-  const names = new Map(nodes.map((node) => [node.id, node.display_name || node.name]));
-  const devices = nodes
-    .filter((node) => !node.revoked && !node.deleted)
-    .map((node) => ({ id: node.id, label: node.display_name || node.name }));
-  const optedIn = nodes.filter((node) => node.capabilities?.includes("remote-jobs"));
-
   return (
     <ConsoleShell ctx={ctx} current="/remote-jobs">
       <div className="stack">
         <PageHeader
           eyebrow="Remote"
           title="Remote jobs"
-          description="Owner-defined programs with fixed arguments that opted-in devices run on request. Every run needs an owner's approval, runs with no shell as an unprivileged account, and is capped in time and output."
+          description="Owner-defined programs with fixed arguments that opted-in devices run on request. Every run needs an owner's approval, runs without a shell as an unprivileged account, and is limited in time and output."
         />
-        <p className="muted">
+        <p className="page-context">
           {ctx.organisationName} · {roleLabel(ctx.role)}
         </p>
         {denied ? (
-          <div className="panel stack">
-            <p role="note">{denied}</p>
-          </div>
-        ) : null}
-        {error ? (
-          <div className="panel stack">
-            <p className="error" role="alert">
-              {error}
-            </p>
-          </div>
-        ) : null}
-        {!denied && !error ? (
-          <>
-            <section className="panel stack" aria-labelledby="templates-title">
-              <h2 id="templates-title">Templates</h2>
-              <p className="muted">
-                {optedIn.length} device{optedIn.length === 1 ? "" : "s"} accept remote jobs
-                (agents started with <span className="mono">--allow-remote-jobs</span>).
-              </p>
-              {templates.length === 0 ? (
-                <EmptyState title="No job templates" body="An owner defines the programs devices may run." />
-              ) : (
-                <div className="table-wrap">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th scope="col">Name</th>
-                        <th scope="col">Program and arguments</th>
-                        <th scope="col">Limits</th>
-                        <th scope="col">Targets</th>
-                        <th scope="col">
-                          <span className="visually-hidden">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {templates.map((template) => (
-                        <tr key={template.id}>
-                          <td>{template.name}</td>
-                          <td className="mono">
-                            {template.argv.map((arg, index) => (
-                              <span key={index} className="badge">
-                                {arg}
-                              </span>
-                            ))}
-                          </td>
-                          <td>
-                            {template.timeout_secs} s · {template.output_cap_bytes.toLocaleString("en-AU")} bytes
-                          </td>
-                          <td>
-                            {[
-                              ...(template.target.tags ?? []).map((tag) => `tag ${tag}`),
-                              ...(template.target.node_ids ?? []).map((id) => names.get(id) ?? id),
-                            ].join(", ")}
-                          </td>
-                          <td>
-                            {can(ctx.role, "manage_remote_jobs") ? (
-                              <DisableTemplateButton templateId={template.id} name={template.name} />
-                            ) : null}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <details>
-                <summary>New template</summary>
-                <JobTemplateForm devices={devices} disabledReason={ownerDenied} />
-              </details>
-            </section>
-
-            <section className="panel stack" aria-labelledby="request-title">
-              <h2 id="request-title">Request a run</h2>
-              <RequestRunForm
-                templates={templates.map((template) => ({ id: template.id, label: template.name }))}
-                devices={devices}
-                disabledReason={null}
-              />
-            </section>
-
-            <section className="panel stack" aria-labelledby="runs-title">
-              <h2 id="runs-title">Runs</h2>
-              {runs.length === 0 ? (
-                <EmptyState title="No runs yet" body="Requested runs wait here for an owner's approval." />
-              ) : (
-                <ul className="stack">
-                  {runs.map((run) => (
-                    <li key={run.id} className="panel stack">
-                      <div className="row">
-                        <span className={STATUS_BADGE[run.status]}>{run.status.replace("_", " ")}</span>
-                        <strong>{run.template_name}</strong>
-                        <span>
-                          on <Link href={`/devices/${run.node_id}`}>{names.get(run.node_id) ?? run.node_id}</Link>
-                        </span>
-                        {run.exit_code !== null ? <span className="muted">exit {run.exit_code}</span> : null}
-                      </div>
-                      <p className="muted">
-                        Requested by {run.requested_by} {when(run.requested_at)} · {run.reason}
-                        {run.decided_by ? ` · decided by ${run.decided_by} ${when(run.decided_at)}` : ""}
-                        {run.finished_at ? ` · finished ${when(run.finished_at)}` : ""}
-                      </p>
-                      <p className="mono">{run.argv.join(" · ")}</p>
-                      {run.output !== null ? (
-                        <pre className="dns-pre" aria-label={`Output of ${run.template_name}`}>
-                          {run.output || "(no output)"}
-                          {run.output_truncated ? "\n[output truncated at the template's cap]" : ""}
-                        </pre>
-                      ) : null}
-                      <RunDecision
-                        runId={run.id}
-                        decisions={decisions(
-                          run,
-                          can(ctx.role, "manage_remote_jobs"),
-                          can(ctx.role, "use_remote_sessions"),
-                        )}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </>
-        ) : null}
+          <Alert tone="info" title="Remote jobs aren't available to your role">
+            {denied}
+          </Alert>
+        ) : (
+          <Suspense
+            fallback={
+              <Card>
+                <SkeletonTable rows={5} label="Loading remote jobs" />
+              </Card>
+            }
+          >
+            <RemoteJobsContent ctx={ctx} />
+          </Suspense>
+        )}
       </div>
     </ConsoleShell>
+  );
+}
+
+async function RemoteJobsContent({ ctx }: { ctx: ConsoleContext }) {
+  const ownerDenied = permissionReason(ctx.role, "manage_remote_jobs");
+  let templates: JobTemplate[] = [];
+  let runs: JobRun[] = [];
+  let nodes: CoordNode[] = [];
+  let people = new Map<string, string>();
+  let error: string | null = null;
+  try {
+    let members: Awaited<ReturnType<typeof listMemberships>>;
+    [templates, runs, nodes, members] = await Promise.all([
+      listJobTemplates(ctx),
+      listJobRuns(ctx),
+      listNodes(ctx),
+      listMemberships(ctx.organisationId),
+    ]);
+    people = new Map(members.map((member) => [member.userId, member.name || member.email]));
+  } catch (err) {
+    error = errorText(err, "Could not load remote jobs.");
+  }
+  if (error) {
+    return (
+      <Alert tone="error" title="Remote jobs couldn't be loaded">
+        {error}
+      </Alert>
+    );
+  }
+  const names = new Map(nodes.map((node) => [node.id, node.display_name || node.name]));
+  const devices = nodes
+    .filter((node) => !node.revoked && !node.deleted)
+    .map((node) => ({ id: node.id, label: node.display_name || node.name }));
+  const optedIn = nodes.filter((node) => node.capabilities?.includes("remote-jobs"));
+  const canManage = can(ctx.role, "manage_remote_jobs");
+
+  return (
+    <>
+      <Section
+        id="templates"
+        title="Templates"
+        description={`${optedIn.length} device${optedIn.length === 1 ? "" : "s"} accept remote jobs (agents started with --allow-remote-jobs).`}
+      >
+        {templates.length === 0 ? (
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No job templates"
+            body={canManage ? "Define the first program devices may run below." : "An owner defines the programs devices may run."}
+          />
+        ) : (
+          <Table label="Job templates" mobile="stack">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Program and arguments</th>
+                <th scope="col">Limits</th>
+                <th scope="col">Targets</th>
+                <th scope="col">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((template) => (
+                <tr key={template.id}>
+                  <Td label="Name">{template.name}</Td>
+                  <Td label="Program" className="mono cell-break">
+                    {template.argv.join(" ")}
+                  </Td>
+                  <Td label="Limits">
+                    {template.timeout_secs} s
+                    <span className="cell-sub">{template.output_cap_bytes.toLocaleString("en-AU")} bytes of output</span>
+                  </Td>
+                  <Td label="Targets">
+                    {[
+                      ...(template.target.tags ?? []).map((tag) => `Tag ${tag}`),
+                      ...(template.target.node_ids ?? []).map((id) => names.get(id) ?? id),
+                    ].join(", ")}
+                  </Td>
+                  <Td>
+                    {canManage ? (
+                      <div className="cell-actions">
+                        <DisableTemplateButton templateId={template.id} name={template.name} />
+                      </div>
+                    ) : null}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+        <details className="form-disclosure" open={templates.length === 0 && canManage}>
+          <summary>New template</summary>
+          <JobTemplateForm devices={devices} disabledReason={ownerDenied} />
+        </details>
+      </Section>
+
+      <Section id="request" title="Request a run" description="An owner approves each run before the device runs it.">
+        <RequestRunForm
+          templates={templates.map((template) => ({ id: template.id, label: template.name }))}
+          devices={devices}
+          disabledReason={null}
+        />
+      </Section>
+
+      <Section id="runs" title="Runs" description="Newest first. Output is kept up to each template's limit.">
+        {runs.length === 0 ? (
+          <EmptyState
+            compact
+            headingLevel={3}
+            title="No runs yet"
+            body="Requested runs wait here for an owner's approval."
+          />
+        ) : (
+          <ul className="run-list">
+            {runs.map((run) => (
+              <li key={run.id} className="run-card">
+                <div className="audit-event-head">
+                  <StatusPill tone={STATUS[run.status].tone}>{STATUS[run.status].label}</StatusPill>
+                  <strong>{run.template_name}</strong>
+                  <span>
+                    on <Link href={`/devices/${run.node_id}`}>{names.get(run.node_id) ?? run.node_id}</Link>
+                  </span>
+                  {run.exit_code !== null ? <span className="muted">exit code {run.exit_code}</span> : null}
+                </div>
+                <p className="muted">
+                  Requested by {people.get(run.requested_by) ?? run.requested_by},{" "}
+                  <LocalTime value={run.requested_at} />: “{run.reason}”
+                  {run.decided_by ? (
+                    <>
+                      {" "}· decided by {people.get(run.decided_by) ?? run.decided_by},{" "}
+                      <LocalTime value={run.decided_at} />
+                    </>
+                  ) : null}
+                  {run.finished_at ? (
+                    <>
+                      {" "}· finished <LocalTime value={run.finished_at} />
+                    </>
+                  ) : null}
+                </p>
+                <p className="mono cell-break">{run.argv.join(" ")}</p>
+                {run.output !== null ? (
+                  <pre className="dns-pre" aria-label={`Output of ${run.template_name}`}>
+                    {run.output || "(no output)"}
+                    {run.output_truncated ? "\n[output cut off at the template's limit]" : ""}
+                  </pre>
+                ) : null}
+                <RunDecision
+                  runId={run.id}
+                  name={run.template_name}
+                  decisions={decisions(run, canManage, can(ctx.role, "use_remote_sessions"))}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+    </>
   );
 }

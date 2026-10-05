@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { LocalTime } from "./ui/local-time";
 import {
   ArrowDown,
   ArrowUp,
@@ -19,9 +20,6 @@ import {
   flowStatus,
   flowTotals,
   formatBytes,
-  formatDate,
-  formatTime,
-  isoTime,
   policyStep,
   portLabel,
   protocolLabel,
@@ -118,9 +116,7 @@ function Timeline({ group }: { group: FlowGroup }) {
   return (
     <ol className="traffic-timeline">
       <li className={blocked(head) ? "traffic-step blocked" : "traffic-step"}>
-        <time dateTime={isoTime(head.at)} className="muted">
-          {formatDate(head.at)} at {formatTime(head.at)}
-        </time>
+        <LocalTime value={head.at} className="muted" />
         <p>
           <Sentence segments={eventSentence(head)} />
         </p>
@@ -137,9 +133,7 @@ function Timeline({ group }: { group: FlowGroup }) {
       ) : null}
       {rest.map((event) => (
         <li key={event.id} className={blocked(event) ? "traffic-step blocked" : "traffic-step"}>
-          <time dateTime={isoTime(event.at)} className="muted">
-            {formatDate(event.at)} at {formatTime(event.at)}
-          </time>
+          <LocalTime value={event.at} className="muted" />
           <p>
             <Sentence segments={eventSentence(event)} />
           </p>
@@ -181,10 +175,7 @@ function FlowRow({ group }: { group: FlowGroup }) {
   return (
     <tr className={`traffic-row ${status}`}>
       <td data-label="Time" className="traffic-time">
-        <time dateTime={isoTime(group.last_at)}>
-          <span>{formatDate(group.last_at)}</span>
-          <span className="muted">{formatTime(group.last_at)}</span>
-        </time>
+        <LocalTime value={group.last_at} />
       </td>
       <td data-label="Event" className="traffic-event">
         <details className="traffic-details">

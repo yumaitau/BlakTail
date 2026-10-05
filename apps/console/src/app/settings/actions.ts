@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   addDomain,
@@ -12,12 +12,13 @@ import {
 import { parseStepUpMinutes } from "@/lib/auth-policy-core";
 import { setWebhookSubscriptions } from "@/lib/coord-events";
 import { rotateApiClient, setApiClientSuspended } from "@/lib/coord-identity";
+import { deleteIdentityProvider, OidcError } from "@/lib/oidc";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
-type Result<T = void> = { ok: true; data: T } | { ok: false; error: string };
+type Result<T = void> = { ok: true; data: T } | ActionFailure;
 
-function failure(error: unknown, fallback: string): { ok: false; error: string } {
+function failure(error: unknown, fallback: string): ActionFailure {
   return actionFailure(error, fallback);
 }
 
@@ -121,5 +122,27 @@ export async function setWebhookSubscriptionsAction(formData: FormData): Promise
     return { ok: true, data: undefined };
   } catch (error) {
     return failure(error, "Could not save the event subscriptions.");
+  }
+}
+
+export async function deleteOidcProviderAction(formData: FormData): Promise<Result> {
+  try {
+    const ctx = await requireConsoleContext();
+    const denied = permissionReason(ctx.role, "manage_security");
+    if (denied) return { ok: false, error: denied };
+    await requireSecurityAssurance(ctx);
+    const providerId = String(formData.get("providerId") ?? "");
+    if (!providerId) return { ok: false, error: "Choose the identity provider to remove." };
+    await deleteIdentityProvider({
+      organisationId: ctx.organisationId,
+      providerId,
+      actorUserId: ctx.userId,
+      actorEmail: ctx.email,
+    });
+    revalidatePath("/settings");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    if (error instanceof OidcError) return { ok: false, error: error.message };
+    return failure(error, "Could not remove the identity provider.");
   }
 }

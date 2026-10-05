@@ -1,15 +1,15 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { Calendar, Download, Funnel, RefreshCw, Rows3, Search } from "lucide-react";
 import { ConsoleShell } from "@/components/console-shell";
 import { errorText } from "@/lib/server-errors";
-import { EmptyState } from "@/components/empty-state";
-import { PageHeader } from "@/components/page-header";
+import { Alert, Card, EmptyState, LocalTime, PageHeader, Section, SkeletonTable } from "@/components/ui";
 import { TrafficEventsTable } from "@/components/traffic-events-table";
 import { TrafficSettingsForm } from "@/components/traffic-settings";
 import { listNodes, type CoordNode } from "@/lib/coord";
 import { getTrafficSummary, listTrafficFlows, type TrafficSummary } from "@/lib/coord-events";
 import { listNetworks, type NetworksOverview } from "@/lib/coord-networks";
-import { permissionReason, roleLabel } from "@/lib/roles";
+import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 import {
   CONNECTION_TYPES,
@@ -19,8 +19,6 @@ import {
   PROTOCOLS,
   TIME_RANGES,
   coordinatorTrafficQuery,
-  formatDate,
-  formatTime,
   popoverFilterCount,
   trafficFiltersFromParams,
   trafficSearch,
@@ -83,6 +81,29 @@ function load(ctx: ConsoleContext, filters: TrafficFilters) {
 export default async function TrafficPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await requireConsoleContext();
   const params = await searchParams;
+  return (
+    <ConsoleShell ctx={ctx} current="/traffic">
+      <div className="stack">
+        <PageHeader
+          title="Traffic events"
+          description={`Opt-in, per-connection events for ${ctx.organisationName}: who connected to what, on which protocol and port, through which routing peer, and which policy rule decided. Off by default. Overlay addresses and ports only — never payloads, URLs, DNS names or web data.`}
+        />
+        <Suspense
+          key={JSON.stringify(params)}
+          fallback={
+            <Card>
+              <SkeletonTable rows={8} label="Loading traffic events" />
+            </Card>
+          }
+        >
+          <TrafficContent ctx={ctx} params={params} />
+        </Suspense>
+      </div>
+    </ConsoleShell>
+  );
+}
+
+async function TrafficContent({ ctx, params }: { ctx: ConsoleContext; params: SearchParams }) {
   const filters = trafficFiltersFromParams(params);
   const [flowsResult, summaryResult, nodesResult, networksResult] = await load(ctx, filters);
   const page: FlowsPage | null = flowsResult.status === "fulfilled" ? flowsResult.value : null;
@@ -113,13 +134,7 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
   const current = trafficSearch(filters, { cursor: undefined });
 
   return (
-    <ConsoleShell ctx={ctx} current="/traffic">
-      <div className="stack">
-        <PageHeader
-          title="Traffic events"
-          description={`Opt-in, per-connection events for ${ctx.organisationName}: who connected to what, on which protocol and port, through which routing peer, and which policy rule decided. Off by default. Overlay addresses and ports only — never payloads, URLs, DNS names or web data.`}
-        />
-
+    <>
         {state && settings ? (
           <section className="panel traffic-header" aria-label="Collection status">
             <div className="row">
@@ -137,9 +152,7 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
               <div>
                 <dt>Last event received</dt>
                 <dd>
-                  {page?.last_received_at
-                    ? `${formatDate(page.last_received_at)}, ${formatTime(page.last_received_at)}`
-                    : "Never"}
+                  <LocalTime value={page?.last_received_at} />
                 </dd>
               </div>
               {summary ? (
@@ -156,10 +169,10 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
               ) : null}
             </dl>
             {state === "stale" ? (
-              <p className="muted" role="status">
+              <Alert tone="warning" title="Reports are stale">
                 The newest event is more than two hours old. Devices may be offline or have stopped
                 reporting, so recent connections are missing.
-              </p>
+              </Alert>
             ) : null}
           </section>
         ) : null}
@@ -349,12 +362,12 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
             )}
           </div>
         </form>
-        {exportDenied ? <p className="muted">CSV export: {exportDenied}</p> : null}
+        {exportDenied ? <Alert tone="info">CSV export isn&apos;t available: {exportDenied}</Alert> : null}
 
         {error ? (
-          <div className="panel" role="alert">
-            <p className="error">{error}</p>
-          </div>
+          <Alert tone="error" title="Traffic events couldn't be loaded">
+            {error}
+          </Alert>
         ) : null}
 
         {page ? (
@@ -391,11 +404,11 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
               ) : null}
               <TrafficEventsTable
                 flows={page.flows}
-                caption={`Traffic events, newest first. Times in UTC. ${page.flows.length} connections on this page.`}
+                caption={`Traffic events, newest first. Times in your time zone. ${page.flows.length} connections on this page.`}
               />
               <nav className="traffic-pager" aria-label="Pages">
                 <span className="muted">
-                  {page.flows.length.toLocaleString("en-AU")} connections on this page · times in UTC
+                  {page.flows.length.toLocaleString("en-AU")} connections on this page · times in your time zone
                 </span>
                 <span className="row">
                   {filters.cursor ? (
@@ -418,25 +431,19 @@ export default async function TrafficPage({ searchParams }: { searchParams: Prom
         ) : null}
 
         {settings ? (
-          <section className="panel stack" aria-labelledby="traffic-settings-heading">
-            <h2 id="traffic-settings-heading">Collection settings</h2>
-            <p className="muted">
-              {ctx.organisationName} · {roleLabel(ctx.role)}. Turning collection on stores, per
-              connection, the overlay source and destination addresses and ports, protocol, the
-              devices, resources or routes they belong to, the routing peer, the matched policy rule
-              and byte counts. Turning it on or off, exporting and deleting are recorded in the audit
-              log. Events older than the retention period are deleted automatically; storage is
-              capped at 500,000 events.
-            </p>
+          <Section
+            id="traffic-settings"
+            title="Collection settings"
+            description="When collection is on, each connection's overlay addresses and ports, protocol, the devices, resources or routes involved, the routing peer, the matched policy rule and byte counts are stored. Turning it on or off, exporting and deleting are audited. Events older than the retention period are deleted automatically; storage is capped at 500,000 events."
+          >
             <TrafficSettingsForm
               settings={settings}
               disabledReason={
                 settingsDenied ? `Only owners can change traffic collection. ${settingsDenied}` : null
               }
             />
-          </section>
+          </Section>
         ) : null}
-      </div>
-    </ConsoleShell>
+    </>
   );
 }

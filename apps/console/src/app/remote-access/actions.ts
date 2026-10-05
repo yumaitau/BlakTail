@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { requireSecurityAssurance } from "@/lib/auth-policy";
 import {
@@ -14,9 +14,9 @@ import { requireConsoleContext, requireOrganisationContext } from "@/lib/session
 
 export type RemoteActionResult<T = undefined> =
   | { ok: true; message: string; data: T }
-  | { ok: false; error: string };
+  | ActionFailure;
 
-function failure(error: unknown, fallback: string): { ok: false; error: string } {
+function failure(error: unknown, fallback: string): ActionFailure {
   return actionFailure(error, fallback);
 }
 

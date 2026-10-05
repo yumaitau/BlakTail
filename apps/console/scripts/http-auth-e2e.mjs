@@ -1298,7 +1298,7 @@ try {
   const switchedSettingsHtml = await switchedSettings.text();
   assert.equal(switchedSettings.status, 200);
   assert.ok(switchedSettingsHtml.includes(secondOwner.organisation));
-  assert.ok(switchedSettingsHtml.includes("Accessible workspaces:"));
+  assert.ok(switchedSettingsHtml.includes("Organisations you can open"));
   const forbiddenSwitch = await jsonRequest(
     baseUrl,
     "/api/organisations/active",

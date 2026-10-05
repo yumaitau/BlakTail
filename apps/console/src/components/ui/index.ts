@@ -3,6 +3,7 @@ export { Alert, type Tone } from "./alert";
 export { Badge, StatusPill, type BadgeTone } from "./badge";
 export { Button, Spinner, type ButtonVariant } from "./button";
 export { ConfirmDialog } from "./confirm-dialog";
+export { SecretPanel } from "./secret-panel";
 export { FormField } from "./form-field";
 export { Card, Section } from "./section";
 export { Skeleton, SkeletonPage, SkeletonTable } from "./skeleton";

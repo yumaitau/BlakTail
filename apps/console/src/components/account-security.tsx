@@ -1,9 +1,17 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
-import { authErrorMessage, toUserError } from "@/lib/errors";
+import { authErrorMessage } from "@/lib/errors";
+import { Alert } from "./ui/alert";
+import { StatusPill } from "./ui/badge";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { SecretPanel } from "./ui/secret-panel";
+import { Section } from "./ui/section";
+import { toast } from "./ui/toast";
 
 type Enrolment = { totpURI: string; backupCodes: string[] };
 
@@ -14,6 +22,9 @@ function totpSecret(uri: string): string {
     return "";
   }
 }
+
+const DESCRIPTION =
+  "Password sign-ins also ask for a six-digit code from an authenticator app. Recovery codes get you in if you lose the device.";
 
 /** Personal two-step verification for the signed-in password identity. */
 export function AccountSecurity({
@@ -27,181 +38,233 @@ export function AccountSecurity({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<Enrolment | null>(null);
   const [codes, setCodes] = useState<string[] | null>(null);
+  const [errors, setErrors] = useState<{ password?: string; code?: string }>({});
+  const [confirmOff, setConfirmOff] = useState(false);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   if (!hasPassword) {
     return (
-      <div className="panel stack">
-        <h2>Two-step verification</h2>
-        <p className="muted">
-          You signed in through your organisation&apos;s identity provider.
-          Its own multi-factor policy protects this sign-in; BlakTail does
-          not add a second code to single sign-on.
-        </p>
-      </div>
+      <Section id="two-step" headingLevel={3} title="Two-step verification" description={DESCRIPTION}>
+        <Alert tone="info" title="Handled by your identity provider">
+          You signed in through your organisation&apos;s single sign-on. Its own multi-factor
+          rules protect this sign-in, so BlakTail doesn&apos;t ask for a second code.
+        </Alert>
+      </Section>
     );
   }
 
-  const run = (work: () => Promise<void>) => {
-    setError(null);
-    setNotice(null);
-    startTransition(async () => {
-      try {
-        await work();
-      } catch (caught) {
-        setError(toUserError(caught, "That did not work.").message);
-      }
-    });
-  };
+  function readPassword(): string | null {
+    const password = passwordRef.current?.value ?? "";
+    if (!password) {
+      setErrors({ password: "Enter your current password." });
+      passwordRef.current?.focus();
+      return null;
+    }
+    setErrors({});
+    return password;
+  }
+
+  function failPassword(error: { code?: string; message?: string; status?: number } | null | undefined, fallback: string) {
+    const user = authErrorMessage(error, fallback);
+    if (error?.code?.toUpperCase() === "INVALID_PASSWORD") {
+      setErrors({ password: user.message });
+      passwordRef.current?.focus();
+    } else {
+      toast.error(user.message, { reference: user.ref });
+    }
+  }
+
+  const status = (
+    <StatusPill tone={twoFactorEnabled ? "success" : requiredByPolicy ? "warning" : "muted"}>
+      {twoFactorEnabled ? "On" : "Off"}
+    </StatusPill>
+  );
 
   return (
-    <div className="panel stack">
-      <div>
-        <h2>Two-step verification</h2>
-        <p className="muted">
-          Password sign-ins also ask for a code from an authenticator app.
-          Recovery codes let you in if you lose the device; store them
-          offline. {twoFactorEnabled ? "Status: on." : "Status: off."}
-          {requiredByPolicy && !twoFactorEnabled
-            ? " Your organisation requires it before you can change shared settings."
-            : ""}
-        </p>
-      </div>
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
+    <Section id="two-step" headingLevel={3} title="Two-step verification" description={DESCRIPTION} actions={status}>
+      {requiredByPolicy && !twoFactorEnabled ? (
+        <Alert tone="warning" title="Your organisation requires this">
+          Owners and admins who sign in with a password need two-step verification before they
+          can change shared settings. Turn it on below.
+        </Alert>
       ) : null}
-      {notice ? (
-        <p className="muted" role="status">
-          {notice}
-        </p>
-      ) : null}
+
       {codes ? (
-        <div className="stack">
-          <p>
-            <strong>Recovery codes — shown once.</strong> Each works once.
-          </p>
-          <pre className="mono">{codes.join("\n")}</pre>
-        </div>
+        <SecretPanel
+          title="Save your recovery codes now"
+          label="Recovery codes"
+          secret={codes}
+          description="Each code works once, if you lose your authenticator. This is the only time they're shown; earlier codes no longer work. Print them or keep them in your password manager."
+          doneLabel="I've saved them"
+          onDone={() => setCodes(null)}
+        />
       ) : null}
+
       {!twoFactorEnabled && !enrolment ? (
         <form
+          className="form-row"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
-            const password = String(new FormData(event.currentTarget).get("password") ?? "");
-            run(async () => {
+            const password = readPassword();
+            if (!password) return;
+            startTransition(async () => {
               const result = await authClient.twoFactor.enable({ password });
               if (result.error || !result.data) {
-                throw new Error(authErrorMessage(result.error, "Could not start set-up.").message);
+                failPassword(result.error, "Two-step set-up couldn't start. Try again.");
+                return;
               }
               const data = result.data as Partial<Enrolment>;
-              if (!data.totpURI) throw new Error("Authenticator set-up was not returned.");
+              if (!data.totpURI) {
+                toast.error("Two-step set-up couldn't start. Try again.");
+                return;
+              }
               setEnrolment({ totpURI: data.totpURI, backupCodes: data.backupCodes ?? [] });
-              setCodes(data.backupCodes ?? null);
             });
           }}
         >
-          <label>
-            Current password
-            <input name="password" type="password" autoComplete="current-password" required />
-          </label>
-          <button type="submit" disabled={pending}>
-            {pending ? "Starting…" : "Set up an authenticator app"}
-          </button>
+          <FormField label="Current password" required error={errors.password}>
+            <input ref={passwordRef} name="password" type="password" autoComplete="current-password" />
+          </FormField>
+          <Button type="submit" loading={pending} loadingLabel="Starting…">
+            Set up an authenticator app
+          </Button>
         </form>
       ) : null}
+
       {enrolment && !twoFactorEnabled ? (
         <form
+          className="ui-form"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
-            const code = String(new FormData(event.currentTarget).get("code") ?? "").replace(
-              /\s+/g,
-              "",
-            );
-            run(async () => {
+            const code = String(new FormData(event.currentTarget).get("code") ?? "").replace(/\s+/g, "");
+            if (!/^\d{6}$/u.test(code)) {
+              setErrors({ code: "Enter the six-digit code your app shows." });
+              return;
+            }
+            setErrors({});
+            startTransition(async () => {
               const result = await authClient.twoFactor.verifyTotp({ code });
-              if (result.error) throw new Error(authErrorMessage(result.error, "That code was not accepted.").message);
+              if (result.error) {
+                setErrors({
+                  code: authErrorMessage(result.error, "That code wasn't accepted. Check your device's clock and try the next code.").message,
+                });
+                return;
+              }
+              setCodes(enrolment.backupCodes.length ? enrolment.backupCodes : null);
               setEnrolment(null);
-              setNotice("Two-step verification is on.");
+              toast.success("Two-step verification is on");
               router.refresh();
             });
           }}
         >
           <p className="muted">
-            Add this key to your authenticator app (time-based, six digits),
-            then enter the code it shows.
+            Add this key to your authenticator app (time-based, six digits), or open the set-up
+            link on the device that has the app. Then enter the code it shows.
           </p>
-          <label>
-            Set-up key
-            <input className="mono" readOnly value={totpSecret(enrolment.totpURI)} />
-          </label>
-          <label>
-            Set-up link
-            <input className="mono" readOnly value={enrolment.totpURI} />
-          </label>
-          <label>
-            Verification code
+          <FormField label="Set-up key" hint="Type this into the app if you can't use the link.">
+            <input className="mono" readOnly value={totpSecret(enrolment.totpURI)} onFocus={(event) => event.currentTarget.select()} />
+          </FormField>
+          <FormField label="Set-up link">
+            <input className="mono" readOnly value={enrolment.totpURI} onFocus={(event) => event.currentTarget.select()} />
+          </FormField>
+          <FormField label="Code from your app" required error={errors.code}>
             <input
               name="code"
-              required
               inputMode="numeric"
               autoComplete="one-time-code"
-              pattern="[0-9 ]{6,7}"
               maxLength={7}
             />
-          </label>
-          <button type="submit" disabled={pending}>
-            {pending ? "Checking…" : "Turn on two-step verification"}
-          </button>
+          </FormField>
+          <div className="actions">
+            <Button type="submit" loading={pending} loadingLabel="Checking…">
+              Turn on two-step verification
+            </Button>
+            <Button variant="secondary" disabled={pending} onClick={() => setEnrolment(null)}>
+              Cancel
+            </Button>
+          </div>
         </form>
+      ) : null}
+
+      {twoFactorEnabled ? (
+        <p className="muted">Enter your current password to replace your recovery codes or turn this off.</p>
       ) : null}
       {twoFactorEnabled ? (
         <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            const password = String(form.get("password") ?? "");
-            const intent = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value");
-            run(async () => {
-              if (intent === "codes") {
-                const result = await authClient.twoFactor.generateBackupCodes({ password });
-                if (result.error || !result.data) {
-                  throw new Error(authErrorMessage(result.error, "Could not create recovery codes.").message);
-                }
-                setCodes((result.data as { backupCodes: string[] }).backupCodes);
-                setNotice("Old recovery codes no longer work.");
-                return;
-              }
-              const result = await authClient.twoFactor.disable({ password });
-              if (result.error) throw new Error(authErrorMessage(result.error, "Could not turn it off.").message);
-              setCodes(null);
-              setNotice("Two-step verification is off.");
-              router.refresh();
-            });
-          }}
+          className="form-row"
+          noValidate
+          onSubmit={(event) => event.preventDefault()}
         >
-          <label>
-            Current password
-            <input name="password" type="password" autoComplete="current-password" required />
-          </label>
-          <button type="submit" value="codes" className="secondary" disabled={pending}>
-            Replace recovery codes
-          </button>
-          <button type="submit" value="disable" className="danger" disabled={pending}>
-            Turn off two-step verification
-          </button>
-          {requiredByPolicy ? (
-            <p className="muted">
-              Your organisation requires two-step verification for your role.
-              Turning it off blocks your changes until you turn it back on.
-            </p>
-          ) : null}
+          <FormField label="Current password" required error={errors.password}>
+            <input ref={passwordRef} name="password" type="password" autoComplete="current-password" />
+          </FormField>
+          <div className="actions">
+            <Button
+              variant="secondary"
+              loading={pending && !confirmOff}
+              loadingLabel="Replacing…"
+              disabled={pending}
+              onClick={() => {
+                const password = readPassword();
+                if (!password) return;
+                startTransition(async () => {
+                  const result = await authClient.twoFactor.generateBackupCodes({ password });
+                  if (result.error || !result.data) {
+                    failPassword(result.error, "New recovery codes couldn't be created. Try again.");
+                    return;
+                  }
+                  setCodes((result.data as { backupCodes: string[] }).backupCodes);
+                  toast.success("New recovery codes created", { description: "Your old codes no longer work." });
+                });
+              }}
+            >
+              Replace recovery codes
+            </Button>
+            <Button
+              variant="quiet-danger"
+              disabled={pending}
+              onClick={() => {
+                if (readPassword()) setConfirmOff(true);
+              }}
+            >
+              Turn off two-step verification
+            </Button>
+          </div>
         </form>
       ) : null}
-    </div>
+
+      <ConfirmDialog
+        open={confirmOff}
+        title="Turn off two-step verification?"
+        description={
+          requiredByPolicy
+            ? "Your organisation requires it for your role. Until you turn it back on you can sign in, but you can't change shared settings."
+            : "Password sign-ins will only need your password. Your recovery codes stop working."
+        }
+        confirmText="turn off"
+        confirmLabel="Turn off"
+        pending={pending}
+        onCancel={() => setConfirmOff(false)}
+        onConfirm={() => {
+          const password = passwordRef.current?.value ?? "";
+          startTransition(async () => {
+            const result = await authClient.twoFactor.disable({ password });
+            setConfirmOff(false);
+            if (result.error) {
+              failPassword(result.error, "Two-step verification wasn't turned off. Try again.");
+              return;
+            }
+            setCodes(null);
+            if (passwordRef.current) passwordRef.current.value = "";
+            toast.success("Two-step verification is off");
+            router.refresh();
+          });
+        }}
+      />
+    </Section>
   );
 }

@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   createJobTemplate,
@@ -10,7 +10,7 @@ import {
 } from "@/lib/coord-remote";
 import { requireConsoleContext } from "@/lib/session";
 
-export type JobActionResult = { ok: true; message: string } | { ok: false; error: string };
+export type JobActionResult = { ok: true; message: string } | ActionFailure;
 
 const UUID = /^[0-9a-f-]{36}$/i;
 const TAGS = ["office", "ranger", "store"];

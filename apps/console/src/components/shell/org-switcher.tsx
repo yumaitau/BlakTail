@@ -1,8 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useTransition } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
+import { Spinner } from "../ui/button";
+import { toast } from "../ui/toast";
 import { usePopover } from "./use-popover";
 
 export type ShellOrganisation = { id: string; name: string; subtitle: string };
@@ -20,7 +22,6 @@ export function OrgSwitcher({
 }) {
   const router = useRouter();
   const { open, setOpen, root, trigger } = usePopover();
-  const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const active = organisations.find((org) => org.id === activeId) ?? organisations[0];
   if (!active) return null;
@@ -48,18 +49,25 @@ export function OrgSwitcher({
   function choose(id: string) {
     setOpen(false);
     if (id === active!.id) return;
-    setError(null);
+    const name = organisations.find((org) => org.id === id)?.name ?? "the organisation";
     startTransition(async () => {
-      const response = await fetch("/api/organisations/active", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ organisationId: id }),
-      });
-      if (!response.ok) {
-        const result = (await response.json().catch(() => ({}))) as { error?: string };
-        setError(result.error ?? "Could not switch organisation.");
+      let response: Response;
+      try {
+        response = await fetch("/api/organisations/active", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ organisationId: id }),
+        });
+      } catch {
+        toast.error(`Couldn't switch to ${name}. Check your connection and try again.`);
         return;
       }
+      if (!response.ok) {
+        const result = (await response.json().catch(() => ({}))) as { error?: string; ref?: string };
+        toast.error(result.error ?? `Couldn't switch to ${name}.`, { reference: result.ref });
+        return;
+      }
+      toast.success(`Switched to ${name}`);
       router.refresh();
     });
   }
@@ -74,11 +82,12 @@ export function OrgSwitcher({
         aria-expanded={open}
         aria-controls="org-menu"
         aria-label={`Organisation: ${active.name}. Switch organisation`}
+        aria-busy={pending || undefined}
         disabled={pending}
         onClick={() => setOpen(!open)}
       >
         {summary}
-        <ChevronsUpDown aria-hidden="true" size={16} className="org-chevron" />
+        {pending ? <Spinner /> : <ChevronsUpDown aria-hidden="true" size={16} className="org-chevron" />}
       </button>
       {open ? (
         <div className="popover org-menu" id="org-menu">
@@ -107,11 +116,6 @@ export function OrgSwitcher({
             ))}
           </ul>
         </div>
-      ) : null}
-      {error ? (
-        <span className="error org-error" role="alert">
-          {error}
-        </span>
       ) : null}
     </div>
   );

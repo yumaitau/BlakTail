@@ -1,4 +1,4 @@
-import { readJsonBody } from "@/lib/server-errors";
+import { jsonError, readJsonBody } from "@/lib/server-errors";
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
@@ -24,8 +24,7 @@ function errorResponse(error: unknown): Response {
   if (error instanceof InvitationError) {
     return Response.json({ error: error.message }, { status: error.status });
   }
-  console.error("Invitation acceptance failed", error);
-  return Response.json({ error: "Invitation failed." }, { status: 500 });
+  return jsonError(error, "The invitation couldn't be accepted.", "invitation accept");
 }
 
 export async function POST(request: Request): Promise<Response> {

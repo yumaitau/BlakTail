@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import {
   addGroupMapping,
@@ -13,9 +13,9 @@ import {
 import type { DriftChange } from "@/lib/directory-mapping-core";
 import { requireConsoleContext } from "@/lib/session";
 
-type Result<T = void> = { ok: true; data: T } | { ok: false; error: string };
+type Result<T = void> = { ok: true; data: T } | ActionFailure;
 
-function failure(error: unknown, fallback: string): { ok: false; error: string } {
+function failure(error: unknown, fallback: string): ActionFailure {
   return actionFailure(error, fallback);
 }
 

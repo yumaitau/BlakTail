@@ -2,11 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { authClient } from "@/lib/auth-client";
 import { TAGLINE } from "@/lib/tagline";
 import { PathMotif } from "./path-motif";
+import { Alert } from "./ui/alert";
+import { Button } from "./ui/button";
+import { FormField } from "./ui/form-field";
 import { Wordmark } from "./wordmark";
+
+type Field = "email" | "name" | "password";
+const MIN_PASSWORD = 10;
 
 export function InvitationAcceptForm({
   token,
@@ -16,115 +22,124 @@ export function InvitationAcceptForm({
   signedInEmail: string | null;
 }) {
   const router = useRouter();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; ref?: string } | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<Field, string>>>({});
   const [pending, startTransition] = useTransition();
+  const formRef = useRef<HTMLFormElement>(null);
 
   return (
     <div className="auth-screen">
-      <div className="auth-form-col">
-      <div className="sign-in-card panel">
-        <div className="stack">
-          <div>
+      <main className="auth-form-col" id="main">
+        <div className="sign-in-card panel">
+          <div className="auth-card-head">
             <Wordmark href="/sign-in" />
             <h1>Accept invitation</h1>
             <p className="tagline">{TAGLINE}</p>
           </div>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const form = new FormData(event.currentTarget);
-              const email = signedInEmail ?? String(form.get("email") ?? "");
-              const name = String(form.get("name") ?? "");
-              const password = String(form.get("password") ?? "");
-              setError(null);
-              startTransition(async () => {
-                const response = await fetch("/api/invitations/accept", {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify(
-                    signedInEmail
-                      ? { token }
-                      : { token, email, name, password },
-                  ),
-                });
-                const result = (await response.json()) as { error?: string };
-                if (!response.ok) {
-                  setError(result.error ?? "Invitation is invalid or expired.");
+          {!token ? (
+            <Alert tone="error" title="This invitation link isn't valid">
+              It may be incomplete or already used. Ask the person who invited you to send a new
+              invitation.
+            </Alert>
+          ) : (
+            <form
+              ref={formRef}
+              className="auth-form"
+              noValidate
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                const email = signedInEmail ?? String(form.get("email") ?? "").trim();
+                const name = String(form.get("name") ?? "").trim();
+                const password = String(form.get("password") ?? "");
+                const next: Partial<Record<Field, string>> = {};
+                if (!signedInEmail) {
+                  if (!/^[^\s@]+@[^\s@]+$/u.test(email)) next.email = "Enter the email address the invitation was sent to.";
+                  if (!name) next.name = "Enter your name.";
+                  if (password.length < MIN_PASSWORD) next.password = `Use at least ${MIN_PASSWORD} characters.`;
+                }
+                setFieldErrors(next);
+                setError(null);
+                const first = (Object.keys(next) as Field[])[0];
+                if (first) {
+                  formRef.current?.querySelector<HTMLInputElement>(`[name="${first}"]`)?.focus();
                   return;
                 }
-                if (!signedInEmail) {
-                  const signIn = await authClient.signIn.email({ email, password });
-                  if (signIn.error) {
-                    setError("Account created. Sign in with your new password.");
+                startTransition(async () => {
+                  let response: Response;
+                  try {
+                    response = await fetch("/api/invitations/accept", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify(signedInEmail ? { token } : { token, email, name, password }),
+                    });
+                  } catch {
+                    setError({ message: "BlakTail couldn't be reached. Check your connection and try again." });
                     return;
                   }
-                }
-                router.replace("/devices");
-                router.refresh();
-              });
-            }}
-          >
-            {signedInEmail ? (
-              <p>
-                Signed in as <strong>{signedInEmail}</strong>. Accepting adds
-                this workspace to the same session; your other workspaces stay
-                connected.
-              </p>
-            ) : (
-              <>
-                <label>
-                  Invited email
-                  <input
-                    name="email"
-                    type="email"
-                    autoComplete="username"
-                    required
-                  />
-                </label>
-                <label>
-                  Your name
-                  <input
-                    name="name"
-                    autoComplete="name"
-                    maxLength={128}
-                    required
-                  />
-                </label>
-                <label>
-                  Create password
-                  <input
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    minLength={10}
-                    maxLength={128}
-                    required
-                  />
-                </label>
-              </>
-            )}
-            {error ? <p className="error">{error}</p> : null}
-            <button type="submit" disabled={pending || !token}>
-              {pending
-                ? "Accepting…"
-                : signedInEmail
-                  ? "Join workspace"
-                  : "Accept invitation"}
-            </button>
-          </form>
-          {!token ? <p className="error">Invitation is invalid or expired.</p> : null}
-          <p className="muted">
-            Invitation works once and only for its assigned workspace and role.
+                  const result = (await response.json().catch(() => ({}))) as { error?: string; ref?: string };
+                  if (!response.ok) {
+                    setError({
+                      message: result.error ?? "This invitation is invalid or has expired.",
+                      ref: result.ref,
+                    });
+                    return;
+                  }
+                  if (!signedInEmail) {
+                    const signIn = await authClient.signIn.email({ email, password });
+                    if (signIn.error) {
+                      setError({ message: "Your account is ready, but signing in didn't finish. Sign in with your new password." });
+                      return;
+                    }
+                  }
+                  router.replace("/devices");
+                  router.refresh();
+                });
+              }}
+            >
+              {error ? (
+                <Alert tone="error" reference={error.ref}>
+                  {error.message}
+                </Alert>
+              ) : null}
+              {signedInEmail ? (
+                <p className="auth-step-note">
+                  You&apos;re signed in as <strong>{signedInEmail}</strong>. Accepting adds this
+                  organisation to the same sign-in; your other organisations stay connected.
+                </p>
+              ) : (
+                <>
+                  <FormField label="Invited email" error={fieldErrors.email}>
+                    <input name="email" type="email" autoComplete="username" />
+                  </FormField>
+                  <FormField label="Your name" error={fieldErrors.name}>
+                    <input name="name" autoComplete="name" maxLength={128} />
+                  </FormField>
+                  <FormField
+                    label="Create a password"
+                    hint={`At least ${MIN_PASSWORD} characters.`}
+                    error={fieldErrors.password}
+                  >
+                    <input name="password" type="password" autoComplete="new-password" maxLength={128} />
+                  </FormField>
+                </>
+              )}
+              <Button type="submit" loading={pending} loadingLabel="Accepting…">
+                {signedInEmail ? "Join organisation" : "Accept invitation"}
+              </Button>
+            </form>
+          )}
+          <p className="muted auth-footnote">
+            An invitation works once, and only for the organisation and role it was sent for.
           </p>
           {!signedInEmail ? (
-            <p className="muted">
-              Already have an account? <Link href="/sign-in">Sign in</Link>,
-              then open this invitation again.
+            <p className="muted auth-footnote">
+              Already have an account? <Link href="/sign-in">Sign in</Link>, then open this
+              invitation again.
             </p>
           ) : null}
         </div>
-      </div>
-      </div>
+      </main>
       <aside className="auth-brand-col" aria-hidden="true">
         <PathMotif />
         <div className="auth-brand-copy">

@@ -431,9 +431,10 @@ targets), tablet 801–1024px, desktop ≥ 1025px.
 | `Alert({ tone, title?, reference?, action? })` | Inline page or form messages; errors use `role="alert"`. |
 | `Skeleton`, `SkeletonTable`, `SkeletonPage` | Loading placeholders (for `loading.tsx`). |
 | `ConfirmDialog({ open, title, description, confirmLabel, confirmText?, pending, onConfirm, onCancel })` | Native modal dialog: focus trapped, Escape cancels, Cancel focused first. `confirmText` adds type-to-confirm. |
+| `SecretPanel({ title, label, secret, description?, onDone })` | A secret shown once (API or SCIM token, signing secret, agent key, recovery codes, invitation link): copy button, "Shown once" label, and a "stored it somewhere safe" tick before it can be dismissed. |
 | `MonoValue({ value, copy?, copyLabel?, wrap? })`, `CopyButton({ value, label })` | Keys, addresses, IDs and FQDNs in mono; long values truncate with the full text in `title`; `copy` adds a copy button with a toast. |
 | `PermissionNotice({ reason })` | "View only" notice. Pass `permissionReason(role, permission)` so it names the roles that can. |
-| `LocalTime({ value, dateOnly? })` | Unix seconds in the viewer's locale and zone. Use it in client components so server and browser formatting don't cause hydration warnings. |
+| `LocalTime({ value, dateOnly?, fallback? })` | Unix seconds, ISO string or Date in the viewer's own time zone, with the exact UTC time on hover. Server and first browser render show UTC text, then it switches after hydration, so there's no mismatch. Use it for every time people see; `lib/format-time.ts` holds the UTC helpers it uses. |
 
 **Page layout.** One `PageHeader` (with the page's main actions), then
 `Section`s. Detail pages start with `<Link className="back-link">`. Pages

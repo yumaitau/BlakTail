@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { auth } from "./auth";
 import { getSignInPolicy, jitDomainCheck } from "./auth-policy";
 import { linkFreshnessRefusal } from "./auth-policy-core";
@@ -159,6 +159,43 @@ export async function upsertIdentityProvider(input: {
     targetType: "identity_provider",
     targetId: id,
     details: { issuer, enabled: input.enabled },
+  });
+}
+
+/**
+ * Removes the organisation's identity provider. Linked single sign-on logins
+ * and pending sign-in attempts go with it (cascade); people keep their
+ * memberships and can be re-linked after a new provider is saved.
+ */
+export async function deleteIdentityProvider(input: {
+  organisationId: string;
+  providerId: string;
+  actorUserId: string;
+  actorEmail: string;
+}): Promise<void> {
+  const removed = await db()
+    .delete(identityProvider)
+    .where(
+      and(
+        eq(identityProvider.id, input.providerId),
+        eq(identityProvider.organisationId, input.organisationId),
+      ),
+    )
+    .returning({ issuer: identityProvider.issuer });
+  if (removed.length === 0) {
+    throw new OidcError("That identity provider was already removed.");
+  }
+  await writeConsoleAudit({
+    organisationId: input.organisationId,
+    actorUserId: input.actorUserId,
+    actorEmail: input.actorEmail,
+    actorRole: "owner",
+    source: "console",
+    action: "oidc.provider_deleted",
+    result: "ok",
+    targetType: "identity_provider",
+    targetId: input.providerId,
+    details: { issuer: removed[0]?.issuer },
   });
 }
 
