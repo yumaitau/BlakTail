@@ -235,6 +235,8 @@ describe("security headers", () => {
     expect(csp).toContain("base-uri 'self'");
     expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/u);
     expect(csp).not.toMatch(/\*/u);
+    expect(csp).not.toContain("upgrade-insecure-requests");
+    expect(contentSecurityPolicy({ nonce: "n", https: true })).toContain("upgrade-insecure-requests");
   });
 
   test("dev allows eval and ws for hot reload only", () => {

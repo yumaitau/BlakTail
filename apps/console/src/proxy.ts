@@ -10,21 +10,22 @@ import { contentSecurityPolicy, securityHeaders } from "@/lib/security-headers";
 export function proxy(request: NextRequest) {
   const nonce = btoa(crypto.randomUUID());
   const dev = process.env.NODE_ENV === "development";
-  const options = {
-    nonce,
-    dev,
-    extraConnectSrc: process.env.BLAKTAIL_CSP_CONNECT_SRC,
-  };
   const https =
     request.nextUrl.protocol === "https:" ||
     request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https";
+  const options = {
+    nonce,
+    dev,
+    https,
+    extraConnectSrc: process.env.BLAKTAIL_CSP_CONNECT_SRC,
+  };
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("Content-Security-Policy", contentSecurityPolicy(options));
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
-  for (const [name, value] of Object.entries(securityHeaders({ ...options, https }))) {
+  for (const [name, value] of Object.entries(securityHeaders(options))) {
     response.headers.set(name, value);
   }
   return response;

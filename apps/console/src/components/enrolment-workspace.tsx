@@ -120,6 +120,7 @@ export function EnrolmentWorkspace({
         </div>
         <form
           className="stack"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
             const formData = new FormData(event.currentTarget);

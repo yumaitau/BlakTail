@@ -6,6 +6,8 @@ export type CspOptions = {
   dev?: boolean;
   /** Extra connect-src sources, space-separated (BLAKTAIL_CSP_CONNECT_SRC). */
   extraConnectSrc?: string;
+  /** Served over HTTPS: also upgrade any stray http:// subresource. */
+  https?: boolean;
 };
 
 /**
@@ -16,7 +18,7 @@ export type CspOptions = {
  * organisation's remote-access gateway, whose address is configured per
  * organisation, so connect-src allows wss: (encrypted WebSockets only).
  */
-export function contentSecurityPolicy({ nonce, dev = false, extraConnectSrc }: CspOptions): string {
+export function contentSecurityPolicy({ nonce, dev = false, extraConnectSrc, https = false }: CspOptions): string {
   const connect = ["'self'", "wss:"];
   if (dev) connect.push("ws:");
   if (extraConnectSrc) {
@@ -44,7 +46,7 @@ export function contentSecurityPolicy({ nonce, dev = false, extraConnectSrc }: C
     "frame-ancestors 'none'",
     "manifest-src 'self'",
   ];
-  if (!dev) directives.push("upgrade-insecure-requests");
+  if (https && !dev) directives.push("upgrade-insecure-requests");
   return directives.join("; ");
 }
 
@@ -70,7 +72,7 @@ export const PERMISSIONS_POLICY = [
 ].join(", ");
 
 /** Headers set on every response. HSTS only when the request came over HTTPS. */
-export function securityHeaders(options: CspOptions & { https: boolean }): Record<string, string> {
+export function securityHeaders(options: CspOptions): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Security-Policy": contentSecurityPolicy(options),
     "X-Content-Type-Options": "nosniff",

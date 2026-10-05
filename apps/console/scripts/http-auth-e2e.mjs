@@ -414,6 +414,30 @@ try {
   }
   await waitForConsole(baseUrl, consoleProcess, consoleLog);
 
+  // Security headers regression: the sign-in page carries a nonce CSP and
+  // Next stamps that nonce on its scripts.
+  const signInPage = await fetch(`${baseUrl}/sign-in`);
+  const csp = signInPage.headers.get("content-security-policy") ?? "";
+  const nonce = /'nonce-([^']+)'/u.exec(csp)?.[1];
+  assert.ok(nonce, `sign-in CSP has a script nonce: ${csp}`);
+  assert.match(csp, /frame-ancestors 'none'/u);
+  assert.match(csp, /object-src 'none'/u);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-(inline|eval)'/u);
+  assert.equal(signInPage.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(signInPage.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
+  assert.equal(signInPage.headers.get("cross-origin-opener-policy"), "same-origin");
+  assert.match(signInPage.headers.get("permissions-policy") ?? "", /camera=\(\)/u);
+  assert.equal(signInPage.headers.get("x-powered-by"), null);
+  const signInHtml = await signInPage.text();
+  assert.ok(signInHtml.includes(`nonce="${nonce}"`), "Next scripts carry the CSP nonce");
+  const secondSignIn = await fetch(`${baseUrl}/sign-in`);
+  assert.notEqual(
+    /'nonce-([^']+)'/u.exec(secondSignIn.headers.get("content-security-policy") ?? "")?.[1],
+    nonce,
+    "nonce changes per request",
+  );
+  await secondSignIn.text();
+
   const signup = await jsonRequest(baseUrl, "/api/auth/sign-up/email", {
     body: {
       email: "public.signup@example.test",

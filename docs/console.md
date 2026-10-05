@@ -397,6 +397,82 @@ email, Slack and Microsoft Teams destinations with quiet hours, digests and
 SCIM groups and OIDC `groups` claims to roles with a drift preview
 ([identity.md](identity.md#directory-groups-and-roles)).
 
+## UI building blocks
+
+Shared pieces live in `apps/console/src/components/ui` (import from
+`@/components/ui`). Use them instead of hand-rolled markup, and use the CSS
+tokens in `src/app/globals.css` (`:root`) instead of ad-hoc values.
+
+**Tokens**
+
+| Group | Tokens |
+| --- | --- |
+| Spacing (4px base) | `--space-1` 4 · `-2` 8 · `-3` 12 · `-4` 16 · `-5` 20 · `-6` 24 · `-8` 32 · `-10` 40 · `-12` 48 |
+| Type (size / line height) | `--text-xs` 12/16 · `-sm` 13/18 · `-base` 14/21 · `-md` 15/22 · `-lg` 17/24 · `-xl` 20/26 · `-2xl` 24/30 (`--text-*-lh`) |
+| Radii | `--radius-sm` 6 · `--radius` 8 (controls) · `--radius-lg` 10 (panels) · `--radius-xl` 12 (dialogs, toasts) · `--radius-pill` |
+| Borders, focus | `--border-width`, `--border`, `--border-strong`, `--focus-outline`, `--focus-offset`, `--focus-ring` |
+| Layout | `--container-narrow` 40rem (forms) · `--container-text` 52rem · `--container-wide` 76rem · `--gutter` · `--gutter-mobile` 16px · `--touch-target` 40px |
+| Layers | `--z-topbar` · `--z-drawer` · `--z-dialog` · `--z-toast` |
+
+Breakpoints: mobile ≤ 800px (drawer navigation, toasts at the top, 40px touch
+targets), tablet 801–1024px, desktop ≥ 1025px.
+
+**Components**
+
+| Component | Use |
+| --- | --- |
+| `PageHeader({ eyebrow?, title, description?, actions? })` | First thing on every page. |
+| `Section({ id?, title, description?, actions?, children })`, `Card` | Titled panel; plain panel. Don't nest panels. |
+| `FormField({ label, hint?, error?, required?, children })` | Wraps one control; wires `id`, `aria-describedby`, `aria-invalid`, required marker. |
+| `Button({ variant: primary \| secondary \| ghost \| danger \| quiet-danger, size?, loading?, loadingLabel?, icon? })` | `loading` shows a spinner, sets `aria-busy` and disables. |
+| `Badge` / `StatusPill({ tone: neutral \| success \| warning \| danger \| info \| brand \| muted })` | Text always carries the meaning; the dot is decoration. |
+| `Table({ label, mobile: "scroll" \| "stack" })`, `Td({ label })`, `EmptyRow({ colSpan })` | Scroll tables get a focusable labelled region; stacked tables show `Td` labels on phones. |
+| `EmptyState({ title, body, action?, compact? })` | Empty lists only. A failed load is an `Alert`, never an empty state. |
+| `Alert({ tone, title?, reference?, action? })` | Inline page or form messages; errors use `role="alert"`. |
+| `Skeleton`, `SkeletonTable`, `SkeletonPage` | Loading placeholders (for `loading.tsx`). |
+| `ConfirmDialog({ open, title, description, confirmLabel, confirmText?, pending, onConfirm, onCancel })` | Native modal dialog: focus trapped, Escape cancels, Cancel focused first. `confirmText` adds type-to-confirm. |
+
+**Toasts** report the outcome of something the person just did. `<Toaster />`
+is mounted once in the root layout.
+
+```ts
+import { toast, toastResult, useActionToast } from "@/components/ui";
+
+toast.success("Device renamed", { description: "…" });     // 5 s, pauses on hover/focus
+toast.error("Couldn't rename the device.", { reference }); // stays until dismissed
+const fieldErrors = toastResult(result, { success: "Join key minted", errorToast: false });
+const fieldErrors = useActionToast(state, { success: "Policy published" }); // useActionState forms
+```
+
+Success and info use a polite live region; errors use an assertive one. At most
+three show; reduced motion turns off the slide-in.
+
+**Errors.** Server actions return `ActionResult<T>`
+(`{ ok: true, data } | { ok: false, error, ref?, fieldErrors? }`). In a catch
+block return `actionFailure(error, "Could not save the policy.")` from
+`@/lib/server-errors`; pass `{ fields: { friendlyName: ["friendly name"] } }`
+to map coordinator validation onto form fields. Server pages use
+`errorText(error, fallback)`; route handlers use `jsonError(error, fallback)`
+and `readJsonBody(request)` (64 KB cap). Coordinator calls throw
+`await coordError(res)`, which maps the envelope `code` (`bad_request`,
+`unauthorized`, `forbidden`, `suspended`, `not_found`, `gone`,
+`precondition_failed`, `rate_limited`, `unavailable`, `conflict`,
+`internal_error`) and HTTP status to a short message, takes the reference from
+`request_id`, and logs the raw detail server-side as one JSON line. The pure
+mapper is `src/lib/errors.ts` (`describeError`, `toUserError`,
+`authErrorMessage`); its tests are `scripts/errors.test.mjs`. People never see
+coordinator text, codes, JSON, SQL or stack traces; render-time crashes show
+`app/error.tsx` with Next's error digest as the reference.
+
+**Security headers** come from `src/proxy.ts` and `src/lib/security-headers.ts`:
+a per-request nonce CSP (`frame-ancestors 'none'`, `object-src 'none'`,
+`connect-src 'self' wss:` for remote-access gateways; add origins with
+`BLAKTAIL_CSP_CONNECT_SRC`), HSTS over HTTPS, `nosniff`,
+`strict-origin-when-cross-origin`, a locked-down `Permissions-Policy` and
+`Cross-Origin-Opener-Policy: same-origin`. Every page renders per request so
+the nonce applies. Session cookies are `HttpOnly`, `SameSite=Lax` and `Secure`
+when `BETTER_AUTH_URL` is HTTPS.
+
 ## Local development
 
 To run console, coordinator, and relay together, use
