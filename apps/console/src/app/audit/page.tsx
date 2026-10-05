@@ -1,8 +1,16 @@
-import { errorText } from "@/lib/server-errors";
+import { Suspense, type ReactNode } from "react";
 import Link from "next/link";
+import { Download } from "lucide-react";
+import { errorText } from "@/lib/server-errors";
 import { ConsoleShell } from "@/components/console-shell";
-import { EmptyState } from "@/components/empty-state";
-import { PageHeader } from "@/components/page-header";
+import {
+  Alert,
+  Card,
+  EmptyState,
+  PageHeader,
+  Section,
+  SkeletonTable,
+} from "@/components/ui";
 import {
   AUDIT_PAGE_SIZE,
   auditFiltersFromParams,
@@ -15,8 +23,9 @@ import {
 } from "@/lib/audit-view";
 import { listConsoleAuditPage } from "@/lib/console-audit";
 import { listAuditPage, verifyAuditChain, type ChainReport } from "@/lib/coord-events";
+import { formatDateTime, isoTime } from "@/lib/format-time";
 import { permissionReason, roleLabel } from "@/lib/roles";
-import { requireConsoleContext } from "@/lib/session";
+import { requireConsoleContext, type ConsoleContext } from "@/lib/session";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -46,18 +55,117 @@ function filterQuery(params: SearchParams, extra: Record<string, string> = {}): 
   return query.toString();
 }
 
+/** A labelled filter input. Server-rendered, so it can't use the client FormField. */
+function FilterField({ label, children }: { label: string; children: (id: string) => ReactNode }) {
+  const id = `audit-${label.toLowerCase().replace(/[^a-z]+/gu, "-")}`;
+  return (
+    <div className="ui-field">
+      <label htmlFor={id} className="ui-field-label">
+        {label}
+      </label>
+      {children(id)}
+    </div>
+  );
+}
+
 function hasFilters(filters: AuditFilters): boolean {
   return Object.values(filters).some((value) => value !== undefined);
 }
 
-export default async function AuditPage({
-  searchParams,
-}: {
-  searchParams: Promise<SearchParams>;
-}) {
+export default async function AuditPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await requireConsoleContext();
   const params = await searchParams;
   const filters = auditFiltersFromParams(params);
+  const exportDenied = permissionReason(ctx.role, "export_audit");
+  const filtered = hasFilters(filters);
+
+  return (
+    <ConsoleShell ctx={ctx} current="/audit">
+      <div className="stack">
+        <PageHeader
+          title="Audit log"
+          description={`Administrative changes in ${ctx.organisationName}, newest first. Times are UTC. Network connections aren't recorded here; see Traffic.`}
+          actions={
+            exportDenied ? null : (
+              <>
+                <a className="button secondary ui-button" href={`/audit/export?${filterQuery(params, { format: "csv" })}`}>
+                  <Download aria-hidden="true" size={16} />
+                  <span>Export CSV</span>
+                </a>
+                <a className="button secondary ui-button" href={`/audit/export?${filterQuery(params, { format: "json" })}`}>
+                  <Download aria-hidden="true" size={16} />
+                  <span>Export JSON</span>
+                </a>
+              </>
+            )
+          }
+        />
+        <p className="page-context">
+          {ctx.organisationName} · {roleLabel(ctx.role)}
+          {exportDenied ? "" : " · exports use the filters below, are capped at 10,000 coordinator events and are themselves audited"}
+        </p>
+        {exportDenied ? <Alert tone="info">Export isn&apos;t available: {exportDenied}</Alert> : null}
+
+        <Section
+          title="Filter events"
+          description="Secrets, tokens and passwords in event details always show as [redacted]."
+        >
+          <form className="audit-filters" method="get" action="/audit" aria-label="Filter audit events">
+            <FilterField label="Actor">
+              {(id) => <input id={id} name="actor" defaultValue={one(params, "actor")} maxLength={200} placeholder="Email or user ID" />}
+            </FilterField>
+            <FilterField label="Action">
+              {(id) => <input id={id} name="action" defaultValue={one(params, "action")} maxLength={200} placeholder="node.* or acl.updated" />}
+            </FilterField>
+            <FilterField label="Target type">
+              {(id) => <input id={id} name="target_type" defaultValue={one(params, "target_type")} maxLength={200} placeholder="node" />}
+            </FilterField>
+            <FilterField label="Target ID">
+              {(id) => <input id={id} name="target_id" defaultValue={one(params, "target_id")} maxLength={200} />}
+            </FilterField>
+            <FilterField label="From (UTC)">
+              {(id) => <input id={id} type="date" name="from" defaultValue={one(params, "from")} />}
+            </FilterField>
+            <FilterField label="To (UTC, inclusive)">
+              {(id) => <input id={id} type="date" name="to" defaultValue={one(params, "to")} />}
+            </FilterField>
+            <div className="audit-filters-actions">
+              <button type="submit" className="ui-button">
+                Apply filters
+              </button>
+              {filtered ? (
+                <Link className="button secondary ui-button" href="/audit">
+                  Clear
+                </Link>
+              ) : null}
+            </div>
+          </form>
+        </Section>
+
+        <Suspense
+          key={filterQuery(params, { cursor: one(params, "cursor") })}
+          fallback={
+            <Card>
+              <SkeletonTable rows={6} label="Loading audit events" />
+            </Card>
+          }
+        >
+          <AuditEvents ctx={ctx} params={params} filters={filters} />
+        </Suspense>
+      </div>
+    </ConsoleShell>
+  );
+}
+
+async function AuditEvents({
+  ctx,
+  params,
+  filters,
+}: {
+  ctx: ConsoleContext;
+  params: SearchParams;
+  filters: AuditFilters;
+}) {
   const cursor = parseAuditCursor(one(params, "cursor"));
   let events: AuditEventView[] = [];
   let next: string | null = null;
@@ -74,141 +182,99 @@ export default async function AuditPage({
   } catch (err) {
     error = errorText(err, "Could not load audit events.");
   }
-  const exportDenied = permissionReason(ctx.role, "export_audit");
+  const narrowed = hasFilters(filters) || Boolean(cursor);
 
   return (
-    <ConsoleShell ctx={ctx} current="/audit">
-      <div className="stack">
-        <PageHeader
-          title="Audit log"
-          description={`Administrative changes for ${ctx.organisationName}, newest first. Times are UTC. Network traffic is not recorded here; see Traffic.`}
-        />
-        <form className="panel audit-filters" method="get" action="/audit" aria-label="Filter audit events">
-          <label>
-            Actor
-            <input name="actor" defaultValue={one(params, "actor")} maxLength={200} placeholder="email or user id" />
-          </label>
-          <label>
-            Action
-            <input name="action" defaultValue={one(params, "action")} maxLength={200} placeholder="node.* or acl.updated" />
-          </label>
-          <label>
-            Target type
-            <input name="target_type" defaultValue={one(params, "target_type")} maxLength={200} placeholder="node" />
-          </label>
-          <label>
-            Target id
-            <input name="target_id" defaultValue={one(params, "target_id")} maxLength={200} />
-          </label>
-          <label>
-            From (UTC)
-            <input type="date" name="from" defaultValue={one(params, "from")} />
-          </label>
-          <label>
-            To (UTC, inclusive)
-            <input type="date" name="to" defaultValue={one(params, "to")} />
-          </label>
-          <div className="row">
-            <button type="submit">Apply filters</button>
-            {hasFilters(filters) ? (
-              <Link className="button secondary" href="/audit">
-                Clear
-              </Link>
-            ) : null}
-          </div>
-        </form>
-
-        <div className="panel stack">
-          <div className="row">
-            <span>
-              {ctx.organisationName} · {roleLabel(ctx.role)}
-            </span>
-            {exportDenied ? (
-              <span className="muted">Export: {exportDenied}</span>
-            ) : (
-              <>
-                <a className="button secondary" href={`/audit/export?${filterQuery(params, { format: "csv" })}`}>
-                  Export CSV
-                </a>
-                <a className="button secondary" href={`/audit/export?${filterQuery(params, { format: "json" })}`}>
-                  Export JSON
-                </a>
-              </>
-            )}
-          </div>
-          <p className="muted">
-            Exports use the filters above, are capped at 10,000 coordinator events and are themselves
-            recorded in this log. Secrets, tokens and passwords in event details are shown as
-            [redacted].
-          </p>
-          {chain ? (
-            <p className={chain.intact ? "muted" : "error"} role="status">
-              {chain.intact
-                ? `Integrity chain intact: ${chain.chained_events} coordinator events verified.`
-                : `Integrity chain problem: ${chain.problems.join("; ")}`}{" "}
-              {chain.unchained_events > 0
-                ? `${chain.unchained_events} older or console events are not chained.`
+    <>
+      {chain ? (
+        chain.intact ? (
+          <Alert tone="success" title="Integrity chain intact">
+            {chain.chained_events.toLocaleString("en-AU")} coordinator events verified.
+            {chain.unchained_events === 1
+              ? " 1 older or console event isn't chained."
+              : chain.unchained_events > 1
+                ? ` ${chain.unchained_events.toLocaleString("en-AU")} older or console events aren't chained.`
                 : ""}
-            </p>
-          ) : null}
-        </div>
-
-        <div className="panel">
-          {error ? <p className="error">{error}</p> : null}
-          {!error && events.length === 0 ? (
-            <EmptyState
-              title={hasFilters(filters) || cursor ? "No matching events" : "No audited changes yet"}
-              body={
-                hasFilters(filters) || cursor
-                  ? "Nothing in the retention window matches these filters."
-                  : "Approvals, invitations, and policy edits will appear here as a trail through this organisation."
-              }
-            />
-          ) : null}
-          {events.length > 0 ? (
-            <ol className="audit-trail">
-              {events.map((event) => (
-                <li key={event.id} className="audit-event">
-                  <span
-                    className={["audit-node", nodeTone(event.action)].filter(Boolean).join(" ")}
-                    aria-hidden="true"
-                  />
-                  <strong>{event.action}</strong>
-                  <div>
-                    {actor(event)}
-                    {event.actor_role ? ` · ${event.actor_role}` : ""}
-                    {event.target_type ? ` · ${event.target_type}` : ""}
-                  </div>
-                  <div className="muted mono">
-                    {new Date(event.created_at * 1000).toISOString()}
-                    {event.target_id ? ` · ${event.target_id}` : ""}
-                  </div>
-                  <details>
-                    <summary>Details</summary>
-                    <code className="mono audit-details">
-                      {JSON.stringify(redactDetails(event.details), null, 2)}
-                    </code>
-                  </details>
-                </li>
-              ))}
-            </ol>
-          ) : null}
-          <div className="row">
-            {cursor ? (
-              <Link className="button secondary" href={`/audit?${filterQuery(params)}`}>
-                Newest
-              </Link>
-            ) : null}
-            {next ? (
-              <Link className="button secondary" href={`/audit?${filterQuery(params, { cursor: next })}`}>
-                Older events
-              </Link>
-            ) : events.length > 0 ? (
-              <span className="muted">End of the retained log.</span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </ConsoleShell>
+          </Alert>
+        ) : (
+          <Alert tone="error" title="The integrity chain has a problem">
+            Some coordinator events don&apos;t match the chain, which can mean the log was changed
+            outside BlakTail. Export the log and ask your operator to check the coordinator database.
+            ({chain.problems.length} problem{chain.problems.length === 1 ? "" : "s"} found.)
+          </Alert>
+        )
+      ) : null}
+      <Card className="stack">
+        {error ? (
+          <Alert tone="error" title="Audit events couldn't be loaded">
+            {error}
+          </Alert>
+        ) : events.length === 0 ? (
+          <EmptyState
+            title={narrowed ? "No matching events" : "No audited changes yet"}
+            body={
+              narrowed
+                ? "Nothing in the retention window matches these filters. Widen the dates or clear the filters."
+                : "Approvals, invitations and policy changes will appear here as they happen."
+            }
+            action={
+              narrowed ? (
+                <Link className="button secondary ui-button" href="/audit">
+                  Clear filters
+                </Link>
+              ) : undefined
+            }
+          />
+        ) : (
+          <ol className="audit-trail" aria-label="Audit events, newest first">
+            {events.map((event) => (
+              <li key={event.id} className="audit-event">
+                <span
+                  className={["audit-node", nodeTone(event.action)].filter(Boolean).join(" ")}
+                  aria-hidden="true"
+                />
+                <div className="audit-event-head">
+                  <strong className="mono">{event.action}</strong>
+                  <time className="muted" dateTime={isoTime(event.created_at)}>
+                    {formatDateTime(event.created_at)}
+                  </time>
+                </div>
+                <div>
+                  {actor(event)}
+                  {event.actor_role ? ` · ${event.actor_role}` : ""}
+                  {event.target_type ? ` · ${event.target_type}` : ""}
+                </div>
+                {event.target_id ? <div className="muted mono cell-break">{event.target_id}</div> : null}
+                <details>
+                  <summary>Details</summary>
+                  <code className="mono audit-details">
+                    {JSON.stringify(redactDetails(event.details), null, 2)}
+                  </code>
+                </details>
+              </li>
+            ))}
+          </ol>
+        )}
+        {error ? null : (
+          <nav className="traffic-pager" aria-label="Pages">
+            <span className="muted">
+              {events.length > 0 && !next ? "End of the retained log." : `${events.length} events on this page`}
+            </span>
+            <span className="row">
+              {cursor ? (
+                <Link className="button secondary ui-button" href={`/audit?${filterQuery(params)}`}>
+                  Newest
+                </Link>
+              ) : null}
+              {next ? (
+                <Link className="button secondary ui-button" href={`/audit?${filterQuery(params, { cursor: next })}`}>
+                  Older events
+                </Link>
+              ) : null}
+            </span>
+          </nav>
+        )}
+      </Card>
+    </>
   );
 }

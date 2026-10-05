@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import {
   beginIdentityLink,
@@ -15,9 +16,7 @@ import {
 import { isOrgRole, type OrgRole } from "@/lib/roles";
 import { organisationContext, requirePersonSessionContext } from "@/lib/session";
 
-type IdentityActionResult<T = void> =
-  | { ok: true; data: T }
-  | { ok: false; error: string };
+type IdentityActionResult<T = void> = { ok: true; data: T } | ActionFailure;
 
 function refreshIdentityViews() {
   revalidatePath("/devices");
@@ -25,10 +24,11 @@ function refreshIdentityViews() {
   revalidatePath("/audit");
 }
 
-function message(error: unknown, fallback: string) {
-  return error instanceof IdentityLinkError || error instanceof AssuranceError
-    ? error.message
-    : fallback;
+function failure(error: unknown, fallback: string): ActionFailure {
+  if (error instanceof IdentityLinkError || error instanceof AssuranceError) {
+    return { ok: false, error: error.message };
+  }
+  return actionFailure(error, fallback);
 }
 
 export async function beginIdentityLinkAction(): Promise<
@@ -46,10 +46,7 @@ export async function beginIdentityLinkAction(): Promise<
       },
     };
   } catch (error) {
-    return {
-      ok: false,
-      error: message(error, "Could not start identity linking."),
-    };
+    return failure(error, "Could not start identity linking.");
   }
 }
 
@@ -70,13 +67,7 @@ export async function completeIdentityLinkAction(
     return { ok: true, data: result };
   } catch (error) {
     revalidatePath("/audit");
-    return {
-      ok: false,
-      error: message(
-        error,
-        "Linking could not be completed. Fresh reauthentication or account recovery is required.",
-      ),
-    };
+    return failure(error, "Linking could not be completed. Fresh reauthentication or account recovery is required.");
   }
 }
 
@@ -94,10 +85,7 @@ export async function unlinkIdentityAction(
     return { ok: true, data: undefined };
   } catch (error) {
     revalidatePath("/audit");
-    return {
-      ok: false,
-      error: message(error, "Could not unlink that sign-in identity."),
-    };
+    return failure(error, "Could not unlink that sign-in identity.");
   }
 }
 
@@ -115,10 +103,7 @@ export async function suspendIdentityAction(
     return { ok: true, data: undefined };
   } catch (error) {
     revalidatePath("/audit");
-    return {
-      ok: false,
-      error: message(error, "Could not revoke that sign-in identity."),
-    };
+    return failure(error, "Could not revoke that sign-in identity.");
   }
 }
 
@@ -136,10 +121,7 @@ export async function recoverIdentityAction(
     return { ok: true, data: undefined };
   } catch (error) {
     revalidatePath("/audit");
-    return {
-      ok: false,
-      error: message(error, "Could not recover that sign-in identity."),
-    };
+    return failure(error, "Could not recover that sign-in identity.");
   }
 }
 
@@ -176,9 +158,6 @@ export async function resolveIdentityRoleConflictAction(
     return { ok: true, data: result };
   } catch (error) {
     revalidatePath("/audit");
-    return {
-      ok: false,
-      error: message(error, "Could not resolve that role conflict."),
-    };
+    return failure(error, "Could not resolve that role conflict.");
   }
 }

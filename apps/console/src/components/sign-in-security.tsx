@@ -10,6 +10,17 @@ import {
 } from "@/app/settings/actions";
 import type { SignInPolicy } from "@/lib/auth-policy-core";
 import type { OrganisationDomain } from "@/lib/auth-policy";
+import { formatDateTime } from "@/lib/format-time";
+import { Alert } from "./ui/alert";
+import { StatusPill } from "./ui/badge";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { Section } from "./ui/section";
+import { EmptyRow, Table, Td } from "./ui/table";
+import { toast, toastResult } from "./ui/toast";
+
+const DOMAIN = /^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/iu;
 
 export function SignInSecurity({
   organisationName,
@@ -25,76 +36,59 @@ export function SignInSecurity({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [errors, setErrors] = useState<{ stepUp?: string; domain?: string }>({});
+  const [removing, setRemoving] = useState<OrganisationDomain | null>(null);
   const locked = pending || Boolean(denied);
 
-  function submit(
-    action: (form: FormData) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>,
-    form: FormData,
-    done: string | ((data: unknown) => string),
-  ) {
-    setError(null);
-    setNotice(null);
-    startTransition(async () => {
-      const result = await action(form);
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      setNotice(typeof done === "string" ? done : done(result.data));
-      router.refresh();
-    });
-  }
-
   return (
-    <div className="panel stack">
-      <div>
-        <h2>Sign-in policy</h2>
-        <p className="muted">
-          Applies to <strong>{organisationName}</strong> only. A person linked to
-          several organisations meets each organisation&apos;s rule separately.
-          Changes are audited.
-        </p>
-      </div>
-      {denied ? <p className="muted">{denied}</p> : null}
-      {error ? (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {notice ? (
-        <p className="muted" role="status">
-          {notice}
-        </p>
-      ) : null}
+    <Section
+      id="sign-in-policy"
+      headingLevel={3}
+      title="Sign-in policy"
+      description={`Applies to ${organisationName} only. Someone in several organisations meets each organisation's rules separately. Changes are audited.`}
+    >
+      {denied ? <Alert tone="info">{denied}</Alert> : null}
       <form
+        className="ui-form"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
+          const minutes = String(form.get("stepUpMaxAgeMinutes") ?? "").trim();
+          if (minutes && (!/^\d+$/u.test(minutes) || Number(minutes) < 5 || Number(minutes) > 1440)) {
+            setErrors({ stepUp: "Use a whole number of minutes from 5 to 1440, or leave it empty." });
+            return;
+          }
+          setErrors({});
           if (!form.get("requireMfaForPrivileged")) form.set("requireMfaForPrivileged", "false");
-          submit(saveSignInPolicyAction, form, "Sign-in policy saved.");
+          setBusy("policy");
+          startTransition(async () => {
+            const result = await saveSignInPolicyAction(form);
+            setBusy(null);
+            toastResult(result, { success: "Sign-in policy saved" });
+            if (result.ok) router.refresh();
+          });
         }}
       >
-        <label>
-          Re-authenticate for security changes after (minutes)
+        <FormField
+          label="Ask for a fresh sign-in before security changes (minutes)"
+          hint="Leave empty for no requirement. When set, changes to people, roles, single sign-on, directory sync, sign-in domains, this policy and API clients need a sign-in at most this old."
+          error={errors.stepUp}
+          className="field-narrow"
+        >
           <input
             name="stepUpMaxAgeMinutes"
             type="number"
+            inputMode="numeric"
             min={5}
             max={1440}
             step={1}
             defaultValue={policy.stepUpMaxAgeMinutes ?? ""}
             disabled={locked}
-            aria-describedby="step-up-help"
           />
-        </label>
-        <p className="muted" id="step-up-help">
-          Leave empty for no requirement. When set, changes to people, roles,
-          single sign-on, directory sync, sign-in domains, this policy and
-          automation credentials need a sign-in at most this old.
-        </p>
-        <label className="route-option">
+        </FormField>
+        <label className="check-option">
           <input
             type="checkbox"
             name="requireMfaForPrivileged"
@@ -102,115 +96,183 @@ export function SignInSecurity({
             defaultChecked={policy.requireMfaForPrivileged}
             disabled={locked}
           />
-          Require two-step verification for owners and admins who sign in with
-          a password
+          <span>
+            Require two-step verification for owners and admins who sign in with a password
+            <span className="muted">
+              Without it they can still sign in and turn it on, but can&apos;t make changes. Single
+              sign-on relies on the identity provider&apos;s own multi-factor rules.
+            </span>
+          </span>
         </label>
-        <p className="muted">
-          Owners and admins without it can still sign in and turn it on; they
-          cannot make changes until they do. Single sign-on identities rely on
-          the identity provider&apos;s own multi-factor policy.
-        </p>
-        <button type="submit" disabled={locked} title={denied ?? undefined}>
-          Save sign-in policy
-        </button>
+        <div className="actions">
+          <Button
+            type="submit"
+            loading={busy === "policy"}
+            loadingLabel="Saving…"
+            disabled={locked}
+            title={denied ?? undefined}
+          >
+            Save sign-in policy
+          </Button>
+        </div>
       </form>
 
-      <div>
-        <h3>Verified sign-in domains</h3>
-        <p className="muted">
-          Prove a domain with a DNS TXT record. Once any domain is verified,
-          just-in-time single sign-on membership accepts only email addresses
-          in verified domains. A domain verified by another organisation
-          cannot be claimed here.
-        </p>
-      </div>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          const formElement = event.currentTarget;
-          submit(addDomainAction, new FormData(formElement), "Domain added. Publish the TXT record, then check it.");
-          formElement.reset();
-        }}
-      >
-        <label>
-          Domain
-          <input name="domain" required placeholder="example.org.au" disabled={locked} />
-        </label>
-        <button type="submit" disabled={locked} title={denied ?? undefined}>
-          Add domain
-        </button>
-      </form>
-      {domains.length === 0 ? (
-        <p className="muted">No sign-in domains yet.</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Domain</th>
-                <th>TXT record</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {domains.map((domain) => (
+      <div className="ui-subsection" id="domains">
+        <div className="ui-subsection-head">
+          <h4 className="card-heading">Verified sign-in domains</h4>
+          <p className="muted">
+            Prove you own a domain with a DNS TXT record. Once any domain is verified, single
+            sign-on only adds people automatically if their email is in a verified domain. A
+            domain verified by another organisation can&apos;t be claimed here.
+          </p>
+        </div>
+        <form
+          className="form-row"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            const formElement = event.currentTarget;
+            const form = new FormData(formElement);
+            const domain = String(form.get("domain") ?? "").trim().toLowerCase();
+            if (!DOMAIN.test(domain)) {
+              setErrors({ domain: "Enter a domain name like example.org.au, without https:// or a path." });
+              formElement.querySelector<HTMLInputElement>("[name='domain']")?.focus();
+              return;
+            }
+            setErrors({});
+            setBusy("add");
+            startTransition(async () => {
+              const result = await addDomainAction(form);
+              setBusy(null);
+              if (!result.ok) {
+                // Validation comes back without a reference: show it on the field.
+                if (result.ref) toastResult(result);
+                else setErrors({ domain: result.error });
+                return;
+              }
+              formElement.reset();
+              toast.success("Domain added", {
+                description: "Publish the TXT record shown below, then check it.",
+              });
+              router.refresh();
+            });
+          }}
+        >
+          <FormField label="Domain" error={errors.domain}>
+            <input name="domain" placeholder="example.org.au" autoComplete="off" disabled={locked} />
+          </FormField>
+          <Button type="submit" variant="secondary" loading={busy === "add"} loadingLabel="Adding…" disabled={locked}>
+            Add domain
+          </Button>
+        </form>
+        <Table label="Sign-in domains" mobile="stack">
+          <thead>
+            <tr>
+              <th scope="col">Domain</th>
+              <th scope="col">TXT record</th>
+              <th scope="col">Status</th>
+              <th scope="col">
+                <span className="visually-hidden">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {domains.length === 0 ? (
+              <EmptyRow colSpan={4}>No sign-in domains yet.</EmptyRow>
+            ) : (
+              domains.map((domain) => (
                 <tr key={domain.id}>
-                  <td className="mono">{domain.domain}</td>
-                  <td>
-                    <div className="mono">{domain.txtName}</div>
-                    <div className="mono muted">{domain.txtValue}</div>
-                  </td>
-                  <td>
-                    <span className={domain.verifiedAt ? "badge online" : "badge pending"}>
+                  <Td label="Domain" className="cell-nowrap">
+                    {domain.domain}
+                  </Td>
+                  <Td label="TXT record">
+                    <span className="mono cell-break">{domain.txtName}</span>
+                    <span className="cell-sub mono cell-break">{domain.txtValue}</span>
+                  </Td>
+                  <Td label="Status">
+                    <StatusPill tone={domain.verifiedAt ? "success" : "warning"}>
                       {domain.verifiedAt ? "Verified" : "Not verified"}
-                    </span>
+                    </StatusPill>
                     {domain.lastCheckedAt ? (
-                      <div className="muted">
-                        Checked {new Date(domain.lastCheckedAt).toLocaleString("en-AU")}
-                      </div>
+                      <span className="cell-sub">Checked {formatDateTime(domain.lastCheckedAt)}</span>
                     ) : null}
-                  </td>
-                  <td>
-                    <div className="stack">
+                  </Td>
+                  <Td>
+                    <div className="cell-actions">
                       {domain.verifiedAt ? null : (
-                        <button
-                          type="button"
-                          className="secondary"
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          loading={busy === domain.id}
+                          loadingLabel="Checking…"
                           disabled={locked}
                           onClick={() => {
                             const form = new FormData();
                             form.set("domainId", domain.id);
-                            submit(verifyDomainAction, form, (data) =>
-                              (data as { verified: boolean }).verified
-                                ? `${domain.domain} is verified.`
-                                : `No matching TXT record at ${domain.txtName} yet. DNS changes can take a while to appear.`,
-                            );
+                            setBusy(domain.id);
+                            startTransition(async () => {
+                              const result = await verifyDomainAction(form);
+                              setBusy(null);
+                              if (!result.ok) {
+                                toastResult(result);
+                                return;
+                              }
+                              if (result.data.verified) {
+                                toast.success(`${domain.domain} is verified`);
+                              } else {
+                                toast.warning(`No matching TXT record for ${domain.domain} yet`, {
+                                  description: "DNS changes can take a while to appear. Check again later.",
+                                });
+                              }
+                              router.refresh();
+                            });
                           }}
                         >
                           Check TXT record
-                        </button>
+                        </Button>
                       )}
-                      <button
-                        type="button"
-                        className="danger"
+                      <Button
+                        size="sm"
+                        variant="quiet-danger"
                         disabled={locked}
-                        onClick={() => {
-                          const form = new FormData();
-                          form.set("domainId", domain.id);
-                          submit(removeDomainAction, form, `${domain.domain} removed.`);
-                        }}
+                        onClick={() => setRemoving(domain)}
                       >
                         Remove
-                      </button>
+                      </Button>
                     </div>
-                  </td>
+                  </Td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
+              ))
+            )}
+          </tbody>
+        </Table>
+      </div>
+      <ConfirmDialog
+        open={removing !== null}
+        title="Remove this sign-in domain?"
+        description={
+          removing
+            ? removing.verifiedAt
+              ? `${removing.domain} stops limiting who single sign-on can add. If it's your only verified domain, any allowed email can join again.`
+              : `${removing.domain} and its TXT record details are removed.`
+            : null
+        }
+        confirmLabel="Remove domain"
+        pending={pending}
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => {
+          if (!removing) return;
+          const form = new FormData();
+          form.set("domainId", removing.id);
+          const name = removing.domain;
+          startTransition(async () => {
+            const result = await removeDomainAction(form);
+            setRemoving(null);
+            toastResult(result, { success: `${name} removed` });
+            if (result.ok) router.refresh();
+          });
+        }}
+      />
+    </Section>
   );
 }

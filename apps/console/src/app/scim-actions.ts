@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db/client";
 import { scimToken } from "@/lib/db/schema";
@@ -10,7 +10,7 @@ import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
 export async function mintScimTokenAction(): Promise<
-  { ok: true; token: string } | { ok: false; error: string }
+  { ok: true; token: string } | ActionFailure
 > {
   try {
     const ctx = await requireConsoleContext();

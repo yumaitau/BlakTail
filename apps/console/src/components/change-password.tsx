@@ -26,6 +26,7 @@ export function ChangePassword() {
   return (
     <Section
       id="password"
+      headingLevel={3}
       title="Password"
       description="Change the password you use to sign in. Other browsers and devices signed in with it are signed out; this one stays signed in."
     >

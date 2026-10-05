@@ -1,13 +1,13 @@
 "use server";
 
-import { actionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { requireSecurityAssurance } from "@/lib/auth-policy";
 import { deleteTrafficRecords, putTrafficSettings } from "@/lib/coord-events";
 import { permissionReason } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
 
-export type TrafficActionResult = { ok: true; message: string } | { ok: false; error: string };
+export type TrafficActionResult = { ok: true; message: string } | ActionFailure;
 
 async function ownerContext() {
   const ctx = await requireConsoleContext();

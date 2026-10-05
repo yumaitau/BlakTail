@@ -1,6 +1,6 @@
 "use server";
 
-import { errorText } from "@/lib/server-errors";
+import { actionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import type { ActionResult } from "@/app/actions";
 import {
@@ -18,10 +18,6 @@ import {
 } from "@/lib/coord-agents";
 import { can } from "@/lib/roles";
 import { requireConsoleContext } from "@/lib/session";
-
-function message(error: unknown, fallback: string): string {
-  return errorText(error, fallback);
-}
 
 function lines(value: FormDataEntryValue | null): string[] {
   return String(value ?? "")
@@ -74,7 +70,7 @@ export async function setOffshoreAction(allow: boolean): Promise<ActionResult> {
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not change the offshore policy.") };
+    return actionFailure(error, "Could not change the offshore policy.");
   }
 }
 
@@ -88,7 +84,7 @@ export async function setGatewayDesignationAction(
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not change the gateway designation.") };
+    return actionFailure(error, "Could not change the gateway designation.");
   }
 }
 
@@ -107,7 +103,7 @@ export async function createProviderAction(formData: FormData): Promise<ActionRe
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not add this provider.") };
+    return actionFailure(error, "Could not add this provider.");
   }
 }
 
@@ -122,7 +118,7 @@ export async function setProviderEnabledAction(
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not update this provider.") };
+    return actionFailure(error, "Could not update this provider.");
   }
 }
 
@@ -139,7 +135,7 @@ export async function rotateProviderCredentialAction(
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not replace the credential.") };
+    return actionFailure(error, "Could not replace the credential.");
   }
 }
 
@@ -150,7 +146,7 @@ export async function deleteProviderAction(providerId: string): Promise<ActionRe
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not delete this provider.") };
+    return actionFailure(error, "Could not delete this provider.");
   }
 }
 
@@ -166,7 +162,7 @@ export async function createKeyAction(formData: FormData): Promise<ActionResult<
     revalidatePath("/agents");
     return { ok: true, data: { secret: created.secret } };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not create this agent key.") };
+    return actionFailure(error, "Could not create this agent key.");
   }
 }
 
@@ -187,7 +183,7 @@ export async function updateKeyAction(
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not update this key's policy.") };
+    return actionFailure(error, "Could not update this key's policy.");
   }
 }
 
@@ -198,7 +194,7 @@ export async function revokeKeyAction(keyId: string): Promise<ActionResult> {
     revalidatePath("/agents");
     return { ok: true, data: undefined };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not revoke this key.") };
+    return actionFailure(error, "Could not revoke this key.");
   }
 }
 
@@ -210,6 +206,6 @@ export async function readContentAction(
     const content = await getRequestContent(ctx, requestId);
     return { ok: true, data: { request: content.request, response: content.response } };
   } catch (error) {
-    return { ok: false, error: message(error, "Could not read this stored prompt.") };
+    return actionFailure(error, "Could not read this stored prompt.");
   }
 }

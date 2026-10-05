@@ -431,6 +431,14 @@ targets), tablet 801–1024px, desktop ≥ 1025px.
 | `Alert({ tone, title?, reference?, action? })` | Inline page or form messages; errors use `role="alert"`. |
 | `Skeleton`, `SkeletonTable`, `SkeletonPage` | Loading placeholders (for `loading.tsx`). |
 | `ConfirmDialog({ open, title, description, confirmLabel, confirmText?, pending, onConfirm, onCancel })` | Native modal dialog: focus trapped, Escape cancels, Cancel focused first. `confirmText` adds type-to-confirm. |
+| `SecretPanel({ title, label, secret, description?, onDone })` | A secret shown once (API or SCIM token, signing secret, agent key, recovery codes, invitation link): copy button, "Shown once" label, and a "stored it somewhere safe" tick before it can be dismissed. |
+
+Dates and times in client components use `formatDate` / `formatDateTime`
+from `src/lib/format-time.ts` (UTC, built by hand) so server and browser render
+the same text; `toLocaleString` differs between runtimes and breaks hydration.
+Server pages that wrap coordinator data in `<Suspense>` render the shell and
+`PageHeader` straight away with a `SkeletonTable` fallback. `FormField` is a
+client component: server pages use plain `.ui-field` markup instead.
 
 **Toasts** report the outcome of something the person just did. `<Toaster />`
 is mounted once in the root layout.

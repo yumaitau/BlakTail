@@ -1,4 +1,4 @@
-import { readJsonBody } from "@/lib/server-errors";
+import { jsonError, readJsonBody } from "@/lib/server-errors";
 import { auth } from "@/lib/auth";
 import { AssuranceError, requireSecurityAssurance } from "@/lib/auth-policy";
 import { requireConsoleContextFromSession } from "@/lib/desktop-auth";
@@ -33,8 +33,7 @@ function errorResponse(error: unknown): Response {
   if (error instanceof OrganisationAccessError || error instanceof AssuranceError) {
     return Response.json({ error: error.message }, { status: 403 });
   }
-  console.error("Invitation request failed", error);
-  return Response.json({ error: "Invitation request failed." }, { status: 500 });
+  return jsonError(error, "The invitation request didn't work.", "invitation");
 }
 
 export async function GET(request: Request): Promise<Response> {

@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useTransition } from "react";
 import { LogOut, ShieldCheck, UserRound, FileLock2 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { Spinner } from "../ui/button";
+import { toast } from "../ui/toast";
 import { usePopover } from "./use-popover";
 
 function initials(name: string, email: string) {
@@ -34,13 +36,13 @@ export function UserMenu({ name, email, role }: { name: string; email: string; r
         <div className="popover user-popover" id="user-menu">
           <div className="popover-identity">
             <strong>{name}</strong>
-            <span>{email}</span>
-            <span>{role}</span>
+            <span className="cell-break">{email}</span>
+            {role ? <span>{role}</span> : null}
           </div>
           <ul>
             <li>
               <Link className="popover-item" href="/settings#account" onClick={() => setOpen(false)}>
-                <UserRound aria-hidden="true" size={16} /> Account
+                <UserRound aria-hidden="true" size={16} /> Profile and settings
               </Link>
             </li>
             <li>
@@ -49,7 +51,7 @@ export function UserMenu({ name, email, role }: { name: string; email: string; r
                 href="/settings#account-security"
                 onClick={() => setOpen(false)}
               >
-                <ShieldCheck aria-hidden="true" size={16} /> Account security
+                <ShieldCheck aria-hidden="true" size={16} /> Password and two-step
               </Link>
             </li>
             <li>
@@ -62,15 +64,21 @@ export function UserMenu({ name, email, role }: { name: string; email: string; r
                 type="button"
                 className="popover-item"
                 disabled={pending}
+                aria-busy={pending || undefined}
                 onClick={() =>
                   startTransition(async () => {
-                    await authClient.signOut();
+                    const result = await authClient.signOut().catch(() => ({ error: true }));
+                    if (result && "error" in result && result.error) {
+                      toast.error("You weren't signed out. Check your connection and try again.");
+                      return;
+                    }
                     router.replace("/sign-in");
                     router.refresh();
                   })
                 }
               >
-                <LogOut aria-hidden="true" size={16} /> {pending ? "Signing out…" : "Sign out"}
+                {pending ? <Spinner /> : <LogOut aria-hidden="true" size={16} />}{" "}
+                {pending ? "Signing out…" : "Sign out"}
               </button>
             </li>
           </ul>

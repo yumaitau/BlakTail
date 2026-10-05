@@ -1,6 +1,6 @@
 "use server";
 
-import { actionFailure, errorText, type ActionFailure } from "@/lib/server-errors";
+import { actionFailure, type ActionFailure } from "@/lib/server-errors";
 import { revalidatePath } from "next/cache";
 import { revokeSessionsForMembership } from "@/lib/coord-remote";
 import { cookies } from "next/headers";
@@ -486,13 +486,10 @@ export async function createInvitationAction(
       data: { id: result.invitation.id, url: result.url },
     };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof InvitationError || error instanceof AssuranceError
-          ? error.message
-          : "Could not create invitation.",
-    };
+    if (error instanceof InvitationError || error instanceof AssuranceError) {
+      return { ok: false, error: error.message };
+    }
+    return actionFailure(error, "Could not create invitation.");
   }
 }
 
@@ -511,13 +508,10 @@ export async function revokeInvitationAction(
     revalidatePath("/audit");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof InvitationError || error instanceof AssuranceError
-          ? error.message
-          : "Could not revoke invitation.",
-    };
+    if (error instanceof InvitationError || error instanceof AssuranceError) {
+      return { ok: false, error: error.message };
+    }
+    return actionFailure(error, "Could not revoke invitation.");
   }
 }
 
@@ -564,13 +558,8 @@ export async function upsertOidcProviderAction(
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof OidcError
-          ? error.message
-          : errorText(error, "Could not save the identity provider."),
-    };
+    if (error instanceof OidcError) return { ok: false, error: error.message };
+    return actionFailure(error, "Could not save the identity provider.");
   }
 }
 
@@ -617,13 +606,8 @@ export async function changeMembershipAction(
     revalidatePath("/settings");
     return { ok: true, data: undefined };
   } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof OidcError
-          ? error.message
-          : errorText(error, "Could not update membership."),
-    };
+    if (error instanceof OidcError) return { ok: false, error: error.message };
+    return actionFailure(error, "Could not update membership.");
   }
 }
 

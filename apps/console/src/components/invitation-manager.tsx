@@ -1,12 +1,17 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import {
-  createInvitationAction,
-  revokeInvitationAction,
-} from "@/app/actions";
+import { createInvitationAction, revokeInvitationAction } from "@/app/actions";
+import { formatDateTime } from "@/lib/format-time";
 import { ORG_ROLES, roleImpact, roleLabel, type OrgRole } from "@/lib/roles";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ui/confirm-dialog";
+import { FormField } from "./ui/form-field";
+import { SecretPanel } from "./ui/secret-panel";
+import { Section } from "./ui/section";
+import { EmptyRow, Table, Td } from "./ui/table";
+import { toast, toastResult } from "./ui/toast";
 
 const INVITABLE_ROLES = ORG_ROLES.filter((role) => role !== "owner");
 
@@ -17,56 +22,62 @@ type PendingInvitation = {
   expiresAt: string;
 };
 
-export function InvitationManager({
-  invitations,
-}: {
-  invitations: PendingInvitation[];
-}) {
+export function InvitationManager({ invitations }: { invitations: PendingInvitation[] }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
   const [invitationUrl, setInvitationUrl] = useState<string | null>(null);
   const [role, setRole] = useState<Exclude<OrgRole, "owner">>("member");
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState<PendingInvitation | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
   return (
-    <div className="panel stack">
-      <div>
-        <h2>Invite organisation member</h2>
-        <p className="muted">
-          Link is shown once. Send it through a trusted channel. New users create
-          an account; existing users add this workspace to their current login.
-        </p>
-      </div>
+    <Section
+      id="invitations"
+      headingLevel={3}
+      title="Invitations"
+      description="Invite someone by email. New people create an account; people who already have one add this organisation to their sign-in. Each link works once."
+    >
       <form
+        ref={formRef}
+        className="form-row"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          setError(null);
+          const formElement = event.currentTarget;
+          const form = new FormData(formElement);
+          const email = String(form.get("email") ?? "").trim();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) {
+            setEmailError("Enter the person's email address, like name@example.org.au.");
+            formElement.querySelector<HTMLInputElement>("[name='email']")?.focus();
+            return;
+          }
+          setEmailError(null);
           setInvitationUrl(null);
           startTransition(async () => {
             const result = await createInvitationAction(form);
             if (!result.ok) {
-              setError(result.error);
+              const fields = toastResult(result, { errorToast: false });
+              if (fields.email) setEmailError(fields.email);
               return;
             }
+            formElement.reset();
+            setRole("member");
             setInvitationUrl(result.data.url);
+            toast.success("Invitation created", { description: `For ${email}.` });
             router.refresh();
           });
         }}
       >
-        <label>
-          Email
-          <input name="email" type="email" autoComplete="off" required />
-        </label>
-        <label>
-          Role
+        <FormField label="Email" required error={emailError}>
+          <input name="email" type="email" autoComplete="off" />
+        </FormField>
+        <FormField label="Role" className="field-narrow">
           <select
             name="role"
             value={role}
-            onChange={(event) =>
-              setRole(event.currentTarget.value as Exclude<OrgRole, "owner">)
-            }
             aria-describedby="invitation-role-impact"
+            onChange={(event) => setRole(event.currentTarget.value as Exclude<OrgRole, "owner">)}
           >
             {INVITABLE_ROLES.map((option) => (
               <option key={option} value={option}>
@@ -74,68 +85,84 @@ export function InvitationManager({
               </option>
             ))}
           </select>
-        </label>
-        <p className="muted" id="invitation-role-impact">
-          {roleImpact(role)}
-        </p>
-        <button type="submit" disabled={pending}>
-          {pending ? "Creating…" : "Create invitation"}
-        </button>
+        </FormField>
+        <Button type="submit" loading={pending} loadingLabel="Creating…">
+          Create invitation
+        </Button>
       </form>
+      <p className="muted form-note" id="invitation-role-impact">
+        {roleLabel(role)}: {roleImpact(role)}
+      </p>
       {invitationUrl ? (
-        <label>
-          Invitation link — shown once
-          <input className="mono" value={invitationUrl} readOnly />
-        </label>
+        <SecretPanel
+          title="Copy the invitation link now"
+          label="Invitation link"
+          secret={invitationUrl}
+          description="Anyone with this link can join as the invited person, so send it through a channel you trust. It's shown only once and works once."
+          onDone={() => setInvitationUrl(null)}
+        />
       ) : null}
-      {error ? <p className="error">{error}</p> : null}
-      {invitations.length ? (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Expires (UTC)</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invitations.map((invitation) => (
-                <tr key={invitation.id}>
-                  <td>{invitation.email}</td>
-                  <td>{roleLabel(invitation.role)}</td>
-                  <td className="mono">{invitation.expiresAt}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="danger"
+      <Table label="Pending invitations" mobile="stack">
+        <thead>
+          <tr>
+            <th scope="col">Email</th>
+            <th scope="col">Role</th>
+            <th scope="col">Expires</th>
+            <th scope="col">
+              <span className="visually-hidden">Actions</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {invitations.length === 0 ? (
+            <EmptyRow colSpan={4}>No pending invitations.</EmptyRow>
+          ) : (
+            invitations.map((invitation) => (
+              <tr key={invitation.id}>
+                <Td label="Email">
+                  <span className="cell-break">{invitation.email}</span>
+                </Td>
+                <Td label="Role">{roleLabel(invitation.role)}</Td>
+                <Td label="Expires">{formatDateTime(invitation.expiresAt)}</Td>
+                <Td>
+                  <div className="cell-actions">
+                    <Button
+                      size="sm"
+                      variant="quiet-danger"
                       disabled={pending}
-                      onClick={() => {
-                        const form = new FormData();
-                        form.set("invitationId", invitation.id);
-                        setError(null);
-                        startTransition(async () => {
-                          const result = await revokeInvitationAction(form);
-                          if (!result.ok) {
-                            setError(result.error);
-                            return;
-                          }
-                          router.refresh();
-                        });
-                      }}
+                      onClick={() => setRevoking(invitation)}
                     >
                       Revoke
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="muted">No pending invitations. Invite someone when you need another operator on this network.</p>
-      )}
-    </div>
+                    </Button>
+                  </div>
+                </Td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </Table>
+      <ConfirmDialog
+        open={revoking !== null}
+        title="Revoke this invitation?"
+        description={
+          revoking ? `The link sent to ${revoking.email} stops working. You can invite them again later.` : null
+        }
+        confirmLabel="Revoke invitation"
+        pending={pending}
+        onCancel={() => setRevoking(null)}
+        onConfirm={() => {
+          if (!revoking) return;
+          const form = new FormData();
+          form.set("invitationId", revoking.id);
+          const email = revoking.email;
+          startTransition(async () => {
+            const result = await revokeInvitationAction(form);
+            setRevoking(null);
+            toastResult(result, { success: "Invitation revoked", successDescription: email });
+            if (result.ok) router.refresh();
+          });
+        }}
+      />
+    </Section>
   );
 }
