@@ -26,13 +26,14 @@ Until the first release is published, build from source. Do not use
 
 - Linux — `blaktaild` (kernel WireGuard, userspace fallback)
 - macOS — `blaktaild` plus a native SwiftUI manager (`apps/macos`, macOS 14+)
+- Windows — `blaktaild` as a Windows service (WinTun + userspace WireGuard); experimental, proven on one machine only ([docs/windows-agent.md](docs/windows-agent.md))
 - Coordinator, relay, and console — Docker on Linux or macOS, or a Linux host
 
 #### Mobile
 
 - iPhone — native client (`apps/ios`, iOS 17+). Direct UDP with Australian relay fallback (UDP or HTTPS/WSS) in code; not yet proven on a physical device.
 
-Windows agents and a Windows/Linux desktop app are not in this repository.
+A windowed Windows app and a Linux desktop app are not in this repository.
 
 ## Technical overview
 

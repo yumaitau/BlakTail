@@ -103,7 +103,8 @@ See [console.md](console.md).
 - Not a released product; source builds are the only supported install path
 - Not a hosted SaaS or a closed-source agent
 - Not a proven Windows or Android client: both exist in code as experimental,
-  with no physical-device or clean-host proof; the Linux tray controls the
+  with no two-machine, physical-device or clean-host proof (Windows has a
+  single-machine service lab run only); the Linux tray controls the
   local agent but has not been validated on a clean desktop. See
   [platform-support.md](platform-support.md)
 - Not a proven iPhone relay path: the packet tunnel now falls back to the
