@@ -3,15 +3,20 @@ use crate::{Error, NodeState, OrgDnsSnapshot};
 use std::net::Ipv4Addr;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
-    io::Write,
     net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
+};
+#[cfg(any(unix, test))]
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
 };
 use tokio::{net::UdpSocket, task::AbortHandle};
 
@@ -20,11 +25,13 @@ const SPLIT_FORWARD_TIMEOUT: Duration = Duration::from_millis(800);
 const DNS_PORT: u16 = 53;
 const DNS_HEADER_LEN: usize = 12;
 const DNS_TTL_SECS: u32 = 30;
+#[cfg(any(unix, test))]
 const MANAGED_MARKER: &str = "# Managed by blaktaild";
 pub const MODE_MACOS_RESOLVER: &str = "macos-resolver";
 pub const MODE_SYSTEMD_RESOLVED: &str = "systemd-resolved";
 pub const MODE_RESOLVCONF: &str = "resolvconf";
 pub const MODE_RESOLV_CONF: &str = "resolv-conf";
+pub const MODE_WINDOWS_NRPT: &str = "windows-nrpt";
 
 #[derive(Clone, Default)]
 struct Records {
@@ -906,7 +913,7 @@ fn parse_name(packet: &[u8], mut offset: usize) -> Option<(String, usize)> {
     Some((labels.join("."), offset))
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(not(any(target_os = "macos", windows)), test))]
 fn managed_resolv_conf(
     original: &str,
     dns_ip: IpAddr,
@@ -1102,7 +1109,45 @@ fn run_scutil(script: &str) -> Result<(), Error> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: an NRPT rule sends the MagicDNS domain and published suffixes
+/// to the overlay resolver only, the equivalent of `resolvectl domain <if>
+/// ~domain`. Windows applies a connection-specific search suffix only on
+/// interfaces with DNS servers, so short names are not set up: use the
+/// full MagicDNS name.
+#[cfg(windows)]
+fn configure_platform_dns(
+    _state_dir: &Path,
+    interface: &str,
+    dns_ip: IpAddr,
+    domain: &str,
+    extra_suffixes: &[String],
+) -> Result<String, Error> {
+    let suffixes: Vec<String> = std::iter::once(domain.to_owned())
+        .chain(extra_suffixes.iter().cloned())
+        .collect();
+    crate::win_host::set_nrpt_rule(
+        &crate::win_host::nrpt_rule_name(interface),
+        &suffixes,
+        dns_ip,
+    )?;
+    Ok(MODE_WINDOWS_NRPT.into())
+}
+
+#[cfg(windows)]
+fn remove_platform_dns(
+    _state_dir: &Path,
+    interface: &str,
+    _domain: &str,
+    _extra_suffixes: &[String],
+    mode: Option<&str>,
+) -> Result<(), Error> {
+    if mode.is_some() && mode != Some(MODE_WINDOWS_NRPT) {
+        return Ok(());
+    }
+    crate::win_host::remove_nrpt_rule(&crate::win_host::nrpt_rule_name(interface))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn configure_platform_dns(
     state_dir: &Path,
     interface: &str,
@@ -1148,7 +1193,7 @@ fn configure_platform_dns(
     Ok(MODE_RESOLV_CONF.into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn remove_platform_dns(
     state_dir: &Path,
     interface: &str,
@@ -1164,7 +1209,7 @@ fn remove_platform_dns(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn configure_resolv_conf(
     state_dir: &Path,
     dns_ip: IpAddr,
@@ -1180,7 +1225,7 @@ fn configure_resolv_conf(
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(any(target_os = "macos", windows)), all(windows, test)))]
 fn configure_resolv_conf_at(
     path: &Path,
     state_dir: &Path,
@@ -1227,7 +1272,7 @@ fn configure_resolv_conf_at(
     written
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn restore_resolv_conf(state_dir: &Path) -> Result<(), Error> {
     let path = Path::new("/etc/resolv.conf");
     let backup = resolv_backup(state_dir);
@@ -1245,12 +1290,12 @@ fn restore_resolv_conf(state_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(any(target_os = "macos", windows)), all(windows, test)))]
 fn resolv_backup(state_dir: &Path) -> PathBuf {
     state_dir.join("resolv.conf.before-blaktail")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn run_quiet(program: &str, args: &[&str]) -> Result<(), Error> {
     let status = Command::new(program)
         .args(args)
@@ -1292,6 +1337,7 @@ fn remove_managed_file(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
     let temporary = PathBuf::from(format!("{}.blaktail.tmp", path.display()));
     let mut options = OpenOptions::new();

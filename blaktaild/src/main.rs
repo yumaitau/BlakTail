@@ -31,7 +31,7 @@ use zeroize::Zeroize;
 #[derive(Parser)]
 #[command(
     name = "blaktaild",
-    about = "BlakTail WireGuard node agent (Linux and macOS)",
+    about = "BlakTail WireGuard node agent (Linux, macOS and Windows)",
     version
 )]
 struct Cli {
@@ -113,6 +113,17 @@ enum Command {
     Run {
         #[arg(long)]
         poll_seconds: Option<u64>,
+        /// Windows only: run under the Service Control Manager as the named
+        /// service (default BlakTail). The install script sets this; use
+        /// plain `run` in a console.
+        #[arg(
+            long,
+            value_name = "NAME",
+            num_args = 0..=1,
+            default_missing_value = "BlakTail",
+            hide = cfg!(not(windows))
+        )]
+        service: Option<String>,
     },
     /// Renew this enrollment with a fresh join key without changing its tailnet IP.
     /// Pipe the key on stdin or set BLAKTAIL_JOIN_KEY; it is never an argument.
@@ -208,7 +219,7 @@ impl AgentOverrides {
                     );
                 }
             }
-            Command::Run { poll_seconds } => overrides.poll_seconds = *poll_seconds,
+            Command::Run { poll_seconds, .. } => overrides.poll_seconds = *poll_seconds,
             Command::Reauth
             | Command::Status { .. }
             | Command::Share { .. }
@@ -238,8 +249,7 @@ impl AgentOverrides {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut cli = Cli::parse();
     let overrides = AgentOverrides::from_cli(&cli);
     let mut loaded = match LoadedConfig::load(cli.config.as_deref(), Service::Agent) {
@@ -257,18 +267,120 @@ async fn main() {
         eprintln!("blaktaild: {error}");
         std::process::exit(1);
     }
+    let service = match &cli.command {
+        Command::Run {
+            service: Some(name),
+            ..
+        } => Some(name.clone()),
+        _ => None,
+    };
+    if service.is_some() && !cfg!(windows) {
+        eprintln!("blaktaild: --service is for the Windows service only; systemd and launchd use `blaktaild run`");
+        std::process::exit(2);
+    }
     let filter = tracing_subscriber::EnvFilter::new(&loaded.config.diagnostics.log_filter);
     let (filter_layer, filter_handle) = tracing_subscriber::reload::Layer::new(filter);
-    // SIGHUP reload below is Unix-only.
-    #[cfg(not(unix))]
-    let _ = filter_handle;
+    // A Windows service has no console: it logs to a file in the state
+    // directory, which is restricted before anything is written there.
+    #[cfg(windows)]
+    let writer = match &service {
+        Some(_) => {
+            let state_dir = cli
+                .state_dir
+                .clone()
+                .expect("agent state directory resolved");
+            let file = blaktaild::prepare_state_dir(&state_dir)
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    blaktaild::win_service::LogFile::open(&blaktaild::win_service::log_path(
+                        &state_dir,
+                    ))
+                    .map_err(|error| error.to_string())
+                });
+            match file {
+                Ok(file) => tracing_subscriber::fmt::writer::BoxMakeWriter::new(file),
+                Err(error) => {
+                    // Still answer the SCM, so the service stops with an
+                    // error code at once instead of a 30-second start timeout.
+                    let message = format!(
+                        "could not open the service log in {}: {error}",
+                        state_dir.display()
+                    );
+                    let name = service.clone().unwrap_or_default();
+                    let body: blaktaild::win_service::ServiceBody = Box::new(move || Err(message));
+                    if let Err(error) = blaktaild::win_service::run(&name, body) {
+                        eprintln!("blaktaild: {error}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout),
+    };
+    #[cfg(not(windows))]
+    let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout);
     tracing_subscriber::registry()
         .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(service.is_none())
+                .with_writer(writer),
+        )
         .init();
     for warning in &loaded.warnings {
         warn!(%warning, "configuration deprecation");
     }
+    #[cfg(windows)]
+    if let Some(name) = service {
+        info!(service = %name, version = env!("CARGO_PKG_VERSION"), "starting as a Windows service");
+        let body: blaktaild::win_service::ServiceBody = Box::new(move || {
+            runtime()
+                .block_on(agent(cli, loaded, overrides, filter_handle))
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = blaktaild::win_service::run(&name, body) {
+            tracing::error!(%error, "service dispatcher failed");
+            eprintln!("blaktaild: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(windows)]
+    blaktaild::win_host::install_console_handler();
+    runtime().block_on(async move {
+        let result = agent(cli, loaded, overrides, filter_handle).await;
+        // Lets a pending console close event end the process.
+        #[cfg(windows)]
+        blaktaild::win_host::teardown_complete();
+        if let Err(error) = result {
+            eprintln!("blaktaild: {error}");
+            std::process::exit(1);
+        }
+    });
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("blaktaild: could not start the async runtime: {error}");
+            std::process::exit(1);
+        })
+}
+
+type FilterHandle =
+    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+
+async fn agent(
+    cli: Cli,
+    loaded: LoadedConfig,
+    overrides: AgentOverrides,
+    filter_handle: FilterHandle,
+) -> Result<(), blaktaild::Error> {
+    // SIGHUP reload below is Unix-only.
+    #[cfg(not(unix))]
+    let _ = (&overrides, filter_handle);
     #[cfg(unix)]
     {
         let config_path = cli.config.clone();
@@ -327,10 +439,17 @@ async fn main() {
             }
         });
     }
-    if let Err(error) = run(cli, loaded.config.agent).await {
-        eprintln!("blaktaild: {error}");
-        std::process::exit(1);
-    }
+    run(cli, loaded.config.agent).await
+}
+
+/// Completes when the agent should stop: Ctrl+C on Unix (systemd and
+/// launchd stop with SIGTERM, which ends the process). On Windows also
+/// Ctrl+Break, closing the console, logoff or shutdown, and a service stop.
+async fn stop_requested() {
+    #[cfg(windows)]
+    blaktaild::win_host::stop_requested().await;
+    #[cfg(not(windows))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn coordinator_client(
@@ -475,6 +594,11 @@ async fn sync_loop(
     let mut serving = ServiceRuntime::default();
     let mut traffic = blaktaild::traffic::Reporter::default();
     let mut flow_window = blaktaild::traffic::EventWindow::default();
+    #[cfg(windows)]
+    if !exit_after_join {
+        blaktaild::win_host::arm_console_stop();
+        blaktaild::win_service::report_running();
+    }
     loop {
         match sync_once(coordinator, network, state, state_dir).await {
             Ok(changes) if changes > 0 => info!(changes, "WireGuard peers synchronized"),
@@ -539,13 +663,28 @@ async fn sync_loop(
             if let Some(active) = mesh.take() {
                 active.stop();
             }
+            // The WinTun adapter and its resolver address go with this
+            // process, so a rule pointing at them would only break lookups.
+            #[cfg(windows)]
+            {
+                shutdown_magic_dns(&mut dns, state, state_dir);
+                info!("initial peer sync complete; the service recreates the tunnel and MagicDNS");
+            }
+            #[cfg(not(windows))]
             info!("initial peer sync complete; leaving MagicDNS resolver files for the service manager");
             return Ok(());
         }
         let previous_assigned_ips = state.assigned_ips.clone();
         let previous_addresses = state.interface_addresses();
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => { info!("stopping peer sync; interface remains configured"); break; }
+            _ = stop_requested() => {
+                if cfg!(windows) {
+                    info!("stopping peer sync; removing MagicDNS, routes and the WinTun adapter");
+                } else {
+                    info!("stopping peer sync; interface remains configured");
+                }
+                break;
+            }
             result = coordinator.wait_for_control_update(state, 25) => {
                 match result {
                     Ok(Some(desired)) => {
@@ -583,6 +722,19 @@ async fn sync_loop(
     serving.stop();
     shutdown_magic_dns(&mut dns, state, state_dir);
     Ok(())
+}
+
+/// The WinTun adapter lives only as long as this process, so on Windows a
+/// stopping agent removes its routes, addresses and adapter explicitly
+/// instead of leaving them to process exit. Linux and macOS keep the
+/// interface configured, as before.
+fn windows_teardown(network: &mut dyn Network, interface: &str) {
+    if cfg!(windows) {
+        if let Err(error) = network.down(interface) {
+            warn!(%error, "could not remove the tunnel cleanly");
+        }
+        info!("tunnel removed");
+    }
 }
 
 /// Opt-in traffic reporting: starts and stops counting with the peer map's
@@ -1693,8 +1845,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 exit_after_join,
             )
             .await?;
+            windows_teardown(network.as_mut(), &interface);
         }
-        Command::Run { poll_seconds } => {
+        Command::Run { poll_seconds, .. } => {
             let poll_seconds = poll_seconds.unwrap_or(operator_config.poll_seconds);
             let mut state = read_state(state_dir)?;
             validate_interface(&state.interface)?;
@@ -1729,6 +1882,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 false,
             )
             .await?;
+            windows_teardown(network.as_mut(), &state.interface);
         }
         Command::Reauth => {
             let mut state = read_state(state_dir)?;

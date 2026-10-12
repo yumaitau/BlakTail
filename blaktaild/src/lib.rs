@@ -49,6 +49,10 @@ pub use dns::{
 };
 pub use relay_client::RelayMesh;
 #[cfg(target_os = "windows")]
+pub mod win_host;
+#[cfg(target_os = "windows")]
+pub mod win_service;
+#[cfg(target_os = "windows")]
 mod windows;
 pub use share::{
     disable_share, enable_share, load_shares, overlay_ipv4, put_share_file, save_shares,
@@ -1074,10 +1078,20 @@ pub fn udp_receive_can_continue(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::ConnectionReset
 }
 
-pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
+/// Creates the agent state directory and limits it to the agent's
+/// administrators: mode 0700 on Unix; on Windows SYSTEM and Administrators
+/// only, with access inherited from `C:\ProgramData` removed.
+pub fn prepare_state_dir(dir: &Path) -> Result<(), Error> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    #[cfg(windows)]
+    win_host::restrict_path(dir, true)?;
+    Ok(())
+}
+
+pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
+    prepare_state_dir(dir)?;
     let path = dir.join("private.key");
     if !path.exists() {
         let secret = StaticSecret::random_from_rng(OsRng);
@@ -1085,6 +1099,10 @@ pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
         write_secret(&path, encoded.as_bytes())?;
         encoded.zeroize();
     }
+    // A key written before the directory was restricted (an older agent)
+    // is restricted again rather than trusted as found.
+    #[cfg(windows)]
+    win_host::restrict_path(&path, false)?;
     #[cfg(unix)]
     {
         let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
@@ -1118,8 +1136,11 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let mut f = options.open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
+    drop(f);
     #[cfg(unix)]
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    #[cfg(windows)]
+    win_host::restrict_path(&tmp, false)?;
     fs::rename(tmp, path)?;
     Ok(())
 }
