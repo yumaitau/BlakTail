@@ -90,6 +90,7 @@ impl MagicDns {
             loop {
                 let (length, source) = match socket.recv_from(&mut request).await {
                     Ok(received) => received,
+                    Err(error) if crate::udp_receive_can_continue(&error) => continue,
                     Err(_) => return,
                 };
                 let query = request[..length].to_vec();

@@ -319,7 +319,11 @@ impl RelayMesh {
             }
             tokio::select! {
                 received = self.shared.relay_socket.recv_from(&mut buf) => {
-                    let (len, source) = match received { Ok(r) => r, Err(_) => return };
+                    let (len, source) = match received {
+                        Ok(r) => r,
+                        Err(error) if crate::udp_receive_can_continue(&error) => continue,
+                        Err(_) => return,
+                    };
                     #[cfg(test)]
                     if self.shared.udp_blocked.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
@@ -509,6 +513,7 @@ impl RelayMesh {
                     received = task_socket.recv_from(&mut buf) => {
                         let (len, source) = match received {
                             Ok(r) => r,
+                            Err(error) if crate::udp_receive_can_continue(&error) => continue,
                             Err(_) => return,
                         };
                         if source != shared.wg_listen || len > MAX_PAYLOAD {

@@ -1066,6 +1066,14 @@ impl Coordinator {
     }
 }
 
+/// Windows reports an ICMP port-unreachable for an earlier send as a
+/// `ConnectionReset` from the next receive on an unconnected UDP socket. It
+/// says nothing about this socket, so receive loops carry on. Linux and
+/// macOS never report it there.
+pub fn udp_receive_can_continue(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ConnectionReset
+}
+
 pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]

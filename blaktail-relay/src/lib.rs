@@ -121,7 +121,11 @@ pub async fn probe(
         socket.send_to(&ping, relay).await?;
         let reply = tokio::time::timeout(attempt, async {
             loop {
-                let (len, source) = socket.recv_from(&mut buf).await?;
+                let (len, source) = match socket.recv_from(&mut buf).await {
+                    Ok(received) => received,
+                    Err(error) if udp_receive_can_continue(&error) => continue,
+                    Err(error) => return Err(error),
+                };
                 if source == relay {
                     if let Some(observed) = parse_observed(&buf[..len], node_id) {
                         return Ok::<_, io::Error>(observed);
@@ -138,6 +142,14 @@ pub async fn probe(
         io::ErrorKind::TimedOut,
         "relay did not answer the authenticated probe",
     ))
+}
+
+/// Windows reports an ICMP port-unreachable for an earlier send as a
+/// `ConnectionReset` from the next receive on an unconnected UDP socket (a
+/// node that went away). It says nothing about this socket, so the relay
+/// keeps serving. Linux never reports it there.
+fn udp_receive_can_continue(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ConnectionReset
 }
 
 fn unix_now() -> u64 {
@@ -612,7 +624,11 @@ pub async fn serve_with_streams(
     loop {
         let outgoing = tokio::select! {
             received = socket.recv_from(&mut buf) => {
-                let (len, source_addr) = received?;
+                let (len, source_addr) = match received {
+                    Ok(received) => received,
+                    Err(error) if udp_receive_can_continue(&error) => continue,
+                    Err(error) => return Err(error),
+                };
                 hub.handle(&buf[..len], PeerAddr::Udp(source_addr))
             }
             event = events.recv(), if events_open => match event {
