@@ -1,13 +1,14 @@
 use crate::{Error, NodeState, OrgDnsSnapshot};
 #[cfg(test)]
 use std::net::Ipv4Addr;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -1211,7 +1212,10 @@ fn configure_resolv_conf_at(
     }
     let original = fs::read_to_string(&backup)?;
     let content = managed_resolv_conf(&original, dns_ip, domain, extra_search);
+    #[cfg(unix)]
     let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    #[cfg(not(unix))]
+    let mode = 0o644;
     let written = write_atomic(path, content.as_bytes(), mode);
     // A backup without a managed file would make every later attempt (and
     // `down`) report that the file "changed after BlakTail configured it".
@@ -1289,14 +1293,16 @@ fn remove_managed_file(path: &Path) -> Result<(), Error> {
 
 fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
     let temporary = PathBuf::from(format!("{}.blaktail.tmp", path.display()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(mode)
-        .open(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = options.open(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    #[cfg(unix)]
     fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);

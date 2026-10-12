@@ -1,11 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, OpenOptions},
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -56,7 +57,10 @@ pub use share::{
 #[cfg(target_os = "windows")]
 pub use windows::WindowsNetwork;
 
+#[cfg(not(windows))]
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/blaktail";
+#[cfg(windows)]
+pub const DEFAULT_STATE_DIR: &str = r"C:\ProgramData\BlakTail";
 pub const DEFAULT_INTERFACE: &str = "blaktail0";
 pub const TUNNEL_MTU: &str = "1280";
 pub const TUNNEL_MTU_BYTES: usize = 1_280;
@@ -1064,6 +1068,7 @@ impl Coordinator {
 
 pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
     fs::create_dir_all(dir)?;
+    #[cfg(unix)]
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     let path = dir.join("private.key");
     if !path.exists() {
@@ -1072,12 +1077,15 @@ pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
         write_secret(&path, encoded.as_bytes())?;
         encoded.zeroize();
     }
-    let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        return Err(Error::Message(format!(
-            "{} must have mode 0600 (found {mode:04o})",
-            path.display()
-        )));
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(Error::Message(format!(
+                "{} must have mode 0600 (found {mode:04o})",
+                path.display()
+            )));
+        }
     }
     let mut encoded = fs::read_to_string(&path)?;
     let bytes = STANDARD
@@ -1095,14 +1103,14 @@ pub fn write_state(dir: &Path, state: &NodeState) -> Result<(), Error> {
 }
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let tmp = path.with_extension("tmp");
-    let mut f = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut f = options.open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
+    #[cfg(unix)]
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
     fs::rename(tmp, path)?;
     Ok(())
@@ -3538,6 +3546,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("blaktail-key-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (path, public) = ensure_private_key(&dir).unwrap();
+        assert!(path.is_file());
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -3545,6 +3555,7 @@ mod tests {
         assert!(!public.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn insecure_existing_key_fails_closed() {
         let dir = std::env::temp_dir().join(format!("blaktail-mode-test-{}", std::process::id()));

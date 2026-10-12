@@ -248,7 +248,13 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            state_dir: "/var/lib/blaktail".into(),
+            // `/var/lib/...` is not an absolute path on Windows and would
+            // fail validation before the agent starts.
+            state_dir: if cfg!(windows) {
+                r"C:\ProgramData\BlakTail".into()
+            } else {
+                "/var/lib/blaktail".into()
+            },
             coordinator_url: None,
             interface: "blaktail0".into(),
             poll_seconds: 30,

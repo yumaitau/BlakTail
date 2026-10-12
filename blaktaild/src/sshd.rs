@@ -21,10 +21,11 @@
 //! user per session certificate.
 
 use crate::{acl_filter, Error, Peer};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -220,14 +221,14 @@ fn verify_ca(ca: &RemoteCa<'_>, runner: &mut dyn Runner) -> Result<(), String> {
 
 fn write_config(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let tmp = path.with_extension("blaktail-tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o644)
-        .open(&tmp)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o644);
+    let mut file = options.open(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    #[cfg(unix)]
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))?;
     fs::rename(tmp, path)?;
     Ok(())

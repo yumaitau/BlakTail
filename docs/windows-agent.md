@@ -8,7 +8,9 @@ The windowed Windows client is not built. The tool that is built is
 `packaging/windows/install-blaktail-service.ps1` for `blaktaild run`.
 `blaktaild` on Windows uses `WindowsNetwork`: WinTun for the adapter and the
 shared boringtun engine for WireGuard. `wintun.dll` must sit beside the
-executable. This tree has not produced a Windows binary; the cross link needs
+executable. State (private key, node token) defaults to
+`C:\ProgramData\BlakTail`; the install script restricts it to SYSTEM and
+Administrators. This tree has not produced a Windows binary; the cross link needs
 `x86_64-w64-mingw32-gcc`, which is not installed on the development Mac.
 
 ## Direction

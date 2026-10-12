@@ -1,4 +1,6 @@
-use blaktail_config::{AgentConfig, ConfigHandle, LoadedConfig, ReloadPlan, Service};
+use blaktail_config::{AgentConfig, LoadedConfig, Service};
+#[cfg(unix)]
+use blaktail_config::{ConfigHandle, ReloadPlan};
 use blaktaild::relay_select::{eligible_relays, wss_for, RelaySelector};
 use blaktaild::{
     apply_peer_map, configure_system_dns,
@@ -257,6 +259,9 @@ async fn main() {
     }
     let filter = tracing_subscriber::EnvFilter::new(&loaded.config.diagnostics.log_filter);
     let (filter_layer, filter_handle) = tracing_subscriber::reload::Layer::new(filter);
+    // SIGHUP reload below is Unix-only.
+    #[cfg(not(unix))]
+    let _ = filter_handle;
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(tracing_subscriber::fmt::layer())

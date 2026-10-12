@@ -255,6 +255,12 @@ pub struct RunAs {
     pub switch: bool,
 }
 
+#[cfg(not(unix))]
+pub fn resolve_user(_name: &str) -> Result<RunAs, String> {
+    Err("remote jobs are supported on Linux and macOS only".into())
+}
+
+#[cfg(unix)]
 pub fn resolve_user(name: &str) -> Result<RunAs, String> {
     let c_name = std::ffi::CString::new(name).map_err(|_| "invalid user name")?;
     // SAFETY: getpwnam returns a pointer into static storage or null; it is
@@ -282,6 +288,10 @@ pub fn resolve_user(name: &str) -> Result<RunAs, String> {
     })
 }
 
+#[cfg(not(unix))]
+fn kill_group(_pid: Option<u32>) {}
+
+#[cfg(unix)]
 fn kill_group(pid: Option<u32>) {
     if let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
         // SAFETY: signals the process group the child leads; harmless if gone.
@@ -325,8 +335,12 @@ pub async fn execute(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
+        .kill_on_drop(true);
+    #[cfg(not(unix))]
+    let _ = run_as;
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(unix)]
     if let Some(run_as) = run_as.filter(|run_as| run_as.switch) {
         let (uid, gid) = (run_as.uid, run_as.gid);
         // SAFETY: setgroups, setgid and setuid are async-signal-safe. The
@@ -550,8 +564,10 @@ async fn run_one(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     fn current_user() -> RunAs {
         // SAFETY: getuid/getgid have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -562,16 +578,19 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
     }
 
+    #[cfg(unix)]
     fn never() -> watch::Receiver<bool> {
         let (sender, receiver) = watch::channel(false);
         std::mem::forget(sender);
         receiver
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runs_exact_argv_without_a_shell() {
         let outcome = execute(
@@ -597,6 +616,7 @@ mod tests {
         assert!(failed.exit_code.unwrap() != 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_the_job() {
         let started = std::time::Instant::now();
@@ -612,6 +632,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn output_is_capped_and_the_job_stopped() {
         let outcome = execute(
@@ -627,6 +648,7 @@ mod tests {
         assert_eq!(outcome.output.len(), 100);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_stops_a_running_job() {
         let (sender, receiver) = watch::channel(false);
@@ -706,6 +728,7 @@ mod tests {
         assert!(remember_run(dir.path(), other, 1_000, 950).unwrap());
         // Survives a restart: the ledger is on disk with owner-only access.
         let path = dir.path().join(RUNS_FILE);
+        #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

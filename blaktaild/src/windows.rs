@@ -58,6 +58,9 @@ const WRITE_TUNNEL: i32 = 2;
 
 pub struct WindowsNetwork {
     tunnel: Mutex<Option<TunnelHandle>>,
+    /// Full peer set: `apply` receives diffs, but the engine is rebuilt
+    /// from scratch on every apply.
+    peers: Vec<Peer>,
     endpoints: Arc<Mutex<HashMap<[u8; 32], SocketAddr>>>,
     handshakes: Arc<Mutex<HashMap<String, u64>>>,
     listen: Arc<Mutex<Option<SocketAddr>>>,
@@ -75,6 +78,7 @@ impl WindowsNetwork {
     pub fn new() -> Self {
         Self {
             tunnel: Mutex::new(None),
+            peers: Vec::new(),
             endpoints: Arc::new(Mutex::new(HashMap::new())),
             handshakes: Arc::new(Mutex::new(HashMap::new())),
             listen: Arc::new(Mutex::new(None)),
@@ -168,11 +172,45 @@ impl Network for WindowsNetwork {
 
     fn apply(&mut self, _interface: &str, changes: &[PeerChange]) -> Result<(), Error> {
         let raw = self.raw()?;
+        {
+            let mut endpoints = self
+                .endpoints
+                .lock()
+                .map_err(|_| Error::Message("endpoint lock poisoned".into()))?;
+            for change in changes {
+                match change {
+                    PeerChange::Remove(key) => {
+                        self.peers.retain(|p| &p.wg_public_key != key);
+                        if let Ok(key) = decode_key(key) {
+                            endpoints.remove(&key);
+                        }
+                    }
+                    PeerChange::Upsert(peer) => {
+                        match self
+                            .peers
+                            .iter_mut()
+                            .find(|p| p.wg_public_key == peer.wg_public_key)
+                        {
+                            Some(existing) => *existing = peer.clone(),
+                            None => self.peers.push(peer.clone()),
+                        }
+                        // Same as `wg set ... endpoint` on Linux: the
+                        // coordinator's endpoint is where packets go.
+                        let endpoint = peer
+                            .endpoint
+                            .as_deref()
+                            .and_then(|endpoint| endpoint.parse::<SocketAddr>().ok());
+                        if let (Ok(key), Some(endpoint)) =
+                            (decode_key(&peer.wg_public_key), endpoint)
+                        {
+                            endpoints.insert(key, endpoint);
+                        }
+                    }
+                }
+            }
+        }
         unsafe { blaktail_tunnel_clear_peers(raw) };
-        for change in changes {
-            let PeerChange::Upsert(peer) = change else {
-                continue;
-            };
+        for peer in &self.peers {
             add_peer(raw, peer)?;
         }
         Ok(())
@@ -188,6 +226,7 @@ impl Network for WindowsNetwork {
                 unsafe { blaktail_tunnel_free(handle.raw) };
             }
         }
+        self.peers.clear();
         let _ = std::process::Command::new("netsh")
             .args([
                 "interface",
@@ -206,17 +245,10 @@ impl Network for WindowsNetwork {
         peer_key_b64: &str,
         endpoint: &str,
     ) -> Result<(), Error> {
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(peer_key_b64.trim())
-            .map_err(|_| Error::Message("peer key is not valid base64".into()))?;
-        if raw.len() != 32 {
-            return Err(Error::Message("peer key must be 32 bytes".into()));
-        }
+        let key = decode_key(peer_key_b64)?;
         let address: SocketAddr = endpoint
             .parse()
             .map_err(|_| Error::Message(format!("peer endpoint {endpoint} is invalid")))?;
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&raw);
         self.endpoints
             .lock()
             .map_err(|_| Error::Message("endpoint lock poisoned".into()))?
@@ -305,13 +337,16 @@ impl Network for WindowsNetwork {
     }
 }
 
+fn decode_key(peer_key_b64: &str) -> Result<[u8; 32], Error> {
+    base64::engine::general_purpose::STANDARD
+        .decode(peer_key_b64.trim())
+        .map_err(|_| Error::Message("peer key is not valid base64".into()))?
+        .try_into()
+        .map_err(|_| Error::Message("peer key must be 32 bytes".into()))
+}
+
 fn add_peer(raw: *mut c_void, peer: &Peer) -> Result<(), Error> {
-    let public = base64::engine::general_purpose::STANDARD
-        .decode(peer.wg_public_key.trim())
-        .map_err(|_| Error::Message("peer key is not valid base64".into()))?;
-    if public.len() != 32 {
-        return Err(Error::Message("peer key must be 32 bytes".into()));
-    }
+    let public = decode_key(&peer.wg_public_key)?;
     let allowed = std::ffi::CString::new(peer.allowed_ips.join(","))
         .map_err(|_| Error::Message("peer allowed IPs contain a null".into()))?;
     let code = unsafe { blaktail_tunnel_add_peer(raw, public.as_ptr(), allowed.as_ptr(), 25) };

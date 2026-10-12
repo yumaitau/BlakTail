@@ -1040,11 +1040,13 @@ pub fn block_rules(blocked: &[PeerPlan]) -> BlockPlan {
 /// macOS: boringtun's UAPI socket. The PSK map is shared with
 /// `MacOsNetwork`, which rewrites every peer with `replace_peers=true` and
 /// must re-send each key or it would silently fall back to no PSK.
+#[cfg(unix)]
 pub struct UapiDevice {
     pub socket: PathBuf,
     pub keys: Arc<Mutex<HashMap<String, Psk>>>,
 }
 
+#[cfg(unix)]
 impl UapiDevice {
     fn request(&self, request: &str) -> Result<String, Error> {
         use std::io::{Read as _, Write as _};
@@ -1066,6 +1068,7 @@ impl UapiDevice {
     }
 }
 
+#[cfg(unix)]
 impl PskDevice for UapiDevice {
     fn set_psk(&self, peer_key_b64: &str, psk: Option<&Psk>) -> Result<(), Error> {
         let hex = crate::peer_key_hex(peer_key_b64)
@@ -1457,6 +1460,8 @@ async fn bind_listener(
     } else {
         tokio::net::TcpSocket::new_v6()?
     };
+    // On Windows SO_REUSEADDR lets another process bind the same port.
+    #[cfg(unix)]
     socket.set_reuseaddr(true)?;
     #[cfg(target_os = "linux")]
     if let Some(device) = device {
@@ -2091,12 +2096,15 @@ mod tests {
             &Vec::<Uuid>::new()
         );
         // Persisted beside the private key with owner-only permissions.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir_a.path().join(STATE_FILE))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir_a.path().join(STATE_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // The peer turning the capability off downgrades loudly: A reports
         // not established and blocks B, and clears the key.
         let downgraded = a.manage(

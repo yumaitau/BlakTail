@@ -62,7 +62,7 @@ value. Defaults apply when a section or field is absent.
 | `relay.idle_seconds` | `120` | 10-86400 |
 | `relay.rate_per_second` | `100` | 1-100000 |
 | `relay.rate_burst` | `200` | Sustained rate or greater, maximum 1000000 |
-| `agent.state_dir` | `/var/lib/blaktail` | Absolute path |
+| `agent.state_dir` | `/var/lib/blaktail` (`C:\ProgramData\BlakTail` on Windows) | Absolute path |
 | `agent.coordinator_url` | Required by `up` unless flag supplied | HTTPS URL, except loopback development |
 | `agent.interface` | `blaktail0` | 1-15 characters |
 | `agent.poll_seconds` | `30` | 1-3600; recovery interval when the 25s control long-poll fails. Agents request control `version=2` so the coordinator can send a coalesced peer delta instead of a full snapshot. |

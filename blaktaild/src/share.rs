@@ -4,7 +4,6 @@ use std::{
     fs,
     io::Write as _,
     net::{IpAddr, SocketAddr},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -155,12 +154,11 @@ pub fn load_shares(state_dir: &Path) -> Result<Vec<LocalShare>, Error> {
 pub fn save_shares(state_dir: &Path, shares: &[LocalShare]) -> Result<(), Error> {
     fs::create_dir_all(state_dir)?;
     let path = shares_path(state_dir);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path)?;
     file.write_all(serde_json::to_string_pretty(shares)?.as_bytes())?;
     file.write_all(b"\n")?;
     Ok(())
