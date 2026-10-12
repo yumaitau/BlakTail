@@ -285,6 +285,74 @@ pub unsafe extern "C" fn blaktail_tunnel_clear_peers(tunnel: *mut BlakTailTunnel
 }
 
 /// # Safety
+/// `tunnel` must be a live pointer and `public_key` must point to 32 bytes.
+/// Removes one peer, keeping every other peer's session.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_remove_peer(
+    tunnel: *mut BlakTailTunnel,
+    public_key: *const u8,
+) -> i32 {
+    if tunnel.is_null() || public_key.is_null() {
+        return RESULT_ERR;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let key = slice::from_raw_parts(public_key, 32);
+        let Ok(mut inner) = (*tunnel).inner.lock() else {
+            return RESULT_ERR;
+        };
+        inner
+            .peers
+            .retain(|_, peer| peer.public_key.as_slice() != key);
+        RESULT_DONE
+    }))
+    .unwrap_or(RESULT_ERR)
+}
+
+/// # Safety
+/// `tunnel` must be a live pointer, `public_key` must point to 32 bytes and
+/// every output pointer must be valid. Writes the unix time of the last
+/// completed WireGuard handshake (zero when none) and the transport byte
+/// counters for one peer. Returns -1 when the peer is unknown.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_peer_stats(
+    tunnel: *mut BlakTailTunnel,
+    public_key: *const u8,
+    handshake_unix: *mut u64,
+    tx_bytes: *mut u64,
+    rx_bytes: *mut u64,
+) -> i32 {
+    if tunnel.is_null()
+        || public_key.is_null()
+        || handshake_unix.is_null()
+        || tx_bytes.is_null()
+        || rx_bytes.is_null()
+    {
+        return RESULT_ERR;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let key = slice::from_raw_parts(public_key, 32);
+        let Ok(inner) = (*tunnel).inner.lock() else {
+            return RESULT_ERR;
+        };
+        let Some(peer) = inner
+            .peers
+            .values()
+            .find(|peer| peer.public_key.as_slice() == key)
+        else {
+            return RESULT_ERR;
+        };
+        let (since, tx, rx, _, _) = peer.tunn.stats();
+        *handshake_unix = since
+            .map(|elapsed| unix_now().saturating_sub(elapsed.as_secs()))
+            .unwrap_or(0);
+        *tx_bytes = tx as u64;
+        *rx_bytes = rx as u64;
+        RESULT_DONE
+    }))
+    .unwrap_or(RESULT_ERR)
+}
+
+/// # Safety
 /// Pointers must be valid for the stated lengths. `allowed_ips` is a C string.
 #[no_mangle]
 pub unsafe extern "C" fn blaktail_tunnel_add_peer(
@@ -779,6 +847,43 @@ mod tests {
             RESULT_WRITE_TUNNEL
         );
         assert_eq!(&inner[..inner_len], ping.as_slice());
+
+        // Both sides report the completed handshake and their byte counters.
+        for (tunnel, remote) in [(alice, bob_public), (bob, alice_public)] {
+            let (mut handshake, mut tx, mut rx) = (0u64, 0u64, 0u64);
+            assert_eq!(
+                unsafe {
+                    blaktail_tunnel_peer_stats(
+                        tunnel,
+                        remote.as_bytes().as_ptr(),
+                        &mut handshake,
+                        &mut tx,
+                        &mut rx,
+                    )
+                },
+                RESULT_DONE
+            );
+            assert!(handshake > 0 && handshake <= unix_now());
+            assert!(tx > 0 || rx > 0);
+        }
+        // Removing one peer leaves it unknown to the engine.
+        assert_eq!(
+            unsafe { blaktail_tunnel_remove_peer(alice, bob_public.as_bytes().as_ptr()) },
+            RESULT_DONE
+        );
+        let (mut handshake, mut tx, mut rx) = (0u64, 0u64, 0u64);
+        assert_eq!(
+            unsafe {
+                blaktail_tunnel_peer_stats(
+                    alice,
+                    bob_public.as_bytes().as_ptr(),
+                    &mut handshake,
+                    &mut tx,
+                    &mut rx,
+                )
+            },
+            RESULT_ERR
+        );
 
         unsafe {
             blaktail_tunnel_free(alice);

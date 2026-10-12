@@ -20,6 +20,14 @@ enum {
 BlakTailTunnel *blaktail_tunnel_create(const uint8_t private_key[32]);
 void blaktail_tunnel_free(BlakTailTunnel *tunnel);
 void blaktail_tunnel_clear_peers(BlakTailTunnel *tunnel);
+int blaktail_tunnel_remove_peer(BlakTailTunnel *tunnel, const uint8_t public_key[32]);
+int blaktail_tunnel_peer_stats(
+    BlakTailTunnel *tunnel,
+    const uint8_t public_key[32],
+    uint64_t *handshake_unix,
+    uint64_t *tx_bytes,
+    uint64_t *rx_bytes
+);
 
 int blaktail_tunnel_add_peer(
     BlakTailTunnel *tunnel,
