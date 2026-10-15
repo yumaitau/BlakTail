@@ -142,4 +142,3 @@ jobs:
           if [ -f "$WORK_DIR/terraform.tfstate" ]; then
             scripts/aws-e2e/destroy.sh
           fi
-
