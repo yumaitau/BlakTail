@@ -124,7 +124,7 @@ jobs:
         with:
           name: agent-linux-${{ matrix.arch }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
           path: |
             dist/blaktaild-${{ matrix.target }}.deb
             dist/blaktaild-${{ matrix.target }}.rpm
@@ -229,7 +229,7 @@ jobs:
         with:
           name: agent-macos-${{ matrix.target }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
           path: dist/blaktaild-${{ matrix.target }}.pkg
 
       - name: Remove temporary signing material
