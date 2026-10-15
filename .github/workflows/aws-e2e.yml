@@ -142,12 +142,3 @@ jobs:
           if [ -f "$WORK_DIR/terraform.tfstate" ]; then
             scripts/aws-e2e/destroy.sh
           fi
-
-      - name: Upload proof and teardown evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: blaktail-aws-e2e-${{ inputs.run_id }}
-          path: ${{ runner.temp }}/blaktail-e2e-${{ inputs.run_id }}/evidence
-          if-no-files-found: warn
-          retention-days: 7
