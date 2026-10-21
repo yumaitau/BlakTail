@@ -146,6 +146,7 @@ fn state(listen: u16, allowed: &[&str], id: Uuid) -> NodeState {
         dns_degraded: None,
         control_revision: 0,
         published_shares: vec![],
+        drive: None,
         ssh_users_enforced: false,
         forward_filter: None,
         app_connector: false,

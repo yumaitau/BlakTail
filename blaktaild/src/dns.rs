@@ -1406,6 +1406,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            drive: None,
             ssh_users_enforced: false,
             acl_filter_enforced: false,
             traffic: None,

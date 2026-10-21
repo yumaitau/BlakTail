@@ -97,6 +97,8 @@ See [console.md](console.md).
   ([post-quantum.md](post-quantum.md))
 - A disposable Sydney AWS proof harness, not a production SaaS
 - An iPhone client that joins a network as a WireGuard node and still administers All networks
+- Shared folders on the overlay, with a loopback folder browser on each
+  device at `127.0.0.1:8080` ([drive.md](drive.md))
 
 ## What it is not
 

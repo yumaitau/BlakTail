@@ -2978,7 +2978,7 @@ async fn update_node_shares(
     let token = bearer(&headers)?;
     let mut tx = s.store.pool.begin().await?;
     let row = sqlx::query(
-        "SELECT org_id,credential_expires_at,suspended_at FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
+        "SELECT org_id,credential_expires_at,suspended_at,user_role,tags_json,user_id FROM nodes WHERE id=$1 AND token_hash=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
     .bind(node_id.to_string())
     .bind(token)
@@ -2989,15 +2989,42 @@ async fn update_node_shares(
             row.try_get::<String, _>(0)?,
             row.try_get::<i64, _>(1)?,
             row.try_get::<Option<i64>, _>(2)?,
+            row.try_get::<String, _>(3)?,
+            row.try_get::<String, _>(4)?,
+            row.try_get::<String, _>(5)?,
         ))
     })
     .transpose()?;
-    let (org_id, credential_expires_at, suspended_at) = row.ok_or(ApiError::Unauthorized)?;
+    let (org_id, credential_expires_at, suspended_at, user_role, tags_json, user_id) =
+        row.ok_or(ApiError::Unauthorized)?;
     if suspended_at.is_some() {
         return Err(ApiError::Suspended);
     }
     if credential_expires_at <= now() {
         return Err(ApiError::CredentialExpired);
+    }
+    if shares.iter().any(|share| share.enabled) {
+        let acl_json: String = sqlx::query_scalar("SELECT acl_json FROM orgs WHERE id=$1")
+            .bind(&org_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let acl: Acl = serde_json::from_str(&acl_json).map_err(|_| ApiError::CorruptData)?;
+        if let Some(policy) = &acl.drive {
+            let tags: Vec<DeviceTag> = serde_json::from_str(&tags_json).unwrap_or_default();
+            let actor = shares::DriveActor {
+                role: user_role,
+                tags: tags.iter().map(|tag| tag.as_str().to_owned()).collect(),
+                user_id,
+                email: String::new(),
+            };
+            if !shares::actor_permitted(&policy.share, &actor, &acl.groups) {
+                return Err(ApiError::BadRequest(
+                    "this device is not allowed to share folders; drive policy does not list it"
+                        .into(),
+                ));
+            }
+        }
     }
     sqlx::query("UPDATE nodes SET shares_json=$1 WHERE id=$2")
         .bind(serde_json::to_string(&shares).unwrap())
@@ -3277,6 +3304,9 @@ struct PeersResponse {
     dns: Option<org_dns::OrgDnsAgentView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     shares: Vec<shares::PublishedShare>,
+    /// Present only when the organisation policy has a `drive` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drive: Option<shares::DriveView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     control_updates: Option<ControlUpdatesCapability>,
     /// Present only for agents reporting `forward-filter`: what this node
@@ -3512,6 +3542,10 @@ async fn list_peers(
     } else {
         HashMap::new()
     };
+    let drive_peers = candidates
+        .iter()
+        .map(|(peer, subject, _, _)| (peer.id, (subject.clone(), ipv4_host(&peer.allowed_ips))))
+        .collect::<HashMap<_, _>>();
     let mut exit_node_active = false;
     let mut peers = candidates
         .into_iter()
@@ -3542,11 +3576,16 @@ async fn list_peers(
                 );
             }
             let mut ingress = acl.peer_ingress_for(&destination, &source, ssh_users_enforced);
+            let visible_shares = dest_shares
+                .iter()
+                .filter(|share| acl.drive_share_visible(&source, &destination, share))
+                .cloned()
+                .collect::<Vec<_>>();
             shares::grant_share_ports(
                 &mut ingress.tcp,
                 &ingress.deny_tcp,
                 ingress.all,
-                &dest_shares,
+                &visible_shares,
             );
             peer.ingress = Some(ingress);
             let exit_matches = requested_exit.is_some_and(|requested| {
@@ -3637,7 +3676,22 @@ async fn list_peers(
         .flat_map(|(_, addresses)| addresses.iter().cloned())
         .filter(|address| selection.ipv6 || !address.contains(':'))
         .collect();
-    let published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
+    let own_shares_json: String = sqlx::query_scalar("SELECT shares_json FROM nodes WHERE id=$1")
+        .bind(node_id.to_string())
+        .fetch_optional(&s.store.pool)
+        .await?
+        .unwrap_or_else(|| "[]".into());
+    let own_shares = shares::parse_shares(&own_shares_json);
+    let own_ipv4 =
+        ipv4_host(&serde_json::from_str::<Vec<String>>(&source_addresses).unwrap_or_default());
+    let mut published_shares = shares::load_published(&s.store.pool, &org, &visible_ids).await?;
+    let drive = acl.compile_drive(
+        &source,
+        own_ipv4.as_deref(),
+        &own_shares,
+        &drive_peers,
+        &mut published_shares,
+    );
     Ok(Json(PeersResponse {
         peers,
         assigned_ips,
@@ -3650,6 +3704,7 @@ async fn list_peers(
         relay_expires_at,
         dns,
         shares: published_shares,
+        drive,
         control_updates: Some(ControlUpdatesCapability {
             wait_max_seconds: MAX_CONTROL_UPDATE_WAIT_SECS,
         }),
@@ -5241,6 +5296,9 @@ pub(crate) struct Acl {
     ssh: Vec<AclSshRule>,
     #[serde(default)]
     tests: Vec<AclTest>,
+    /// Folder sharing. Absent keeps the earlier reachability rule.
+    #[serde(default)]
+    drive: Option<shares::DrivePolicy>,
     #[serde(default)]
     #[allow(dead_code)]
     generated: serde_json::Value,
@@ -5301,6 +5359,7 @@ impl Default for Acl {
             rules: Vec::new(),
             ssh: Vec::new(),
             tests: Vec::new(),
+            drive: None,
             generated: serde_json::Value::Null,
             etag: None,
             revision: None,
@@ -5379,6 +5438,7 @@ enum AclProtocol {
     Udp,
     Icmp,
 }
+#[derive(Clone)]
 struct Subject {
     role: Role,
     tags: Vec<DeviceTag>,
@@ -5446,6 +5506,9 @@ impl Acl {
                 "unsupported policy version {}",
                 self.version
             )));
+        }
+        if let Some(drive) = &self.drive {
+            shares::validate_policy(drive, &self.groups)?;
         }
         if self.tag_owners.len() > 16 {
             return Err(ApiError::BadRequest(
@@ -5683,6 +5746,152 @@ impl Acl {
         }
         Ok(())
     }
+    fn drive_actor(subject: &Subject) -> shares::DriveActor {
+        shares::DriveActor {
+            role: subject.role.as_str().to_owned(),
+            tags: subject
+                .tags
+                .iter()
+                .map(|tag| tag.as_str().to_owned())
+                .collect(),
+            user_id: subject.user_id.clone(),
+            email: subject.email.clone(),
+        }
+    }
+
+    /// Whether `share` on `destination` should be opened for `source`.
+    /// No drive section means every enabled share, as before.
+    fn drive_share_visible(
+        &self,
+        source: &Subject,
+        destination: &Subject,
+        share: &shares::NodeShare,
+    ) -> bool {
+        if !share.enabled {
+            return false;
+        }
+        let Some(policy) = &self.drive else {
+            return true;
+        };
+        let destination_actor = Self::drive_actor(destination);
+        shares::actor_permitted(&policy.share, &destination_actor, &self.groups)
+            && shares::grant_access(
+                policy,
+                &self.groups,
+                &Self::drive_actor(source),
+                &destination_actor,
+                &share.label,
+                share.read_only,
+            )
+            .is_some()
+    }
+
+    fn compile_drive(
+        &self,
+        source: &Subject,
+        own_ipv4: Option<&str>,
+        own_shares: &[shares::NodeShare],
+        peers: &HashMap<Uuid, (Subject, Option<String>)>,
+        published: &mut Vec<shares::PublishedShare>,
+    ) -> Option<shares::DriveView> {
+        let policy = self.drive.as_ref()?;
+        let source_actor = Self::drive_actor(source);
+        let may_share = shares::actor_permitted(&policy.share, &source_actor, &self.groups);
+        let may_access = shares::actor_permitted(&policy.access, &source_actor, &self.groups);
+        published.retain(|share| {
+            peers.get(&share.node_id).is_some_and(|(destination, _)| {
+                self.drive_share_visible(
+                    source,
+                    destination,
+                    &shares::NodeShare {
+                        label: share.label.clone(),
+                        path: String::new(),
+                        port: share.port,
+                        read_only: share.read_only,
+                        enabled: true,
+                    },
+                )
+            })
+        });
+        for share in published.iter_mut() {
+            let Some((destination, _)) = peers.get(&share.node_id) else {
+                continue;
+            };
+            share.access = shares::grant_access(
+                policy,
+                &self.groups,
+                &source_actor,
+                &Self::drive_actor(destination),
+                &share.label,
+                share.read_only,
+            )
+            .map(str::to_owned);
+        }
+        let mut local = Vec::new();
+        let mut callers = Vec::new();
+        if may_share {
+            for share in own_shares.iter().filter(|share| share.enabled) {
+                let Some(access) = shares::grant_access(
+                    policy,
+                    &self.groups,
+                    &source_actor,
+                    &source_actor,
+                    &share.label,
+                    share.read_only,
+                ) else {
+                    continue;
+                };
+                local.push(shares::DriveGrantShare {
+                    label: share.label.clone(),
+                    access: access.to_owned(),
+                });
+                let mut push = |address: &str| {
+                    callers.push(shares::DriveCaller {
+                        address: address.to_owned(),
+                        label: share.label.clone(),
+                        access: access.to_owned(),
+                    });
+                };
+                push("127.0.0.1");
+                if let Some(address) = own_ipv4 {
+                    push(address);
+                }
+            }
+            for (destination, address) in peers.values() {
+                let Some(address) = address else {
+                    continue;
+                };
+                if !self.allows(destination, source) {
+                    continue;
+                }
+                let destination_actor = Self::drive_actor(destination);
+                for share in own_shares.iter().filter(|share| share.enabled) {
+                    let Some(access) = shares::grant_access(
+                        policy,
+                        &self.groups,
+                        &destination_actor,
+                        &source_actor,
+                        &share.label,
+                        share.read_only,
+                    ) else {
+                        continue;
+                    };
+                    callers.push(shares::DriveCaller {
+                        address: address.clone(),
+                        label: share.label.clone(),
+                        access: access.to_owned(),
+                    });
+                }
+            }
+        }
+        Some(shares::DriveView {
+            access: may_access,
+            share: may_share,
+            local,
+            callers,
+        })
+    }
+
     fn allows(&self, s: &Subject, d: &Subject) -> bool {
         // Pairing follows policy intent. Whether TCP 22 opens also depends on
         // the destination agent and is decided by `peer_ingress_for`.
@@ -6194,6 +6403,14 @@ fn parse_acl_host_target(value: &str) -> Result<(), ApiError> {
             require_private_host_ip(address, &value)
         }
     }
+}
+
+fn ipv4_host(addresses: &[String]) -> Option<String> {
+    addresses.iter().find_map(|cidr| {
+        let ip = cidr.split('/').next()?.trim();
+        let addr: IpAddr = ip.parse().ok()?;
+        addr.is_ipv4().then(|| ip.to_owned())
+    })
 }
 
 fn require_private_host_ip(address: IpAddr, value: &str) -> Result<(), ApiError> {

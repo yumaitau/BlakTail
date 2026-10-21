@@ -5,14 +5,15 @@ use blaktaild::relay_select::{eligible_relays, wss_for, RelaySelector};
 use blaktaild::{
     apply_peer_map, configure_system_dns,
     connector::{self, ConnectorRuntime},
-    disable_share, dns_domain, enable_share, ensure_private_key, load_shares,
-    organisation_dns_managed, organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
+    disable_share, dns_domain, drive_rename, drive_share, drive_unshare, enable_share,
+    ensure_private_key, format_drive_list, load_shares, organisation_dns_managed,
+    organisation_resolver_suffixes, overlay_ipv4, peer_key_hex,
     pq::{self, PqRuntime},
     published_resolver_suffixes, put_share_file, read_state, remove_system_dns, restore_peers,
     services::{self, ServiceRuntime},
-    sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator, MagicDns,
-    Network, Registration, RelayMesh, ShareServer, DIRECT_GRACE_SECS, DIRECT_RETRY_SECS,
-    HANDSHAKE_FRESH_SECS,
+    sync_once, validate_advertised_routes, validate_interface, write_state, Coordinator,
+    DriveBrowser, MagicDns, Network, Registration, RelayMesh, ShareGate, ShareServer,
+    DIRECT_GRACE_SECS, DIRECT_RETRY_SECS, HANDSHAKE_FRESH_SECS,
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -139,6 +140,11 @@ enum Command {
         #[command(subcommand)]
         action: ShareCommand,
     },
+    /// Publish folders for other devices, and browse theirs from this machine.
+    Drive {
+        #[command(subcommand)]
+        action: DriveCommand,
+    },
     /// Install this organisation's private service CA into the system trust
     /// store after showing its fingerprint and asking for confirmation.
     /// Never run automatically.
@@ -184,6 +190,18 @@ enum ShareCommand {
     List,
 }
 
+#[derive(Subcommand)]
+enum DriveCommand {
+    /// Publish a writable folder. The name is stored in lowercase.
+    Share { name: String, path: PathBuf },
+    /// Remove a published folder.
+    Unshare { name: String },
+    /// Rename a published folder.
+    Rename { from: String, to: String },
+    /// List folders published on this machine. Does not need an enrolment.
+    List,
+}
+
 #[derive(Clone, Default)]
 struct AgentOverrides {
     state_dir: Option<PathBuf>,
@@ -223,6 +241,7 @@ impl AgentOverrides {
             Command::Reauth
             | Command::Status { .. }
             | Command::Share { .. }
+            | Command::Drive { .. }
             | Command::TrustServiceCa { .. }
             | Command::Pause
             | Command::Down => {}
@@ -584,6 +603,7 @@ async fn sync_loop(
     let mut relays = RelaySelector::default();
     let mut dns: Option<MagicDns> = None;
     let mut shares: Option<ShareServer> = None;
+    let mut browser: Option<DriveBrowser> = None;
     let mut paths: HashMap<Uuid, PeerPath> = HashMap::new();
     let mut connector = ConnectorRuntime::default();
     let own_secret = ensure_private_key(state_dir)
@@ -609,6 +629,7 @@ async fn sync_loop(
         }
         manage_magic_dns(&mut dns, state, state_dir).await;
         manage_shares(&mut shares, coordinator, state, state_dir).await;
+        manage_drive(&mut browser, state, state_dir).await;
         serving.manage(coordinator, state, state_dir).await;
         if connector::manage(coordinator, network, state, &mut connector).await {
             if let Err(error) = write_state(state_dir, state) {
@@ -949,8 +970,10 @@ async fn manage_shares(
             return;
         }
     };
+    let gate = share_gate(state);
     let enabled = local.iter().any(|share| share.enabled);
-    if !enabled {
+    let blocked = state.drive.as_ref().is_some_and(|view| !view.share);
+    if !enabled || blocked {
         if let Some(active) = server.take() {
             active.stop();
         }
@@ -962,14 +985,14 @@ async fn manage_shares(
     };
     if server
         .as_ref()
-        .is_some_and(|active| active.matches(bind_ip, &local))
+        .is_some_and(|active| active.matches(bind_ip, &local, &gate))
     {
         return;
     }
     if let Some(active) = server.take() {
         active.stop();
     }
-    match ShareServer::spawn(bind_ip, &local).await {
+    match ShareServer::spawn_with_gate(bind_ip, &local, gate).await {
         Ok(created) => {
             info!(address = %created.listen_addr(), "overlay file share listening");
             if let Err(error) = coordinator.publish_shares(state, &local).await {
@@ -978,6 +1001,71 @@ async fn manage_shares(
             *server = Some(created);
         }
         Err(error) => warn!(%error, "could not bind overlay file share"),
+    }
+}
+
+async fn publish_drive(
+    state_dir: &std::path::Path,
+    coord_ca: Option<&std::path::Path>,
+) -> Result<(), blaktaild::Error> {
+    let state = read_state(state_dir)?;
+    let coordinator = coordinator_client(&state.coord, coord_ca)?;
+    let shares = load_shares(state_dir)?;
+    coordinator.publish_shares(&state, &shares).await
+}
+
+fn share_gate(state: &blaktaild::NodeState) -> ShareGate {
+    let Some(view) = &state.drive else {
+        return ShareGate::open();
+    };
+    let self_ips = overlay_ipv4(state).ok().into_iter().collect();
+    let local: Vec<(String, String)> = view
+        .local
+        .iter()
+        .map(|row| (row.label.clone(), row.access.clone()))
+        .collect();
+    let callers: Vec<(String, String, String)> = view
+        .callers
+        .iter()
+        .map(|row| (row.address.clone(), row.label.clone(), row.access.clone()))
+        .collect();
+    ShareGate::locked(self_ips, &local, &callers)
+}
+
+async fn manage_drive(
+    browser: &mut Option<DriveBrowser>,
+    state: &blaktaild::NodeState,
+    state_dir: &std::path::Path,
+) {
+    if state.drive.as_ref().is_some_and(|view| !view.access) {
+        if let Some(active) = browser.take() {
+            active.stop();
+        }
+        return;
+    }
+    let local = match load_shares(state_dir) {
+        Ok(shares) => shares,
+        Err(error) => {
+            warn!(%error, "could not read local share configuration");
+            return;
+        }
+    };
+    let catalog = blaktaild::drive::catalog(state, &local);
+    if browser
+        .as_ref()
+        .is_some_and(|active| active.matches(&catalog))
+    {
+        return;
+    }
+    if let Some(active) = browser.take() {
+        active.stop();
+    }
+    match DriveBrowser::spawn(catalog).await {
+        Ok(created) => {
+            info!(address = %created.listen_addr(), "folder browser listening");
+            *browser = Some(created);
+        }
+        Err(error) => warn!(%error, "could not bind folder browser on 127.0.0.1:8080"),
     }
 }
 
@@ -2002,6 +2090,27 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 }
             }
         }
+        Command::Drive { action } => match action {
+            DriveCommand::List => {
+                let shares = load_shares(state_dir)?;
+                print!("{}", format_drive_list(&shares));
+            }
+            DriveCommand::Share { name, path } => {
+                let share = drive_share(state_dir, &path, &name)?;
+                publish_drive(state_dir, cli.coord_ca.as_deref()).await?;
+                println!("shared {} as {}", share.label, share.as_user);
+            }
+            DriveCommand::Unshare { name } => {
+                drive_unshare(state_dir, &name)?;
+                publish_drive(state_dir, cli.coord_ca.as_deref()).await?;
+                println!("unshared {name}");
+            }
+            DriveCommand::Rename { from, to } => {
+                let share = drive_rename(state_dir, &from, &to)?;
+                publish_drive(state_dir, cli.coord_ca.as_deref()).await?;
+                println!("renamed {} to {}", from, share.label);
+            }
+        },
         Command::TrustServiceCa { output, yes } => {
             let state = read_state(state_dir)?;
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;

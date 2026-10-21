@@ -1,6 +1,7 @@
 use crate::{Error, NodeState};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write as _,
     net::{IpAddr, SocketAddr},
@@ -34,6 +35,9 @@ pub struct LocalShare {
     pub read_only: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Operating-system user who published the folder. Blank on Windows.
+    #[serde(default, rename = "as")]
+    pub as_user: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,6 +48,9 @@ pub struct PublishedShare {
     pub port: u16,
     #[serde(default = "default_true")]
     pub read_only: bool,
+    /// `ro` or `rw` when drive policy is in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
 }
 
 fn default_share_port() -> u16 {
@@ -66,6 +73,92 @@ impl PublishedShare {
     }
 }
 
+/// Who may touch the files behind the overlay listener.
+/// `open` keeps the earlier behaviour: the network policy is the gate and
+/// each share's read-only flag decides writes. `locked` applies drive grants.
+#[derive(Clone, Debug)]
+pub struct ShareGate {
+    enforce: bool,
+    self_ips: Vec<IpAddr>,
+    local: BTreeMap<String, bool>,
+    callers: BTreeMap<(IpAddr, String), bool>,
+}
+
+impl ShareGate {
+    pub fn open() -> Self {
+        Self {
+            enforce: false,
+            self_ips: Vec::new(),
+            local: BTreeMap::new(),
+            callers: BTreeMap::new(),
+        }
+    }
+
+    /// `local` and `callers` entries are `(label, "ro"|"rw")`. Caller rows
+    /// are `(address, label, "ro"|"rw")`.
+    pub fn locked(
+        self_ips: Vec<IpAddr>,
+        local: &[(String, String)],
+        callers: &[(String, String, String)],
+    ) -> Self {
+        let writable = |access: &str| access == "rw";
+        Self {
+            enforce: true,
+            self_ips,
+            local: local
+                .iter()
+                .map(|(label, access)| (label.clone(), writable(access)))
+                .collect(),
+            callers: callers
+                .iter()
+                .filter_map(|(address, label, access)| {
+                    let ip = address.parse().ok()?;
+                    Some(((ip, label.clone()), writable(access)))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn fingerprint(&self) -> String {
+        if !self.enforce {
+            return "open".into();
+        }
+        let mut rows = Vec::new();
+        for (label, writable) in &self.local {
+            rows.push(format!("self:{label}:{writable}"));
+        }
+        for ((ip, label), writable) in &self.callers {
+            rows.push(format!("{ip}:{label}:{writable}"));
+        }
+        rows.join("|")
+    }
+
+    fn view(&self, peer: Option<IpAddr>, shares: &[LocalShare]) -> Vec<LocalShare> {
+        let enabled = shares.iter().filter(|share| share.enabled);
+        if !self.enforce {
+            return enabled.cloned().collect();
+        }
+        let Some(peer) = peer else {
+            return Vec::new();
+        };
+        let self_peer = peer.is_loopback() || self.self_ips.contains(&peer);
+        enabled
+            .filter_map(|share| {
+                let writable = if self_peer {
+                    self.local.get(&share.label).copied()
+                } else {
+                    self.callers.get(&(peer, share.label.clone())).copied()
+                }?;
+                let mut share = share.clone();
+                if !writable {
+                    share.read_only = true;
+                }
+                Some(share)
+            })
+            .collect()
+    }
+}
+
 pub struct ShareServer {
     task: AbortHandle,
     listen_addr: SocketAddr,
@@ -74,6 +167,14 @@ pub struct ShareServer {
 
 impl ShareServer {
     pub async fn spawn(bind_ip: IpAddr, shares: &[LocalShare]) -> Result<Self, Error> {
+        Self::spawn_with_gate(bind_ip, shares, ShareGate::open()).await
+    }
+
+    pub async fn spawn_with_gate(
+        bind_ip: IpAddr,
+        shares: &[LocalShare],
+        gate: ShareGate,
+    ) -> Result<Self, Error> {
         let enabled = shares
             .iter()
             .filter(|share| share.enabled)
@@ -85,16 +186,18 @@ impl ShareServer {
         let port = enabled[0].port;
         let listener = TcpListener::bind(SocketAddr::new(bind_ip, port)).await?;
         let listen_addr = listener.local_addr()?;
-        let fingerprint = fingerprint_shares(&enabled);
+        let fingerprint = format!("{}#{}", fingerprint_shares(&enabled), gate.fingerprint());
         let served = Arc::new(enabled);
+        let gate = Arc::new(gate);
         let task = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((stream, peer)) = listener.accept().await else {
                     return;
                 };
                 let shares = served.clone();
+                let gate = gate.clone();
                 tokio::spawn(async move {
-                    let _ = handle_client(stream, &shares).await;
+                    let _ = handle_client(stream, Some(peer.ip()), &shares, &gate).await;
                 });
             }
         });
@@ -105,13 +208,15 @@ impl ShareServer {
         })
     }
 
-    pub fn matches(&self, bind_ip: IpAddr, shares: &[LocalShare]) -> bool {
+    pub fn matches(&self, bind_ip: IpAddr, shares: &[LocalShare], gate: &ShareGate) -> bool {
         let enabled = shares
             .iter()
             .filter(|share| share.enabled)
             .cloned()
             .collect::<Vec<_>>();
-        self.listen_addr.ip() == bind_ip && self.fingerprint == fingerprint_shares(&enabled)
+        self.listen_addr.ip() == bind_ip
+            && self.fingerprint
+                == format!("{}#{}", fingerprint_shares(&enabled), gate.fingerprint())
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
@@ -261,6 +366,7 @@ pub fn validate_local_share_mode(
         port,
         read_only,
         enabled: true,
+        as_user: String::new(),
     })
 }
 
@@ -292,6 +398,7 @@ fn canonical_shares(shares: Vec<LocalShare>) -> Result<Vec<LocalShare>, Error> {
             port: share.port,
             read_only: share.read_only,
             enabled: share.enabled,
+            as_user: share.as_user,
         });
     }
     ports.sort_unstable();
@@ -310,12 +417,15 @@ fn canonical_label(label: &str) -> Result<String, Error> {
         || label.len() > MAX_LABEL_LEN
         || label.starts_with('-')
         || label.ends_with('-')
-        || !label
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !label.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'(' | b')' | b' ')
+        })
     {
         return Err(Error::Message(
-            "share name must be 1-32 letters, digits, or hyphens".into(),
+            "share name must be 1-32 letters, digits, hyphens, underscores, parentheses, or spaces"
+                .into(),
         ));
     }
     Ok(label)
@@ -334,15 +444,120 @@ fn fingerprint_shares(shares: &[LocalShare]) -> String {
         .iter()
         .map(|share| {
             format!(
-                "{}:{}:{}:{}",
-                share.label, share.path, share.port, share.enabled
+                "{}:{}:{}:{}:{}",
+                share.label, share.path, share.port, share.enabled, share.read_only
             )
         })
         .collect::<Vec<_>>()
         .join("|")
 }
 
-async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(), Error> {
+pub fn drive_share(state_dir: &Path, path: &Path, name: &str) -> Result<LocalShare, Error> {
+    let mut share = validate_local_share_mode(path, Some(name), DEFAULT_SHARE_PORT, false)?;
+    share.as_user = sharing_as();
+    let mut shares = load_shares(state_dir)?;
+    if let Some(port) = shares.first().map(|existing| existing.port) {
+        share.port = port;
+    }
+    if let Some(existing) = shares
+        .iter_mut()
+        .find(|candidate| candidate.label == share.label)
+    {
+        *existing = share.clone();
+    } else {
+        if shares.len() >= MAX_SHARES {
+            return Err(Error::Message(format!(
+                "a node may publish at most {MAX_SHARES} shares"
+            )));
+        }
+        shares.push(share.clone());
+    }
+    let shares = canonical_shares(shares)?;
+    save_shares(state_dir, &shares)?;
+    Ok(share)
+}
+
+pub fn drive_unshare(state_dir: &Path, name: &str) -> Result<Vec<LocalShare>, Error> {
+    let wanted = canonical_label(name)?;
+    let mut shares = load_shares(state_dir)?;
+    let before = shares.len();
+    shares.retain(|share| share.label != wanted);
+    if shares.len() == before {
+        return Err(Error::Message(format!("share {wanted} is not configured")));
+    }
+    save_shares(state_dir, &shares)?;
+    Ok(shares)
+}
+
+pub fn drive_rename(state_dir: &Path, from: &str, to: &str) -> Result<LocalShare, Error> {
+    let from = canonical_label(from)?;
+    let to = canonical_label(to)?;
+    let mut shares = load_shares(state_dir)?;
+    if shares.iter().any(|share| share.label == to) && from != to {
+        return Err(Error::Message(format!("share {to} already exists")));
+    }
+    let Some(share) = shares.iter_mut().find(|share| share.label == from) else {
+        return Err(Error::Message(format!("share {from} is not configured")));
+    };
+    share.label = to;
+    let updated = share.clone();
+    let shares = canonical_shares(shares)?;
+    save_shares(state_dir, &shares)?;
+    Ok(updated)
+}
+
+pub fn format_drive_list(shares: &[LocalShare]) -> String {
+    let rows = shares
+        .iter()
+        .filter(|share| share.enabled)
+        .collect::<Vec<_>>();
+    let name_width = rows
+        .iter()
+        .map(|share| share.label.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let path_width = rows
+        .iter()
+        .map(|share| share.path.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let mut out = format!(
+        "{:<name_width$}  {:<path_width$}  as\n{:-<name_width$}  {:-<path_width$}  ----\n",
+        "name", "path", "", ""
+    );
+    for share in rows {
+        out.push_str(&format!(
+            "{:<name_width$}  {:<path_width$}  {}\n",
+            share.label, share.path, share.as_user
+        ));
+    }
+    out
+}
+
+fn sharing_as() -> String {
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let record = unsafe { libc::getpwuid(uid) };
+        if !record.is_null() {
+            let name = unsafe { std::ffi::CStr::from_ptr((*record).pw_name) };
+            if let Ok(name) = name.to_str() {
+                return name.to_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+async fn handle_client(
+    mut stream: TcpStream,
+    peer: Option<IpAddr>,
+    shares: &[LocalShare],
+    gate: &ShareGate,
+) -> Result<(), Error> {
+    let shares = gate.view(peer, shares);
     let mut buffer = vec![0u8; MAX_HEADER];
     let length = tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut buffer))
         .await
@@ -369,6 +584,10 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
     };
     let body_start = header_end + separator;
     parsed.body = buffer[body_start..length].to_vec();
+    if gate.enforce && shares.is_empty() {
+        write_plain(&mut stream, 403, "Forbidden", "forbidden\n", true).await?;
+        return Ok(());
+    }
     if let Some(needed) = parsed.content_length {
         if needed > MAX_PUT_BYTES {
             write_plain(
@@ -411,15 +630,30 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
             .await?;
         }
         "GET" | "HEAD" => {
-            serve_get(&mut stream, shares, &parsed.path, parsed.method == "HEAD").await?;
+            serve_get(&mut stream, &shares, &parsed.path, parsed.method == "HEAD").await?;
         }
         "PROPFIND" => {
-            serve_propfind(&mut stream, shares, &parsed.path, parsed.depth.as_deref()).await?;
+            serve_propfind(&mut stream, &shares, &parsed.path, parsed.depth.as_deref()).await?;
         }
         "PUT" => {
-            serve_put(&mut stream, shares, &parsed.path, &parsed.body).await?;
+            serve_put(&mut stream, &shares, &parsed.path, &parsed.body).await?;
         }
-        "POST" | "DELETE" | "MKCOL" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK" => {
+        "MKCOL" => {
+            serve_mkcol(&mut stream, &shares, &parsed.path).await?;
+        }
+        "DELETE" => {
+            serve_delete(&mut stream, &shares, &parsed.path).await?;
+        }
+        "MOVE" => {
+            serve_move(
+                &mut stream,
+                &shares,
+                &parsed.path,
+                parsed.destination.as_deref(),
+            )
+            .await?;
+        }
+        "POST" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK" => {
             write_response(
                 &mut stream,
                 403,
@@ -449,13 +683,14 @@ async fn handle_client(mut stream: TcpStream, shares: &[LocalShare]) -> Result<(
     Ok(())
 }
 
-const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PROPFIND, PUT";
+const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PROPFIND, PUT, MKCOL, DELETE, MOVE";
 
 struct ParsedRequest {
     method: String,
     path: String,
     depth: Option<String>,
     content_length: Option<usize>,
+    destination: Option<String>,
     body: Vec<u8>,
 }
 
@@ -472,6 +707,7 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
     let path = percent_decode(target.split('?').next().unwrap_or("/"))?;
     let mut depth = None;
     let mut content_length = None;
+    let mut destination = None;
     for line in lines {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
@@ -484,6 +720,8 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
             depth = Some(value.trim().to_ascii_lowercase());
         } else if name.eq_ignore_ascii_case("content-length") {
             content_length = value.trim().parse().ok();
+        } else if name.eq_ignore_ascii_case("destination") {
+            destination = destination_path(value.trim());
         }
     }
     Some(ParsedRequest {
@@ -491,8 +729,17 @@ fn parse_request(raw: &str) -> Option<ParsedRequest> {
         path,
         depth,
         content_length,
+        destination,
         body: Vec::new(),
     })
+}
+
+fn destination_path(value: &str) -> Option<String> {
+    let path = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|index| &rest[index..]))
+        .unwrap_or(value);
+    percent_decode(path.split('?').next().unwrap_or(path))
 }
 
 fn share_for_path<'a>(shares: &'a [LocalShare], path: &str) -> Option<&'a LocalShare> {
@@ -531,6 +778,176 @@ fn resolve_put_path(share: &LocalShare, url_path: &str) -> Result<PathBuf, Error
         }
     }
     Ok(target)
+}
+
+enum JailError {
+    Bad,
+    Escape,
+    MissingParent,
+}
+
+/// `(root, target)` for one child of the share. The share root itself is refused.
+fn child_paths(share: &LocalShare, url_path: &str) -> Result<(PathBuf, PathBuf), JailError> {
+    let prefix = format!("/{}", share.label);
+    let rest = url_path
+        .strip_prefix(&prefix)
+        .unwrap_or("")
+        .trim_matches('/');
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(JailError::Bad);
+    }
+    let root = fs::canonicalize(&share.path).map_err(|_| JailError::Escape)?;
+    let target = root.join(rest);
+    let parent = target.parent().ok_or(JailError::Bad)?;
+    if !parent.exists() {
+        return Err(JailError::MissingParent);
+    }
+    let parent = fs::canonicalize(parent).map_err(|_| JailError::Escape)?;
+    if !parent.starts_with(&root) {
+        return Err(JailError::Escape);
+    }
+    if target.exists() {
+        let existing = fs::canonicalize(&target).map_err(|_| JailError::Escape)?;
+        if !existing.starts_with(&root) {
+            return Err(JailError::Escape);
+        }
+    }
+    Ok((root, target))
+}
+
+async fn serve_mkcol(
+    stream: &mut TcpStream,
+    shares: &[LocalShare],
+    path: &str,
+) -> Result<(), Error> {
+    let Some(share) = share_for_path(shares, path) else {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    };
+    if share.read_only {
+        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
+        return Ok(());
+    }
+    match child_paths(share, path) {
+        Ok((_, target)) if target.exists() => {
+            write_plain(stream, 405, "Method Not Allowed", "already exists\n", true).await?;
+        }
+        Ok((_, target)) => {
+            fs::create_dir(&target)?;
+            write_plain(stream, 201, "Created", "created\n", true).await?;
+        }
+        Err(JailError::MissingParent) => {
+            write_plain(stream, 409, "Conflict", "parent is missing\n", true).await?;
+        }
+        Err(_) => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn serve_delete(
+    stream: &mut TcpStream,
+    shares: &[LocalShare],
+    path: &str,
+) -> Result<(), Error> {
+    let Some(share) = share_for_path(shares, path) else {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    };
+    if share.read_only {
+        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
+        return Ok(());
+    }
+    let (_, target) = match child_paths(share, path) {
+        Ok(paths) => paths,
+        Err(_) => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+            return Ok(());
+        }
+    };
+    if !target.exists() {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    }
+    if target.is_dir() {
+        if fs::read_dir(&target)?.next().is_some() {
+            write_plain(stream, 403, "Forbidden", "directory is not empty\n", true).await?;
+            return Ok(());
+        }
+        fs::remove_dir(&target)?;
+    } else {
+        fs::remove_file(&target)?;
+    }
+    write_plain(stream, 204, "No Content", "", false).await
+}
+
+async fn serve_move(
+    stream: &mut TcpStream,
+    shares: &[LocalShare],
+    path: &str,
+    destination: Option<&str>,
+) -> Result<(), Error> {
+    let Some(destination) = destination else {
+        write_plain(stream, 400, "Bad Request", "destination required\n", true).await?;
+        return Ok(());
+    };
+    let Some(share) = share_for_path(shares, path) else {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    };
+    if share.read_only {
+        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
+        return Ok(());
+    }
+    let Some(dest_share) = share_for_path(shares, destination) else {
+        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+        return Ok(());
+    };
+    if dest_share.label != share.label {
+        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+        return Ok(());
+    }
+    let (_, source) = match child_paths(share, path) {
+        Ok(paths) => paths,
+        Err(_) => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+            return Ok(());
+        }
+    };
+    if !source.exists() {
+        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+        return Ok(());
+    }
+    let (_, target) = match child_paths(share, destination) {
+        Ok(paths) => paths,
+        Err(JailError::MissingParent) => {
+            write_plain(stream, 409, "Conflict", "parent is missing\n", true).await?;
+            return Ok(());
+        }
+        Err(_) => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+            return Ok(());
+        }
+    };
+    if target.is_dir() {
+        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+        return Ok(());
+    }
+    let replaced = target.exists();
+    if replaced {
+        fs::remove_file(&target)?;
+    }
+    fs::rename(&source, &target)?;
+    if replaced {
+        write_plain(stream, 204, "No Content", "", false).await
+    } else {
+        write_plain(stream, 201, "Created", "created\n", true).await
+    }
 }
 
 async fn serve_put(
@@ -1280,7 +1697,7 @@ mod tests {
         assert!(options.starts_with("HTTP/1.1 200"), "{options}");
         assert!(options.contains("DAV: 1"), "{options}");
         assert!(
-            options.contains("Allow: OPTIONS, GET, HEAD, PROPFIND, PUT"),
+            options.contains("Allow: OPTIONS, GET, HEAD, PROPFIND, PUT, MKCOL, DELETE, MOVE"),
             "{options}"
         );
 
@@ -1360,5 +1777,106 @@ mod tests {
         let mut body = Vec::new();
         client.read_to_end(&mut body).await.unwrap();
         String::from_utf8_lossy(&body).into_owned()
+    }
+
+    async fn spawn_gated(mut share: LocalShare, gate: ShareGate) -> ShareServer {
+        for _ in 0..20 {
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            share.port = probe.local_addr().unwrap().port();
+            drop(probe);
+            if let Ok(server) = ShareServer::spawn_with_gate(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                std::slice::from_ref(&share),
+                gate.clone(),
+            )
+            .await
+            {
+                return server;
+            }
+        }
+        panic!("no free localhost port for share test");
+    }
+
+    #[test]
+    fn drive_commands_round_trip_names() {
+        let root = temp_dir();
+        let folder = root.join("Docs");
+        fs::create_dir_all(&folder).unwrap();
+        let share = drive_share(&root, &folder, " Company-Docs ").unwrap();
+        assert_eq!(share.label, "company-docs");
+        assert!(!share.read_only);
+        #[cfg(unix)]
+        assert!(!share.as_user.is_empty());
+        let listed = format_drive_list(&load_shares(&root).unwrap());
+        assert!(listed.contains("company-docs"), "{listed}");
+        assert!(listed.contains("name"), "{listed}");
+        let renamed = drive_rename(&root, "company-docs", "notes").unwrap();
+        assert_eq!(renamed.label, "notes");
+        drive_unshare(&root, "notes").unwrap();
+        assert!(load_shares(&root).unwrap().is_empty());
+        assert!(drive_unshare(&root, "notes").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn webdav_creates_moves_and_deletes() {
+        let root = temp_dir();
+        let share =
+            validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let server = spawn_on_free_port(share).await;
+        let addr = server.listen_addr();
+        let mkcol = http_exchange(addr, "MKCOL", "/drop/folder", &[]).await;
+        assert!(mkcol.starts_with("HTTP/1.1 201"), "{mkcol}");
+        assert!(root.join("folder").is_dir());
+        let again = http_exchange(addr, "MKCOL", "/drop/folder", &[]).await;
+        assert!(again.starts_with("HTTP/1.1 405"), "{again}");
+        let sent = put_share_file(&format!("http://{addr}/drop/folder/a.txt"), b"abc")
+            .await
+            .unwrap();
+        assert_eq!(sent, 201);
+        let moved = http_exchange(
+            addr,
+            "MOVE",
+            "/drop/folder/a.txt",
+            &[("Destination", &format!("http://{addr}/drop/folder/b.txt"))],
+        )
+        .await;
+        assert!(moved.starts_with("HTTP/1.1 201"), "{moved}");
+        assert_eq!(fs::read(root.join("folder").join("b.txt")).unwrap(), b"abc");
+        let deleted = http_exchange(addr, "DELETE", "/drop/folder/b.txt", &[]).await;
+        assert!(deleted.starts_with("HTTP/1.1 204"), "{deleted}");
+        let dir = http_exchange(addr, "DELETE", "/drop/folder", &[]).await;
+        assert!(dir.starts_with("HTTP/1.1 204"), "{dir}");
+        let root_del = http_exchange(addr, "DELETE", "/drop/", &[]).await;
+        assert!(root_del.starts_with("HTTP/1.1 403"), "{root_del}");
+        let copy = http_exchange(addr, "COPY", "/drop/folder", &[]).await;
+        assert!(copy.starts_with("HTTP/1.1 403"), "{copy}");
+        server.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn drive_gate_uses_local_grant_on_loopback() {
+        let root = temp_dir();
+        fs::write(root.join("note.txt"), "hello-share").unwrap();
+        let share =
+            validate_local_share_mode(&root, Some("files"), DEFAULT_SHARE_PORT, false).unwrap();
+        let denied = spawn_gated(share.clone(), ShareGate::locked(vec![], &[], &[])).await;
+        let hidden = http_exchange(denied.listen_addr(), "GET", "/files/note.txt", &[]).await;
+        assert!(hidden.starts_with("HTTP/1.1 403"), "{hidden}");
+        denied.stop();
+
+        let allowed = spawn_gated(
+            share,
+            ShareGate::locked(vec![], &[("files".into(), "ro".into())], &[]),
+        )
+        .await;
+        let body = http_exchange(allowed.listen_addr(), "GET", "/files/note.txt", &[]).await;
+        assert!(body.contains("hello-share"), "{body}");
+        let put = http_exchange(allowed.listen_addr(), "PUT", "/files/other.txt", &[]).await;
+        assert!(put.starts_with("HTTP/1.1 403"), "{put}");
+        assert!(!root.join("other.txt").exists());
+        allowed.stop();
+        fs::remove_dir_all(root).unwrap();
     }
 }

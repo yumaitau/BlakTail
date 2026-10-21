@@ -68,6 +68,8 @@ export type AclPolicyDraft = {
   rules: AclRuleDraft[];
   ssh: AclSshDraft[];
   tests: unknown[];
+  /** Folder-sharing section, kept intact so a form save does not drop it. */
+  drive?: Record<string, unknown>;
 };
 
 function asStringArray(value: unknown): string[] {
@@ -202,6 +204,10 @@ export function parseAclPolicy(value: unknown): AclPolicyDraft {
         }))
       : [];
   const tests = Array.isArray(source.tests) ? source.tests : [];
+  const drive =
+    source.drive && typeof source.drive === "object" && !Array.isArray(source.drive)
+      ? (source.drive as Record<string, unknown>)
+      : undefined;
   const version = source.version === 1 || source.version === undefined ? 1 : Number(source.version);
   const generated = Array.isArray(source.generated)
     ? source.generated.flatMap((entry) => {
@@ -232,6 +238,7 @@ export function parseAclPolicy(value: unknown): AclPolicyDraft {
     rules,
     ssh,
     tests,
+    drive,
   };
 }
 
@@ -302,6 +309,7 @@ export function serializeAclPolicy(policy: AclPolicyDraft): Record<string, unkno
   return {
     version: policy.version || 1,
     defaults: policy.defaults,
+    ...(policy.drive ? { drive: policy.drive } : {}),
     groups,
     ...(Object.keys(tag_owners).length > 0 ? { tag_owners } : {}),
     ...(Object.keys(hosts).length > 0 ? { hosts } : {}),

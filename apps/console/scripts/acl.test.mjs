@@ -6,6 +6,7 @@ import {
   serializeAclPolicy,
   validGroupName,
 } from "../src/lib/acl.ts";
+import { folderBrowserUrl } from "../src/lib/drive.ts";
 
 test("ACL drafts keep groups and compact empty selectors", () => {
   const policy = parseAclPolicy({
@@ -188,4 +189,34 @@ test("ACL drafts keep posture on allow rules and drop it from denies", () => {
     { action: "check", src_tags: ["ranger"], users: ["deploy"], posture: ["baseline"] },
     { action: "deny", src_tags: ["office"], users: ["root"] },
   ]);
+});
+
+test("ACL drafts keep a drive section through a round trip", () => {
+  const drive = {
+    share: ["*"],
+    access: ["member"],
+    grants: [
+      {
+        src_roles: ["member"],
+        dst_tags: ["store"],
+        shares: ["company-docs"],
+        access: "ro",
+      },
+    ],
+  };
+  const policy = parseAclPolicy({ version: 1, defaults: "deny", drive, rules: [] });
+  assert.deepEqual(policy.drive, drive);
+  assert.deepEqual(serializeAclPolicy(policy).drive, drive);
+  assert.equal(serializeAclPolicy(parseAclPolicy({ defaults: "deny" })).drive, undefined);
+});
+
+test("folder browser URL uses the MagicDNS domain and host label", () => {
+  assert.equal(
+    folderBrowserUrl("Store.abcdef12.blaktail.", "files"),
+    "http://127.0.0.1:8080/abcdef12.blaktail/store/files/",
+  );
+  assert.equal(
+    folderBrowserUrl("not-a-tailnet", "files"),
+    "http://127.0.0.1:8080/blaktail/not-a-tailnet/files/",
+  );
 });

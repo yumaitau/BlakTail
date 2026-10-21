@@ -19,6 +19,7 @@ use zeroize::Zeroize;
 pub mod acl_filter;
 pub mod connector;
 pub mod dns;
+pub mod drive;
 pub mod flow_capture;
 /// Shared per-flow event shape, sampling and bounds.
 #[cfg(not(target_os = "windows"))]
@@ -54,9 +55,11 @@ pub mod win_host;
 pub mod win_service;
 #[cfg(target_os = "windows")]
 mod windows;
+pub use drive::DriveBrowser;
 pub use share::{
-    disable_share, enable_share, load_shares, overlay_ipv4, put_share_file, save_shares,
-    LocalShare, PublishedShare, ShareServer, DEFAULT_SHARE_PORT,
+    disable_share, drive_rename, drive_share, drive_unshare, enable_share, format_drive_list,
+    load_shares, overlay_ipv4, put_share_file, save_shares, LocalShare, PublishedShare, ShareGate,
+    ShareServer, DEFAULT_SHARE_PORT,
 };
 #[cfg(target_os = "windows")]
 pub use windows::WindowsNetwork;
@@ -309,6 +312,9 @@ pub struct NodeState {
     pub control_revision: i64,
     #[serde(default)]
     pub published_shares: Vec<crate::PublishedShare>,
+    /// Compiled folder-sharing policy. Absent keeps the earlier reachability rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<drive::DriveView>,
     /// Last peer-map apply proved sshd enforces per-user SSH limits.
     #[serde(default)]
     pub ssh_users_enforced: bool,
@@ -559,6 +565,8 @@ struct PeersResponse {
     #[serde(default)]
     shares: Vec<crate::PublishedShare>,
     #[serde(default)]
+    drive: Option<drive::DriveView>,
+    #[serde(default)]
     forward_filter: Option<forward_filter::ForwardFilter>,
     #[serde(default)]
     remote_access: Option<remote::RemoteAccessView>,
@@ -759,6 +767,7 @@ impl Coordinator {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            drive: None,
             ssh_users_enforced: false,
             acl_filter_enforced: false,
             traffic: None,
@@ -857,6 +866,7 @@ impl Coordinator {
         state.relay_expires_at = body.relay_expires_at;
         apply_org_dns_snapshot(state, body.dns);
         state.published_shares = body.shares;
+        state.drive = body.drive;
         forward_filter::adopt(&mut state.forward_filter, body.forward_filter);
         state.remote.view = body.remote_access;
         state.service_access = body.service_access;
@@ -3541,6 +3551,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 0,
             published_shares: vec![],
+            drive: None,
             ssh_users_enforced: false,
             acl_filter_enforced: false,
             traffic: None,
@@ -3632,6 +3643,7 @@ mod tests {
             dns_degraded: None,
             control_revision: 3,
             published_shares: vec![],
+            drive: None,
             ssh_users_enforced: false,
             acl_filter_enforced: false,
             traffic: None,
@@ -3740,6 +3752,7 @@ mod tests {
             dns: None,
             revision: Some(9),
             shares: vec![],
+            drive: None,
             forward_filter: None,
             remote_access: None,
             service_access: vec![],

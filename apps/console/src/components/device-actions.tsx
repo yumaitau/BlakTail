@@ -10,6 +10,7 @@ import {
   updateDeviceFriendlyNameAction,
 } from "@/app/actions";
 import type { AclPerson } from "@/lib/acl";
+import { folderBrowserUrl } from "@/lib/drive";
 import type { NetworkNode } from "@/lib/coord";
 import { can, isOrgRole, roleLabel } from "@/lib/roles";
 import { EmptyState } from "./empty-state";
@@ -451,14 +452,18 @@ function DeviceRow({
                           </span>
                           {share.read_only ? " · read-only" : " · accepts file send"}
                           {share.path ? ` · ${share.path}` : ""}
+                          <br />
+                          <span className="mono">
+                            {folderBrowserUrl(node.dns_name, share.label)}
+                          </span>
                         </li>
                       ))}
                   </ul>
                   <p className="muted">
-                    Reachable over the overlay. Browse the URL or, on a Mac,
-                    Finder → Go → Connect to Server. Policy must allow the
-                    device; the share port is opened for peers that can already
-                    see it.
+                    Reachable over the overlay. On this device the same folder
+                    is also at 127.0.0.1:8080 under the network name. Policy
+                    must allow the device; the share port is opened for peers
+                    that can already see it.
                   </p>
                 </div>
               ) : (

@@ -199,6 +199,40 @@ inspection. To enforce per-user limits, see
 [Linux agent: SSH user policy](linux-agent.md#ssh-user-policy). Homelab proof
 is `deploy/homelab/prove-acl-services.sh`.
 
+## Shared folders
+
+`drive` is optional. Leave it out and an enabled share stays available to
+any device the rest of the policy can already reach. The share's own
+read-only flag still decides whether a file can be sent.
+
+When `drive` is present it fails closed. `share` lists who may publish a
+folder. `access` lists who may open the folder browser on their own device.
+A selector is `*`, a role (`owner`, `admin`, `member`, `network_admin`,
+`auditor`), `tag:office`, `tag:ranger`, `tag:store`, or `group:name`.
+
+`grants` name the shares (`*` or a share name) and `ro` or `rw`.
+`same_user` requires the source and the sharing device to be the same
+person. The most permissive matching grant wins. A share marked read-only
+stays read-only. A grant does not bypass the network policy: a device the
+ACL cannot reach still cannot open the folder.
+
+```json
+"drive": {
+  "share": ["*"],
+  "access": ["*"],
+  "grants": [
+    {
+      "dst_tags": ["store"],
+      "shares": ["company-docs"],
+      "access": "ro"
+    }
+  ]
+}
+```
+
+`share` and `access` must both be non-empty. At most 64 grants. Each grant
+names 1–32 shares. See [drive.md](drive.md).
+
 ## Posture checks
 
 Posture checks are named, versioned definitions per organisation
