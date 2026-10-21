@@ -472,18 +472,7 @@ async fn handle(mut stream: TcpStream, shares: &[CatalogShare]) -> Result<(), Er
             {
                 return write_plain(&mut stream, 403, "Forbidden", "read-only\n").await;
             }
-            proxy(
-                &mut stream,
-                share,
-                &parsed.method,
-                &rest,
-                directory,
-                parsed.depth.as_deref(),
-                parsed.destination.as_deref(),
-                parsed.overwrite.as_deref(),
-                &parsed.body,
-            )
-            .await
+            proxy(&mut stream, share, &parsed, &rest, directory).await
         }
     }
 }
@@ -528,14 +517,12 @@ fn parse_request(raw: &str) -> Option<Request> {
 async fn proxy(
     client: &mut TcpStream,
     share: &CatalogShare,
-    method: &str,
+    parsed: &Request,
     rest: &str,
     directory: bool,
-    depth: Option<&str>,
-    destination: Option<&str>,
-    overwrite: Option<&str>,
-    body: &[u8],
 ) -> Result<(), Error> {
+    let method = parsed.method.as_str();
+    let body = &parsed.body;
     let origin_path = if rest.is_empty() {
         format!("/{}/", share.label)
     } else if directory {
@@ -547,16 +534,16 @@ async fn proxy(
         "{method} {origin_path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
         share.origin
     );
-    if let Some(depth) = depth {
+    if let Some(depth) = &parsed.depth {
         request.push_str(&format!("Depth: {depth}\r\n"));
     }
-    if let Some(destination) = destination {
+    if let Some(destination) = &parsed.destination {
         let Some(rewritten) = rewrite_destination(destination, share) else {
             return write_plain(client, 403, "Forbidden", "forbidden\n").await;
         };
         request.push_str(&format!("Destination: {rewritten}\r\n"));
     }
-    if let Some(overwrite) = overwrite {
+    if let Some(overwrite) = &parsed.overwrite {
         request.push_str(&format!("Overwrite: {overwrite}\r\n"));
     }
     if !body.is_empty() || method == "PUT" {
