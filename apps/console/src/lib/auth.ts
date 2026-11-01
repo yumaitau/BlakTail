@@ -27,6 +27,16 @@ export const auth = betterAuth({
       twoFactor: schema.twoFactor,
     },
   }),
+  account: {
+    additionalFields: {
+      issuer: {
+        type: "string",
+        required: false,
+        input: false,
+        defaultValue: "local:credential",
+      },
+    },
+  },
   emailAndPassword: {
     enabled: true,
     disableSignUp: true,

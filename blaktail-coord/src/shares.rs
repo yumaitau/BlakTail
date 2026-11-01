@@ -218,7 +218,7 @@ fn acceptable_share_path(path: &str) -> bool {
         .or_else(|| path.strip_prefix("//?/"))
         .unwrap_or(path);
     let unix = stripped.starts_with('/');
-    let windows = stripped.as_bytes().len() >= 3
+    let windows = stripped.len() >= 3
         && stripped.as_bytes()[0].is_ascii_alphabetic()
         && stripped.as_bytes()[1] == b':'
         && matches!(stripped.as_bytes()[2], b'\\' | b'/');

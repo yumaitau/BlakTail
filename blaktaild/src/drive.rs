@@ -525,6 +525,7 @@ fn parse_request(raw: &str) -> Option<Request> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy(
     client: &mut TcpStream,
     share: &CatalogShare,
