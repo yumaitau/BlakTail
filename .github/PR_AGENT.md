@@ -24,6 +24,9 @@ revoked in OpenCode **Settings > Service accounts > Yuma PR-Agent reviews**.
 
 ## Review model and events
 
+Go requests identify PR-Agent and carry a stable per-PR `x-opencode-session` header
+for routing and prompt caching. Manual verification uses a separate session per run.
+
 Reviews use `openai/glm-5.3` through the [OpenCode Go endpoint](https://opencode.ai/v2/docs/console/go/),
 `https://opencode.ai/inference/go/openai/v1`. An active Go subscription and remaining
 allowance are required. Fallbacks are disabled; requests use a

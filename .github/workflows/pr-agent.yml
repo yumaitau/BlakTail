@@ -128,13 +128,15 @@ jobs:
           request = urllib.request.Request(
               "https://opencode.ai/inference/go/openai/v1/chat/completions",
               data=json.dumps({"model": "glm-5.3", "messages": [{"role": "user", "content": "Reply with exactly OK."}], "max_tokens": 128}).encode(),
-              headers={"Authorization": "Bearer " + os.environ["OPENCODE_API_KEY"], "Content-Type": "application/json", "User-Agent": "Yuma-PR-Agent/1.0"},
+              headers={"Authorization": "Bearer " + os.environ["OPENCODE_API_KEY"], "Content-Type": "application/json", "User-Agent": "Yuma-PR-Agent/1.0", "x-opencode-session": f"pr-agent-{os.environ['GITHUB_REPOSITORY_ID']}-verify-{os.environ['GITHUB_RUN_ID']}"},
           )
           try:
               with urllib.request.urlopen(request, timeout=120) as response:
                   result = json.load(response)
               if not result.get("choices"):
                   raise ValueError("Missing completion choices")
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f"GLM-5.3 verification failed (HTTP {error.code}). Check the OpenCode request log and Go allowance.") from None
           except (urllib.error.URLError, ValueError):
               raise SystemExit("GLM-5.3 verification failed. Check OpenCode authentication and Go allowance.") from None
           print("OpenCode Go accepted the short-lived OIDC token for GLM-5.3.")
@@ -148,6 +150,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OPENAI_KEY: ${{ env.OPENCODE_API_KEY }}
           OPENAI.API_BASE: https://opencode.ai/inference/go/openai/v1
+          LITELLM.EXTRA_HEADERS: >-
+            {"User-Agent":"Yuma-PR-Agent/1.0","x-opencode-session":"pr-agent-${{ github.repository_id }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}"}
           CONFIG.MODEL: openai/glm-5.3
           CONFIG.MODEL_WEAK: openai/glm-5.3
           CONFIG.FALLBACK_MODELS: '[]'
