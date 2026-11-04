@@ -1,0 +1,86 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft) ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        (github.event.comment.body == '/review' ||
+         github.event.comment.body == '/describe' ||
+         github.event.comment.body == '/improve' ||
+         startsWith(github.event.comment.body, '/ask '))))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check OpenCode key and PR eligibility
+        id: eligibility
+        env:
+          # Placeholder: add your OpenCode Go workspace key as this Actions secret.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          enabled = bool(os.environ.get("OPENCODE_API_KEY"))
+          if not enabled:
+              print("::notice::PR Agent is inactive. Add the OPENCODE_API_KEY Actions secret with an OpenCode Go key.")
+          if enabled and os.environ["GITHUB_EVENT_NAME"] == "issue_comment":
+              with open(os.environ["GITHUB_EVENT_PATH"]) as event_file:
+                  event = json.load(event_file)
+              base = os.environ["GITHUB_API_URL"]
+              repo = os.environ["GITHUB_REPOSITORY"]
+              headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json"}
+              request = urllib.request.Request(f"{base}/repos/{repo}/pulls/{event['issue']['number']}", headers=headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  pr = json.load(response)
+              enabled = pr["state"] == "open" and not pr["draft"] and (pr["head"].get("repo") or {}).get("full_name") == repo
+              if not enabled:
+                  print("::notice::PR Agent only handles open, non-draft, same-repository pull requests.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"enabled={str(enabled).lower()}\n")
+          PY
+
+      # PR-Agent fetches the diff through GitHub's API; no source checkout needed.
+      - name: Review with OpenCode Go
+        if: steps.eligibility.outputs.enabled == 'true'
+        uses: docker://pragent/pr-agent@sha256:b1ed6e8de56eb4d6e4169ee0d5c209bb5ed1ef071a01c0c042c64b80192a785c # 0.49.0-github_action
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENAI.API_BASE: https://opencode.ai/inference/go/openai/v1
+          CONFIG.MODEL: ${{ vars.PR_AGENT_MODEL || 'openai/kimi-k3' }}
+          CONFIG.MODEL_WEAK: ${{ vars.PR_AGENT_MODEL || 'openai/kimi-k3' }}
+          CONFIG.FALLBACK_MODELS: '[]'
+          CONFIG.CUSTOM_MODEL_MAX_TOKENS: '32000'
+          CONFIG.RESTRICTED_MODE: 'true'
+          GITHUB_ACTION_CONFIG.AUTO_REVIEW: 'true'
+          GITHUB_ACTION_CONFIG.AUTO_DESCRIBE: 'false'
+          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: 'false'
+          GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER: 'true'
+          GITHUB_ACTION_CONFIG.PUSH_COMMANDS: '["/review"]'
