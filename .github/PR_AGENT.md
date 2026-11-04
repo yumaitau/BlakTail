@@ -16,7 +16,7 @@ Automatic reviews leave the PR title, description and code unchanged.
 
 The workflow skips the agent with a notice until the secret is set. It uses the
 [OpenCode Go OpenAI-compatible endpoint](https://opencode.ai/docs/go/),
-`https://opencode.ai/inference/go/openai/v1`, with `openai/kimi-k3` by default.
+`https://opencode.ai/inference/go/openai/v1`, with `openai/glm-5.3` by default.
 PR-Agent's `OPENAI_KEY` variable receives the OpenCode key; no OpenAI key is needed.
 Optionally set the Actions variable `PR_AGENT_MODEL` to another Go Chat Completions
 model with the `openai/` prefix. Fallbacks are disabled, and requests use a

@@ -74,8 +74,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
           OPENAI.API_BASE: https://opencode.ai/inference/go/openai/v1
-          CONFIG.MODEL: ${{ vars.PR_AGENT_MODEL || 'openai/kimi-k3' }}
-          CONFIG.MODEL_WEAK: ${{ vars.PR_AGENT_MODEL || 'openai/kimi-k3' }}
+          CONFIG.MODEL: ${{ vars.PR_AGENT_MODEL || 'openai/glm-5.3' }}
+          CONFIG.MODEL_WEAK: ${{ vars.PR_AGENT_MODEL || 'openai/glm-5.3' }}
           CONFIG.FALLBACK_MODELS: '[]'
           CONFIG.CUSTOM_MODEL_MAX_TOKENS: '32000'
           CONFIG.RESTRICTED_MODE: 'true'
