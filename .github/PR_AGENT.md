@@ -1,8 +1,8 @@
 # PR-Agent with OpenCode Go
 
 PR-Agent reviews same-repository pull requests targeting `main` when opened,
-reopened, marked ready for review, or updated. Drafts, forks and bot events are
-skipped. Automatic reviews leave the title, description and code unchanged.
+reopened, marked ready for review, or updated. Drafts and forks are skipped. Same-repository PRs from people, Dependabot and
+Factory are eligible; bot-authored comments are ignored to prevent loops. Automatic reviews leave the title, description and code unchanged.
 
 ## Authentication
 
@@ -43,6 +43,14 @@ From GitHub **Actions > PR Agent > Run workflow**, run the workflow on `main`.
 This exchanges a fresh OIDC token and sends a small, non-sensitive GLM-5.3 request
 through Go. It posts no PR comments. A green run confirms authentication and model
 access; real PR events exercise the review path.
+
+## Existing pull requests
+
+Installation does not automatically review PRs that are already open. A trusted
+user can post `/review` to request a review without changing or reopening the PR.
+
+PR-Agent can skip PRs with no analyzable files, such as changes only to ignored
+lockfiles. A green job alone does not prove that a review comment was published.
 
 ## Commands
 
