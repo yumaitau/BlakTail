@@ -1,8 +1,10 @@
 name: PR Agent
 
-on:
-  pull_request:
+on: # zizmor: ignore[dangerous-triggers] -- Main-only OIDC; API-only review with no PR checkout or execution.
+  pull_request_target:
+    branches: [main]
     types: [opened, reopened, ready_for_review, synchronize]
+  workflow_dispatch:
   issue_comment:
     types: [created]
 
@@ -16,8 +18,10 @@ concurrency:
 jobs:
   review:
     if: >-
+      github.ref == 'refs/heads/main' &&
       github.event.sender.type != 'Bot' &&
-      ((github.event_name == 'pull_request' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request_target' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft) ||
        (github.event_name == 'issue_comment' &&
@@ -33,12 +37,12 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+      id-token: write
     steps:
-      - name: Check OpenCode key and PR eligibility
+      - name: Check OIDC configuration and PR eligibility
         id: eligibility
         env:
-          # Placeholder: add your OpenCode Go workspace key as this Actions secret.
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_OIDC_CLIENT_ID: ${{ vars.OPENCODE_OIDC_CLIENT_ID }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -47,9 +51,9 @@ jobs:
           import os
           import urllib.request
 
-          enabled = bool(os.environ.get("OPENCODE_API_KEY"))
+          enabled = bool(os.environ.get("OPENCODE_OIDC_CLIENT_ID"))
           if not enabled:
-              print("::notice::PR Agent is inactive. Add the OPENCODE_API_KEY Actions secret with an OpenCode Go key.")
+              print("::notice::PR Agent is inactive. Set the OPENCODE_OIDC_CLIENT_ID Actions variable after configuring OpenCode trust.")
           if enabled and os.environ["GITHUB_EVENT_NAME"] == "issue_comment":
               with open(os.environ["GITHUB_EVENT_PATH"]) as event_file:
                   event = json.load(event_file)
@@ -66,16 +70,86 @@ jobs:
               output.write(f"enabled={str(enabled).lower()}\n")
           PY
 
+      - name: Sign in to OpenCode with GitHub OIDC
+        if: steps.eligibility.outputs.enabled == 'true'
+        env:
+          OPENCODE_OIDC_CLIENT_ID: ${{ vars.OPENCODE_OIDC_CLIENT_ID }}
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          try:
+              audience = urllib.parse.quote("https://opencode.ai/console", safe="")
+              request = urllib.request.Request(
+                  os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=" + audience,
+                  headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  oidc = json.load(response)["value"]
+              print("::add-mask::" + oidc)
+              body = urllib.parse.urlencode({
+                  "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                  "client_id": os.environ["OPENCODE_OIDC_CLIENT_ID"],
+                  "subject_token": oidc,
+              }).encode()
+              request = urllib.request.Request(
+                  "https://opencode.ai/console/auth/oauth/token", data=body,
+                  headers={"Content-Type": "application/x-www-form-urlencoded"},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  token = json.load(response)["access_token"]
+              if not isinstance(token, str) or not token or any(c in token for c in "\r\n"):
+                  raise ValueError("Invalid access token")
+              print("::add-mask::" + token)
+              with open(os.environ["GITHUB_ENV"], "a") as output:
+                  output.write("OPENCODE_API_KEY=" + token + "\n")
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f"OpenCode OIDC sign-in failed (HTTP {error.code}). Check repository and main-branch trust.") from None
+          except (KeyError, ValueError, urllib.error.URLError):
+              raise SystemExit("OpenCode OIDC sign-in failed. No usable short-lived token was returned.") from None
+          PYCODE
+
+      - name: Verify GLM-5.3 authentication
+        if: github.event_name == 'workflow_dispatch' && steps.eligibility.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          request = urllib.request.Request(
+              "https://opencode.ai/inference/go/openai/v1/chat/completions",
+              data=json.dumps({"model": "glm-5.3", "messages": [{"role": "user", "content": "Reply with exactly OK."}], "max_tokens": 128}).encode(),
+              headers={"Authorization": "Bearer " + os.environ["OPENCODE_API_KEY"], "Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  result = json.load(response)
+              if not result.get("choices"):
+                  raise ValueError("Missing completion choices")
+          except (urllib.error.URLError, ValueError):
+              raise SystemExit("GLM-5.3 verification failed. Check OpenCode authentication and Go allowance.") from None
+          print("OpenCode Go accepted the short-lived OIDC token for GLM-5.3.")
+          PYCODE
+
       # PR-Agent fetches the diff through GitHub's API; no source checkout needed.
       - name: Review with OpenCode Go
-        if: steps.eligibility.outputs.enabled == 'true'
+        if: github.event_name != 'workflow_dispatch' && steps.eligibility.outputs.enabled == 'true'
         uses: docker://pragent/pr-agent@sha256:b1ed6e8de56eb4d6e4169ee0d5c209bb5ed1ef071a01c0c042c64b80192a785c # 0.49.0-github_action
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENAI_KEY: ${{ env.OPENCODE_API_KEY }}
           OPENAI.API_BASE: https://opencode.ai/inference/go/openai/v1
-          CONFIG.MODEL: ${{ vars.PR_AGENT_MODEL || 'openai/glm-5.3' }}
-          CONFIG.MODEL_WEAK: ${{ vars.PR_AGENT_MODEL || 'openai/glm-5.3' }}
+          CONFIG.MODEL: openai/glm-5.3
+          CONFIG.MODEL_WEAK: openai/glm-5.3
           CONFIG.FALLBACK_MODELS: '[]'
           CONFIG.CUSTOM_MODEL_MAX_TOKENS: '32000'
           CONFIG.RESTRICTED_MODE: 'true'

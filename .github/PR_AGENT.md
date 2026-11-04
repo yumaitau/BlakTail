@@ -1,37 +1,55 @@
 # PR-Agent with OpenCode Go
 
-PR-Agent reviews same-repository pull requests when opened, reopened, marked ready
-for review, or updated. Drafts, fork pull requests and bot events are skipped.
-Automatic reviews leave the PR title, description and code unchanged.
+PR-Agent reviews same-repository pull requests targeting `main` when opened,
+reopened, marked ready for review, or updated. Drafts, forks and bot events are
+skipped. Automatic reviews leave the title, description and code unchanged.
 
-## Activate
+## Authentication
 
-1. Create an API key in an OpenCode workspace with an active **Go** subscription.
-2. In GitHub, open **Settings > Secrets and variables > Actions** and create the
-   repository secret `OPENCODE_API_KEY`. Alternatively, grant this repository access
-   to an organisation Actions secret with the same name.
-3. Fill the secret placeholder by supplying the key in GitHub; never
-   put the value in the workflow, a local tracked file, a PR comment or an issue.
-4. Open a non-draft PR or push another commit to one after this workflow is merged.
+GitHub Actions authenticates to OpenCode with OIDC. No long-lived API key or
+GitHub Actions secret is needed. Each job requests a GitHub identity token for
+`https://opencode.ai/console`, then exchanges it at
+`https://opencode.ai/console/auth/oauth/token` for a one-hour inference token.
+Both tokens are masked; the access token is passed to PR-Agent only for this job.
 
-The workflow skips the agent with a notice until the secret is set. It uses the
-[OpenCode Go OpenAI-compatible endpoint](https://opencode.ai/docs/go/),
-`https://opencode.ai/inference/go/openai/v1`, with `openai/glm-5.3` by default.
-PR-Agent's `OPENAI_KEY` variable receives the OpenCode key; no OpenAI key is needed.
-Optionally set the Actions variable `PR_AGENT_MODEL` to another Go Chat Completions
-model with the `openai/` prefix. Fallbacks are disabled, and requests use a
+The OpenCode service account **Yuma PR-Agent reviews** grants **Models: Request**
+only. Each repository has a separate credential pinned to its immutable repository
+ID, organisation owner ID and `main` branch. Billing, workspace administration and
+credential-management permissions are not granted.
+
+The non-secret Actions variable `OPENCODE_OIDC_CLIENT_ID` selects that repository's
+OpenCode credential. Its `sk_...` value is a public client identifier, not an API
+key. The workflow skips with a notice if the variable is missing. Trust can be
+revoked in OpenCode **Settings > Service accounts > Yuma PR-Agent reviews**.
+
+## Review model and events
+
+Reviews use `openai/glm-5.3` through the [OpenCode Go endpoint](https://opencode.ai/v2/docs/console/go/),
+`https://opencode.ai/inference/go/openai/v1`. An active Go subscription and remaining
+allowance are required. Fallbacks are disabled; requests use a
 conservative 32,000-token context limit.
+
+`pull_request_target` runs the workflow from trusted `main`, which matches the
+OIDC branch trust. It fetches the PR diff through GitHub's API without checking
+out or executing PR code. Fork PRs are rejected before authentication. Do not add
+PR checkouts, builds or scripts to this privileged workflow.
+
+## Verify authentication
+
+From GitHub **Actions > PR Agent > Run workflow**, run the workflow on `main`.
+This exchanges a fresh OIDC token and sends a small, non-sensitive GLM-5.3 request
+through Go. It posts no PR comments. A green run confirms authentication and model
+access; real PR events exercise the review path.
 
 ## Commands
 
 On an open, non-draft PR from this repository, owners, members and collaborators
 can post `/review`, `/describe`, `/improve`, or `/ask <question>`. Other comments
-are ignored. `/describe` can update the PR description; `/improve` posts suggestions.
-Restricted mode and a read-only contents token prevent code pushes.
+are ignored. `/describe` can update the description; `/improve` posts suggestions.
+Restricted mode and read-only contents permission prevent code pushes.
 
-The workflow fetches PR data through GitHub's API without checking out or executing
-PR code. PR diffs and context are sent to OpenCode Go for review. The PR-Agent
-0.49.0 GitHub Action container is pinned by digest; update the digest deliberately
-when upgrading. This public repository uses GitHub-hosted Ubuntu runners with Docker and Python 3.
+The PR-Agent 0.49.0 GitHub Action container is pinned by digest. Review and update
+the digest deliberately when upgrading. PR diffs and context are sent to OpenCode
+Go for review. This public repository uses GitHub-hosted Ubuntu runners with Docker and Python 3.
 
 Upstream: <https://github.com/The-PR-Agent/pr-agent>.
