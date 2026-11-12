@@ -445,6 +445,16 @@ fn is_blocked_ip(ip: IpAddr, allow_private: bool) -> bool {
     if is_metadata_ip(ip) {
         return true;
     }
+    // Translation and tunnelling prefixes carry an IPv4 address that a
+    // gateway on the path will reach; hold it to the IPv4 rules.
+    if let IpAddr::V6(value) = ip {
+        if embedded_ipv4(value)
+            .into_iter()
+            .any(|v4| is_blocked_ip(IpAddr::V4(v4), allow_private))
+        {
+            return true;
+        }
+    }
     if allow_private {
         return false;
     }
@@ -475,7 +485,25 @@ fn is_blocked_ip(ip: IpAddr, allow_private: bool) -> bool {
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
                 // IPv4-compatible (deprecated) addresses.
                 || segments[..6].iter().all(|segment| *segment == 0)
+                // Local-use NAT64 (RFC 8215) only reaches a site's own IPv4.
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001)
         }
+    }
+}
+
+/// IPv4 addresses embedded in NAT64 (64:ff9b::/96), 6to4 (2002::/16) and
+/// Teredo (2001::/32: server, and the obfuscated client) IPv6 addresses.
+fn embedded_ipv4(ip: Ipv6Addr) -> Vec<Ipv4Addr> {
+    let s = ip.segments();
+    let pair = |high: u16, low: u16| Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+    if s[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        vec![pair(s[6], s[7])]
+    } else if s[0] == 0x2002 {
+        vec![pair(s[1], s[2])]
+    } else if s[0] == 0x2001 && s[1] == 0 {
+        vec![pair(s[2], s[3]), pair(!s[6], !s[7])]
+    } else {
+        Vec::new()
     }
 }
 
@@ -919,6 +947,31 @@ mod tests {
                 "{metadata}"
             );
         }
+        // NAT64, 6to4 and Teredo addresses are judged by their IPv4 address.
+        for tunnelled in [
+            "https://[64:ff9b::7f00:1]/hook",
+            "https://[64:ff9b::a9fe:a9fe]/latest",
+            "https://[64:ff9b::a01:203]/hook",
+            "https://[64:ff9b:1::cb00:7101]/hook",
+            "https://[2002:a00:1::1]/hook",
+            "https://[2002:7f00:1::]/hook",
+            // Teredo with server 192.168.0.1, then with client 10.0.0.1
+            // (stored inverted as f5ff:fffe).
+            "https://[2001:0:c0a8:1::1]/hook",
+            "https://[2001:0:101:101::f5ff:fffe]/hook",
+        ] {
+            assert!(
+                validate_destination_url(tunnelled, false).is_err(),
+                "{tunnelled} must be rejected"
+            );
+        }
+        assert!(validate_destination_url("https://[64:ff9b::a9fe:a9fe]/latest", true).is_err());
+        // Public IPv4 (1.1.1.1) behind the same prefixes is fine.
+        assert!(validate_destination_url("https://[64:ff9b::101:101]/hook", false).is_ok());
+        assert!(validate_destination_url("https://[2002:101:101::1]/hook", false).is_ok());
+        assert!(
+            validate_destination_url("https://[2001:0:101:101::fefe:fefe]/hook", false).is_ok()
+        );
         assert!(validate_destination_url("https://[2606:4700::1111]/hook", false).is_ok());
         assert!(validate_destination_url("https://hooks.example.org/x", false).is_ok());
     }
