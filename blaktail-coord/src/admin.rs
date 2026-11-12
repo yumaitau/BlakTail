@@ -733,6 +733,16 @@ pub(crate) async fn oauth_token(
     if requested.iter().any(|scope| !scopes.contains(scope)) {
         return Err(OAuthError::invalid_scope());
     }
+    // RFC 6749 s3.3: the token carries what was asked for (a subset of the
+    // client's scopes), or the client's full scope when none was requested.
+    let scopes: Vec<Scope> = if requested.is_empty() {
+        scopes
+    } else {
+        scopes
+            .into_iter()
+            .filter(|scope| requested.contains(scope))
+            .collect()
+    };
     if !s.api_rate.allow(
         &client_id.to_string(),
         current_time,

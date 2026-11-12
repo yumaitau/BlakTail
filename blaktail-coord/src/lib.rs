@@ -10926,7 +10926,8 @@ mod tests {
         assert_ne!(access_token, created.token);
         assert!(access_token.starts_with("bto_"));
         assert_eq!(token["token_type"], "Bearer");
-        assert_eq!(token["scope"], "devices:read status:read");
+        // Only the requested subset is granted, not the client's full scope.
+        assert_eq!(token["scope"], "status:read");
         assert_eq!(token["organisation_id"], org.id.to_string());
         assert_eq!(token["expires_in"].as_i64().unwrap(), 3600);
         let stored_hash: String =
@@ -10984,6 +10985,33 @@ mod tests {
             .to_string();
         assert_ne!(second_access, access_token);
         assert!(second_access.starts_with("bto_"));
+        // No scope requested: the client's full scope.
+        assert_eq!(via_basic_token["scope"], "devices:read status:read");
+        let devices = |token: &str| {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/devices")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-blaktail-organisation", org.id.to_string())
+                .body(Body::from("null"))
+                .unwrap()
+        };
+        assert_eq!(
+            r.clone()
+                .oneshot(devices(&access_token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            r.clone()
+                .oneshot(devices(&second_access))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
 
         let denied = r
             .clone()
