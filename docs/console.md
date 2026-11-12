@@ -230,8 +230,13 @@ bun --filter @blaktail/console bootstrap -- recover-owner \
   --password-file ./new-owner-password
 ```
 
-Recovery requires the exact sole-owner email, rotates that credential, revokes all
-existing sessions, and writes an audit event.
+Recovery requires the exact sole-owner email, rotates that credential, removes the
+owner's single sign-on bindings (`external_identity` rows and OIDC account rows)
+and pending SSO links, turns off two-step verification and deletes its secret and
+backup codes, revokes the sessions of the owner and of every login identity linked
+to the same person, and writes an audit event with each count. Sign in with the new
+password, turn two-step verification back on, then review **Settings, Ways to sign
+in** and unlink anything you do not recognise.
 
 ## Linked login identities and network accounts
 

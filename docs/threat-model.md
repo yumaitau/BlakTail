@@ -175,7 +175,9 @@ These are not optional hardening. They are the v1 bar.
    organisation activation is staged until console identity is ready, and
    bootstrap locks after one success. Later users require owner-issued,
    organisation-bound invitations. Sole-owner recovery requires the exact owner
-   email from a trusted host and revokes existing sessions.
+   email from a trusted host, rotates the password, removes the owner's
+   single sign-on bindings and two-step verification, revokes the sessions of
+   every login identity linked to the owner, and audits each count.
 
 ## Honest limits
 
