@@ -264,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => unreachable!("validated coordinator database backend"),
     };
+    blaktail_coord::check_diagnostics_exposure(metrics_bind, diagnostics_token.as_deref())?;
     let metrics = Arc::new(CoordMetrics::default());
     let metrics_listener = tokio::net::TcpListener::bind(metrics_bind).await?;
     let metrics_router =

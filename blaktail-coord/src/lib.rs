@@ -1623,6 +1623,24 @@ struct MetricsState {
     diagnostics_token: Arc<[u8]>,
 }
 
+/// Diagnostics without a token are only acceptable on loopback. Config
+/// validation already enforces this; the listener checks again so a missing
+/// or empty token can never serve metrics on another interface.
+pub fn check_diagnostics_exposure(
+    bind: SocketAddr,
+    diagnostics_token: Option<&[u8]>,
+) -> Result<(), String> {
+    if bind.ip().is_loopback() {
+        return Ok(());
+    }
+    match diagnostics_token {
+        Some(token) if token.len() >= 32 => Ok(()),
+        _ => Err(format!(
+            "metrics bind {bind} is not loopback, so coordinator.diagnostics_token (at least 32 bytes) is required"
+        )),
+    }
+}
+
 pub fn metrics_app(store: Store, metrics: Arc<CoordMetrics>) -> Router {
     metrics_app_with_token(store, metrics, None)
 }
@@ -8313,6 +8331,21 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+    }
+
+    #[test]
+    fn diagnostics_need_a_token_off_loopback() {
+        let token = b"coordinator-diagnostics-token-at-least-32-bytes";
+        for bind in ["127.0.0.1:9701", "[::1]:9701"] {
+            assert!(check_diagnostics_exposure(bind.parse().unwrap(), None).is_ok());
+        }
+        for bind in ["0.0.0.0:9701", "10.0.0.5:9701", "[::]:9701"] {
+            let bind = bind.parse().unwrap();
+            assert!(check_diagnostics_exposure(bind, None).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(b"")).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(b"short")).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(token)).is_ok());
+        }
     }
 
     #[tokio::test]
