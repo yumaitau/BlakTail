@@ -230,6 +230,7 @@ describe("coordinator writes", () => {
   test("only coord.ts signs coordinator requests, so every write passes the MFA gate", () => {
     const src = new URL("../src/", import.meta.url);
     const signers = readdirSync(src, { recursive: true })
+      .map((name) => String(name).replaceAll("\\", "/"))
       .filter((name) => /\.tsx?$/.test(name))
       .filter((name) => /signCoordAssertion\(/.test(readFileSync(new URL(name, src), "utf8")));
     expect(signers.sort()).toEqual(["lib/coord-assertion.ts", "lib/coord.ts"]);
