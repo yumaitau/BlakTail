@@ -91,15 +91,23 @@ Settings, Sign-in policy is per organisation and owner-only.
   sessions get a clear refusal (audited as `auth.step_up_required`); sign out
   and in again. The window is read for the organisation being changed, so a
   session that satisfies a lax organisation never satisfies a stricter one.
-- **Require two-step verification for owners and admins.** Applies to password
-  sign-ins. Affected people can still sign in and enrol; every coordinator
-  write and every security change is refused until they do. An owner signed in
-  with a password must have two-step verification on before turning this on. SSO identities rely on the
-  identity provider's own MFA policy; BlakTail does not see or add a second
-  factor to SSO. Because a person's role is merged across linked identities,
-  an SSO sign-in is exempt only while none of their identities with a
-  membership in that organisation has a password; otherwise privileged writes
-  need the password sign-in with two-step verification.
+- **Require two-step verification for owners and admins.** Judged per
+  session: each session records at creation how it signed in (`password`,
+  `password_mfa` after a TOTP or recovery code, or `sso`), and only a
+  `password_mfa` session satisfies the rule. Having TOTP enrolled is not
+  enough if this session did not present it. Affected people can still sign
+  in and enrol; every coordinator write and every security change is refused
+  until they use a qualifying session. Sessions created before this was
+  recorded have no method and must sign in again. The owner saving the policy
+  must already be in a qualifying session. Because each linked identity's
+  session is judged on its own sign-in, a weaker linked identity cannot borrow
+  a privileged role.
+- **Accept single sign-on as two-step verification.** Off by default, including
+  for organisations that turned on the MFA rule before this setting existed.
+  When on, an `sso` session also satisfies the MFA rule, trusting the identity
+  provider's own MFA; BlakTail cannot see or add a second factor to SSO. Turn it
+  on only if the provider enforces MFA for everyone who can reach the
+  organisation.
 
 ## Two-step verification (TOTP)
 

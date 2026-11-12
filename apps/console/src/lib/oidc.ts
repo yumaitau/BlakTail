@@ -570,7 +570,9 @@ export async function establishConsoleSession(userId: string): Promise<{
   maxAge: number;
 }> {
   const ctx = await auth.$context;
-  const session = (await ctx.internalAdapter.createSession(userId)) as {
+  const session = (await ctx.internalAdapter.createSession(userId, false, {
+    authMethod: "sso",
+  })) as {
     token?: string;
   } | null;
   if (!session?.token) {

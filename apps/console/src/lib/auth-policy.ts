@@ -25,13 +25,14 @@ export { AssuranceError } from "./auth-policy-core";
 export async function getSignInPolicy(organisationId: string): Promise<SignInPolicy> {
   const sql = rawSqlClient();
   const [row] = await sql`
-    SELECT step_up_max_age_minutes, require_mfa_for_privileged
+    SELECT step_up_max_age_minutes, require_mfa_for_privileged, trust_idp_mfa
     FROM organisation_sign_in_policy WHERE organisation_id = ${organisationId}
   `;
   if (!row) return DEFAULT_SIGN_IN_POLICY;
   return {
     stepUpMaxAgeMinutes: row.step_up_max_age_minutes ?? null,
     requireMfaForPrivileged: row.require_mfa_for_privileged === true,
+    trustIdpMfa: row.trust_idp_mfa === true,
   };
 }
 
@@ -55,27 +56,18 @@ export async function identityAssurance(
   };
 }
 
-/** The other identities whose memberships merge into this organisation role. */
-async function linkedAssurance(
-  ctx: Pick<ConsoleContext, "userId" | "identityUserIds">,
-): Promise<IdentityAssurance[]> {
-  return Promise.all(
-    ctx.identityUserIds
-      .filter((userId) => userId !== ctx.userId)
-      .map((userId) => identityAssurance(userId)),
-  );
-}
-
+/** Judged on how this session signed in, not on what the account has enrolled. */
 async function personMfaRefusal(
   policy: SignInPolicy,
   ctx: ConsoleContext,
 ): Promise<string | null> {
   if (!policy.requireMfaForPrivileged) return null;
-  const [identity, linked] = await Promise.all([
-    identityAssurance(ctx.userId),
-    linkedAssurance(ctx),
-  ]);
-  return mfaRefusal(policy, ctx.role, identity, linked);
+  return mfaRefusal(
+    policy,
+    ctx.role,
+    { authMethod: ctx.sessionAuthMethod },
+    await identityAssurance(ctx.userId),
+  );
 }
 
 /** MFA policy for any coordinator write made by a privileged role. */
@@ -128,7 +120,7 @@ export async function saveSignInPolicy(
     const refusal = await personMfaRefusal(next, ctx);
     if (refusal) {
       throw new Error(
-        "Turn on two-step verification for your own sign-in before requiring it for owners and admins.",
+        `Your own session would not meet this policy, so it is not saved. ${refusal}`,
       );
     }
   }
@@ -136,14 +128,15 @@ export async function saveSignInPolicy(
   await sql`
     INSERT INTO organisation_sign_in_policy (
       organisation_id, step_up_max_age_minutes, require_mfa_for_privileged,
-      updated_by_user_id, updated_at
+      trust_idp_mfa, updated_by_user_id, updated_at
     ) VALUES (
       ${ctx.organisationId}, ${next.stepUpMaxAgeMinutes},
-      ${next.requireMfaForPrivileged}, ${ctx.userId}, now()
+      ${next.requireMfaForPrivileged}, ${next.trustIdpMfa}, ${ctx.userId}, now()
     )
     ON CONFLICT (organisation_id) DO UPDATE SET
       step_up_max_age_minutes = excluded.step_up_max_age_minutes,
       require_mfa_for_privileged = excluded.require_mfa_for_privileged,
+      trust_idp_mfa = excluded.trust_idp_mfa,
       updated_by_user_id = excluded.updated_by_user_id,
       updated_at = now()
   `;
@@ -160,6 +153,7 @@ export async function saveSignInPolicy(
     details: {
       step_up_max_age_minutes: next.stepUpMaxAgeMinutes,
       require_mfa_for_privileged: next.requireMfaForPrivileged,
+      trust_idp_mfa: next.trustIdpMfa,
     },
   });
 }

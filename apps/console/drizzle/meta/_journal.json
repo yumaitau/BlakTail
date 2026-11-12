@@ -78,6 +78,13 @@
       "when": 1791273600000,
       "tag": "0010_oidc_login_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791360000000,
+      "tag": "0011_session_auth_method",
+      "breakpoints": true
     }
   ]
 }

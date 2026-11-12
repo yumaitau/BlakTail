@@ -1,6 +1,7 @@
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { auth, type Session } from "./auth";
+import { parseSessionAuthMethod, type SessionAuthMethod } from "./auth-policy-core";
 import { requireBootstrapLocked } from "./bootstrap-state";
 import { rawSqlClient } from "./db/client";
 import { resolveOrganisationRole, type OrgRole } from "./roles";
@@ -48,6 +49,8 @@ export type PersonSessionContext = {
   sessionExpiresAt: Date;
   /** When this session was created by a sign-in. Drives step-up checks. */
   sessionCreatedAt: Date;
+  /** How this session signed in. Drives the privileged-role MFA rule. */
+  sessionAuthMethod: SessionAuthMethod | null;
   organisations: OrganisationAccess[];
   blockedOrganisations: BlockedOrganisation[];
 };
@@ -181,6 +184,9 @@ export async function resolveSessionContext(
     identityName: session.user.name,
     sessionExpiresAt,
     sessionCreatedAt: new Date(session.session.createdAt),
+    sessionAuthMethod: parseSessionAuthMethod(
+      (session.session as { authMethod?: unknown }).authMethod,
+    ),
     organisations,
     blockedOrganisations,
   };

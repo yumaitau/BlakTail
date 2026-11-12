@@ -62,6 +62,7 @@ export function SignInSecurity({
           }
           setErrors({});
           if (!form.get("requireMfaForPrivileged")) form.set("requireMfaForPrivileged", "false");
+          if (!form.get("trustIdpMfa")) form.set("trustIdpMfa", "false");
           setBusy("policy");
           startTransition(async () => {
             const result = await saveSignInPolicyAction(form);
@@ -97,10 +98,26 @@ export function SignInSecurity({
             disabled={locked}
           />
           <span>
-            Require two-step verification for owners and admins who sign in with a password
+            Require two-step verification for owners and admins
             <span className="muted">
-              Without it they can still sign in and turn it on, but can&apos;t make changes. Single
-              sign-on relies on the identity provider&apos;s own multi-factor rules.
+              Checked per session: only a sign-in that used a two-step code counts. Without it they
+              can still sign in and turn it on, but can&apos;t make changes.
+            </span>
+          </span>
+        </label>
+        <label className="check-option">
+          <input
+            type="checkbox"
+            name="trustIdpMfa"
+            value="true"
+            defaultChecked={policy.trustIdpMfa}
+            disabled={locked}
+          />
+          <span>
+            Accept single sign-on as two-step verification
+            <span className="muted">
+              Only if your identity provider enforces its own multi-factor sign-in for everyone who
+              can reach this organisation. BlakTail can&apos;t check that.
             </span>
           </span>
         </label>

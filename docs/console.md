@@ -312,8 +312,11 @@ performs a fresh membership/role lookup before a coordinator assertion is signed
    Unknown role strings are rejected with `401`. Roles and the permission each
    action needs are in [roles.md](roles.md).
 5. Organisations can require a recent sign-in for security changes and
-   two-step verification for password owners and admins. Password sign-ins of
-   identities with TOTP enabled show a code step after the password.
+   two-step verification for owners and admins. Password sign-ins of
+   identities with TOTP enabled show a code step after the password. The MFA
+   rule is judged on how the current session signed in (recorded in
+   `session.auth_method`); single sign-on sessions qualify only when an owner
+   turns on **Accept single sign-on as two-step verification**.
 
 For headless Linux enrollment, `blaktaild up` prints `/enroll?code=...`. The
 page preserves that destination through sign-in, displays the requested node name

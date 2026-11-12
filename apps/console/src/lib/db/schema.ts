@@ -59,6 +59,8 @@ export const session = pgTable("session", {
   userId: text("user_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
+  /** password | password_mfa | sso, recorded at creation; see auth-policy-core. */
+  authMethod: text("auth_method"),
 });
 
 export const account = pgTable(
@@ -589,6 +591,7 @@ export const organisationSignInPolicy = pgTable(
     requireMfaForPrivileged: boolean("require_mfa_for_privileged")
       .notNull()
       .default(false),
+    trustIdpMfa: boolean("trust_idp_mfa").notNull().default(false),
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
     }),

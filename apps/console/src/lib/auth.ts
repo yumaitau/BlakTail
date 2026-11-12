@@ -7,6 +7,7 @@ import { db } from "./db/client";
 import * as schema from "./db/schema";
 import { writeConsoleAudit } from "./console-audit";
 import { CLIENT_IP_HEADER } from "./client-ip-core";
+import { sessionAuthMethodFor } from "./auth-policy-core";
 
 const betterAuthSecret = process.env.BETTER_AUTH_SECRET;
 if (!betterAuthSecret || Buffer.byteLength(betterAuthSecret) < 32) {
@@ -58,6 +59,22 @@ export const auth = betterAuth({
   session: {
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
+    additionalFields: {
+      // How this session signed in. Set server-side only, never from input.
+      authMethod: { type: "string", required: false, input: false },
+    },
+  },
+  databaseHooks: {
+    session: {
+      create: {
+        before: async (session, context) => ({
+          data: {
+            ...session,
+            authMethod: sessionAuthMethodFor(context?.path, session.authMethod),
+          },
+        }),
+      },
+    },
   },
   trustedOrigins: (
     process.env.BETTER_AUTH_TRUSTED_ORIGINS ??
