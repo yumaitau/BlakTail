@@ -487,7 +487,7 @@ async fn ensure_allowed_ips_free(
             )));
         }
     }
-    crate::resources::ensure_routes_free(&mut **tx, org_id, allowed_ips).await
+    crate::resources::ensure_routes_free(tx, org_id, allowed_ips).await
 }
 
 fn first_overlap<'a>(mine: &'a [String], theirs: &'a [String]) -> Option<(&'a str, &'a str)> {
