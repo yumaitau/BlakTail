@@ -95,9 +95,26 @@ export function verifySignedJwt(
   const publicKey = publicKeyFromJwk(key);
   let valid = false;
   if (alg === "RS256") {
+    if (publicKey.asymmetricKeyType !== "rsa") {
+      throw new OidcTokenError("ID token key does not match its algorithm.");
+    }
     valid = verify("RSA-SHA256", parsed.signingInput, publicKey, parsed.signature);
   } else if (alg === "ES256") {
-    valid = verify("SHA256", parsed.signingInput, publicKey, parsed.signature);
+    if (
+      publicKey.asymmetricKeyType !== "ec" ||
+      publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1"
+    ) {
+      throw new OidcTokenError("ID token key does not match its algorithm.");
+    }
+    // JWS carries ES256 as raw r||s (RFC 7518 3.4), not DER.
+    valid =
+      parsed.signature.length === 64 &&
+      verify(
+        "SHA256",
+        parsed.signingInput,
+        { key: publicKey, dsaEncoding: "ieee-p1363" },
+        parsed.signature,
+      );
   } else {
     throw new OidcTokenError("Unsupported ID token algorithm.");
   }
