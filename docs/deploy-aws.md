@@ -100,7 +100,7 @@ export WORK_DIR=/tmp/blaktail-e2e-$RUN_ID TF_DIR=deploy/aws/e2e
 scripts/aws-e2e/preflight.sh
 ```
 
-Follow the guarded stages in `.github/workflows/aws-e2e.yml`. Before services
+Run the guarded stages below in order from an operator machine. Before services
 start, a dedicated coordinator task validates schema v1, stores a redacted
 effective dump in run evidence, and applies PostgreSQL migrations; a separate console
 task does the same for Drizzle. Normal task commands never migrate.

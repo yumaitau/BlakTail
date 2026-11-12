@@ -50,15 +50,6 @@ fi
 assert_digest_ref 'example.invalid/blaktail/coord@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 sh -n "$SCRIPT_DIR"/*.sh
-grep -q '^  workflow_dispatch:' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'runs-on: \[self-hosted, linux\]' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'id-token: write' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'environment: aws-e2e' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'cancel-in-progress: false' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'if: always()' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-if grep -Eq '^  (push|pull_request|schedule):' "$REPO_ROOT/.github/workflows/aws-e2e.yml"; then
-  die "AWS E2E workflow must remain manual-only"
-fi
 grep -q 'CONFIRM_DESTROY' "$SCRIPT_DIR/destroy.sh"
 grep -q 'partial destroy requires protected destroy context' "$SCRIPT_DIR/destroy.sh"
 grep -q 'delete-task-definitions' "$SCRIPT_DIR/destroy.sh"
@@ -104,21 +95,17 @@ grep -q 'failed_health_probes' "$SCRIPT_DIR/prove-coord-ha.sh"
 grep -q 'restore-db-instance-from-db-snapshot' "$SCRIPT_DIR/prove-db-restore.sh"
 grep -q 'temporary_resources_deleted' "$SCRIPT_DIR/prove-db-restore.sh"
 grep -q 'db-restore.ok' "$SCRIPT_DIR/collect-evidence.sh"
-grep -q 'scripts/aws-e2e/prove-coord-ha.sh' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'scripts/aws-e2e/prove-db-restore.sh' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'Refresh short-lived AWS credentials for teardown' \
-  "$REPO_ROOT/.github/workflows/aws-e2e.yml"
 if grep -E 'sign-up/email|INSERT INTO membership|DELETE FROM membership' \
   "$SCRIPT_DIR/bootstrap-owner.sh" "$SCRIPT_DIR/recover-owner.sh" >/dev/null; then
   die "AWS owner ceremony must use supported bootstrap CLI only"
 fi
-for checked_file in "$SCRIPT_DIR"/*.sh "$REPO_ROOT/.github/workflows/aws-e2e.yml"; do
+for checked_file in "$SCRIPT_DIR"/*.sh; do
   [ "$checked_file" = "$SCRIPT_DIR/static-test.sh" ] && continue
   if grep -E ':[[:space:]]*latest|:latest' "$checked_file" >/dev/null; then
     die "mutable latest image reference found: $checked_file"
   fi
 done
-for checked_file in "$SCRIPT_DIR"/*.sh "$REPO_ROOT/.github/workflows/aws-e2e.yml"; do
+for checked_file in "$SCRIPT_DIR"/*.sh; do
   [ "$checked_file" = "$SCRIPT_DIR/static-test.sh" ] && continue
   if grep -F 'session-ses_fd2c.md' "$checked_file" >/dev/null; then
     die "session export referenced by automation: $checked_file"
