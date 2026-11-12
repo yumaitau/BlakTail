@@ -9,9 +9,10 @@
 #     (only systemd, curl and CA certificates added; no agent dependencies);
 #   - runs scripts/install-agent.sh unchanged except for
 #     BLAKTAIL_RELEASE_BASE_URL/BLAKTAIL_VERSION: tampered asset, missing
-#     cosign with BLAKTAIL_REQUIRE_SIGNATURE=1, and (when cosign can be
+#     cosign (signature checks are on by default), and (when cosign can be
 #     fetched) a bundle that does not verify must all refuse to install;
-#     the genuine asset installs via the checksum path;
+#     the genuine asset installs via the checksum path with
+#     BLAKTAIL_INSECURE_SKIP_SIGNATURE=1, because the lab has no signed tag;
 #   - enrols Debian with the join key on stdin and Ubuntu with
 #     BLAKTAIL_JOIN_KEY, scanning every /proc/*/cmdline during enrolment;
 #   - enables blaktaild.service, proves ping both ways over the overlay,
@@ -153,12 +154,12 @@ install() { # name base [env...]
 
 for name in debian ubuntu; do
   echo "== $name: install-agent.sh refusals"
-  out="$(install "$name" bad 2>&1)" && fail "$name installed a tampered package"
+  out="$(install "$name" bad -e BLAKTAIL_INSECURE_SKIP_SIGNATURE=1 2>&1)" && fail "$name installed a tampered package"
   [[ "$out" == *"SHA-256 mismatch"* ]] || fail "$name tampered: $out"
   echo "ok tampered asset refused: $(tail -1 <<<"$out")"
-  out="$(install "$name" good -e BLAKTAIL_REQUIRE_SIGNATURE=1 2>&1)" && fail "$name installed without cosign"
-  [[ "$out" == *"needs cosign"* ]] || fail "$name require-signature: $out"
-  echo "ok BLAKTAIL_REQUIRE_SIGNATURE=1 without cosign refused: $(tail -1 <<<"$out")"
+  out="$(install "$name" good 2>&1)" && fail "$name installed without cosign"
+  [[ "$out" == *"cosign is required"* ]] || fail "$name require-signature: $out"
+  echo "ok default install without cosign refused: $(tail -1 <<<"$out")"
   ex "$name" sh -c '! command -v blaktaild' >/dev/null || fail "$name has blaktaild after refusals"
 done
 
@@ -176,9 +177,9 @@ else
 fi
 
 for name in debian ubuntu; do
-  echo "== $name: install genuine package (checksum path)"
+  echo "== $name: install genuine package (checksum path, signature check skipped: no tagged release)"
   started=$SECONDS
-  out="$(install "$name" good 2>&1)" || { echo "$out" | tail -20; fail "$name install failed"; }
+  out="$(install "$name" good -e BLAKTAIL_INSECURE_SKIP_SIGNATURE=1 2>&1)" || { echo "$out" | tail -20; fail "$name install failed"; }
   ex "$name" sh -c 'dpkg -s blaktaild | grep -q "Status: install ok installed"' || fail "$name package not configured"
   echo "ok $name installed $(ex "$name" blaktaild --version) in $((SECONDS - started))s; deps: $(ex "$name" sh -c 'for c in wg iptables ip; do command -v $c; done | tr "\n" " "')"
   ex "$name" sh -ceu 'install -d -m 0755 /etc/blaktail && cp /usr/local/share/ca-certificates/labs-host.crt /etc/blaktail/ca.crt

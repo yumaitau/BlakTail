@@ -115,9 +115,15 @@ cosign verify-blob \
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-`scripts/install-agent.sh` performs the same check whenever `cosign` is on
-`PATH`, and refuses to install without it when `BLAKTAIL_REQUIRE_SIGNATURE=1`
-(that mode needs a pinned `BLAKTAIL_VERSION`). The signature is recorded in the
+`scripts/install-agent.sh` performs the same check by default and refuses to
+install when `cosign` is not on `PATH` or the bundle does not verify. Without a
+pinned `BLAKTAIL_VERSION` it first resolves `latest` to the exact tag, because
+the signing identity names the tag. `BLAKTAIL_INSECURE_SKIP_SIGNATURE=1` skips
+the signature check and prints a warning; the package is then checked only
+against `SHA256SUMS`, which is fetched from the same place as the package and
+so does not prove who published it. Use it only for lab builds that have no
+signed tag. (`BLAKTAIL_REQUIRE_SIGNATURE=1`, the former opt-in, is still
+accepted and is now the default behaviour.) The signature is recorded in the
 public Rekor transparency log; that log is operated outside Australia and
 contains only the checksum digest, certificate and workflow identity, never
 package contents or customer data.
@@ -145,7 +151,8 @@ pointed at it on fresh `debian:bookworm` and `ubuntu:24.04` systemd containers
 arm64, 245 s:
 
 - refusals: a tampered `.deb` (`SHA-256 mismatch`), `BLAKTAIL_REQUIRE_SIGNATURE=1`
-  without cosign, and, with cosign v2.4.1 installed, a `SHA256SUMS.sigstore.json`
+  without cosign (now the default; the script since sets
+  `BLAKTAIL_INSECURE_SKIP_SIGNATURE=1` for the unsigned lab install), and, with cosign v2.4.1 installed, a `SHA256SUMS.sigstore.json`
   that is not a valid bundle (`Sigstore signature on SHA256SUMS did not verify`).
   Nothing was installed after any refusal.
 - install through the checksum path in 6 s (Debian) and 13 s (Ubuntu), with
@@ -175,7 +182,10 @@ in the lab.
 
 ## Install a published release
 
-Download and inspect the installer from the same tag, then run it as root:
+Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+first: the installer verifies the release signature and refuses to continue
+without it. Download and inspect the installer from the same tag, then run it as
+root:
 
 ```sh
 VERSION=0.1.0
