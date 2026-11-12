@@ -190,8 +190,11 @@ blaktail-config --config /etc/blaktail/config.toml support-bundle \
 
 The mode-0600 JSON bundle contains CLI/schema versions, offline readiness scope,
 configured listener summary, redacted effective configuration, and at most 500
-bounded log lines. Redaction removes bearer credentials, secret-like assignments,
-database URLs, enrollment codes, email addresses, UUIDs, and IPv4/IPv6 addresses.
+bounded log lines. Redaction removes bearer credentials, secret-like assignments
+(`key=value`, `key: value` and JSON `"key": "value"`), BlakTail `bt…_` tokens
+anywhere in a line, database URLs, codes, tokens, tickets and signatures in query
+strings, secrets in URL paths (such as `/v1/device-authorizations/<code>/poll`)
+and other long opaque path segments, email addresses, UUIDs, and IPv4/IPv6 addresses.
 It never includes packets, database dumps, raw DNS queries, cookies, join keys, or
 private keys. Review the generated file before sharing it.
 
