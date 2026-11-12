@@ -1413,6 +1413,8 @@ pub(crate) struct AppState {
     console_url: Arc<String>,
     api_rate: ApiRateLimiter,
     control_views: Arc<Mutex<ControlViewMap>>,
+    /// Expiry of the relay capability last handed to each node.
+    relay_issued: Arc<Mutex<HashMap<Uuid, u64>>>,
 }
 pub fn app(store: Store, region: String, auth_hmac_secret: impl Into<Vec<u8>>) -> Router {
     app_with_relays_and_console(
@@ -1485,6 +1487,7 @@ pub fn app_with_relays_console_and_metrics(
         console_url: Arc::new(console_url.trim_end_matches('/').to_owned()),
         api_rate: ApiRateLimiter::default(),
         control_views: Arc::new(Mutex::new(HashMap::new())),
+        relay_issued: Arc::new(Mutex::new(HashMap::new())),
     };
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::spawn(webhooks::delivery_loop(state.clone()));
@@ -3868,7 +3871,10 @@ async fn list_updates(
             .fetch_optional(&s.store.pool)
             .await?
             .ok_or(ApiError::CorruptData)?;
-        let changed = selection.since == 0 || revision > selection.since || expired;
+        let changed = selection.since == 0
+            || revision > selection.since
+            || expired
+            || relay_refresh_due(&s, node_id);
         if changed || started.elapsed() >= Duration::from_secs(wait) {
             if !changed {
                 return Ok(StatusCode::NO_CONTENT.into_response());
@@ -4024,18 +4030,48 @@ async fn update_relay_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Capability token TTL for relay registration (7 days, refreshed each poll).
-const RELAY_TOKEN_TTL_SECS: u64 = 604_800;
+/// Capability token TTL for relay registration. The relay cannot see
+/// revocation, so this bounds how long a revoked or suspended node keeps
+/// relay access. It also bounds how long relayed tunnels survive a
+/// coordinator outage (existing tunnels are meant to survive one), which is
+/// why it is a day rather than an hour.
+const RELAY_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+/// Idle long-polls answer 204 and carry no token, so a node whose token is
+/// older than this gets a snapshot (with a fresh token) instead.
+const RELAY_TOKEN_REFRESH_SECS: u64 = 60 * 60;
 const RELAY_ENDPOINT_FRESH_SECS: i64 = 180;
 fn relay_credentials(state: &AppState, node_id: Uuid) -> (String, u64) {
     if state.relays.is_empty() || state.relay_auth_secret.is_empty() {
         return (String::new(), 0);
     }
     let expires_at = (now() as u64) + RELAY_TOKEN_TTL_SECS;
+    let mut issued = state
+        .relay_issued
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if issued.len() >= MAX_CONTROL_VIEWS && !issued.contains_key(&node_id) {
+        issued.clear();
+    }
+    issued.insert(node_id, expires_at);
+    drop(issued);
     (
         relay_capability(&state.relay_auth_secret, node_id, expires_at),
         expires_at,
     )
+}
+/// Whether the node's relay token (as far as this process knows) is old
+/// enough to re-mint. Unknown nodes, such as after a restart, are due.
+fn relay_refresh_due(state: &AppState, node_id: Uuid) -> bool {
+    if state.relays.is_empty() || state.relay_auth_secret.is_empty() {
+        return false;
+    }
+    let issued = state
+        .relay_issued
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    issued.get(&node_id).is_none_or(|expires_at| {
+        expires_at.saturating_sub(now() as u64) <= RELAY_TOKEN_TTL_SECS - RELAY_TOKEN_REFRESH_SECS
+    })
 }
 /// HMAC-SHA256 capability binding a node id to an expiry, hex-encoded. Must
 /// match blaktail-relay's REGISTER verification (id || expiry_be, big-endian).
@@ -7874,6 +7910,72 @@ mod tests {
             .await
             .status(),
             StatusCode::GONE
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_long_polls_still_refresh_short_lived_relay_tokens() {
+        let store = Store::memory().await.unwrap();
+        let relays = || vec!["relay.example.org:3478".to_owned()];
+        let first = app_with_relays(
+            store.clone(),
+            "ap-southeast-2".into(),
+            TEST_SECRET,
+            TEST_RELAY_SECRET,
+            relays(),
+        );
+        let org = create_test_org(&first, "relay-refresh-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let node = register_test_node(&first, org.id, &owner, "idle", "idle-key", &[]).await;
+        assert!(node.relay_expires_at <= now() as u64 + 24 * 60 * 60);
+        assert!(node.relay_expires_at > now() as u64 + 23 * 60 * 60);
+        let poll = |router: &Router, since: i64| {
+            let router = router.clone();
+            let uri = format!(
+                "/v1/nodes/{}/updates?since={since}&wait=0&version=2",
+                node.id
+            );
+            let token = node.node_token.clone();
+            async move {
+                call(
+                    &router,
+                    Method::GET,
+                    &uri,
+                    serde_json::Value::Null,
+                    Some(&token),
+                )
+                .await
+            }
+        };
+        let snapshot = poll(&first, 0).await;
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        let snapshot: serde_json::Value = body(snapshot).await;
+        let revision = snapshot["revision"].as_i64().unwrap();
+        // Nothing changed and the token is fresh: no snapshot.
+        assert_eq!(
+            poll(&first, revision).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        // A coordinator that has not issued this node a token (for example
+        // after a restart) answers an idle poll with a snapshot carrying one.
+        let restarted = app_with_relays(
+            store.clone(),
+            "ap-southeast-2".into(),
+            TEST_SECRET,
+            TEST_RELAY_SECRET,
+            relays(),
+        );
+        let refreshed = poll(&restarted, revision).await;
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let refreshed: serde_json::Value = body(refreshed).await;
+        let expires_at = refreshed["relay_expires_at"].as_u64().unwrap();
+        assert_eq!(
+            refreshed["relay_token"],
+            relay_capability(TEST_RELAY_SECRET, node.id, expires_at)
+        );
+        assert_eq!(
+            poll(&restarted, revision).await.status(),
+            StatusCode::NO_CONTENT
         );
     }
 

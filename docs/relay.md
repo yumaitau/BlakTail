@@ -24,6 +24,10 @@ Protocol frames use one-byte opcode plus 16-byte node id:
 - `DIRECT` (`6`): source id plus opaque WireGuard ciphertext sent peer to peer.
 - `PUNCH`/`PUNCH_ACK` (`7`/`8`): source id plus a random 64-bit challenge.
 
+Capabilities last 24 hours. The coordinator mints a fresh one in every peer
+snapshot and sends an otherwise idle long-poll a snapshot once its token is an
+hour old, so a revoked or suspended node keeps relay access for at most a day,
+while relayed tunnels still ride out a coordinator outage of up to a day.
 Registrations expire by capability time and after 120 seconds idle. Clients refresh
 every 25 seconds (every 5 seconds while a probe is unanswered). A live
 registration moves to a different source only from the same IP (NAT rebinding,
