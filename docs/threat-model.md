@@ -20,7 +20,7 @@ BlakTail is a WireGuard mesh. Devices join an organisation tailnet, talk peer to
 | Node credential expiry | Coordinator node records | Default 90-day control-plane and peer-map lifetime; re-auth rotates the token |
 | Relay capability secret | Coordinator and relay env only | Attacker can register or hijack relay identities; it is separate from console-session signing |
 | Console sessions and `BETTER_AUTH_SECRET` | Onshore Postgres and console env | Account takeover of the operator UI |
-| `BLAKTAIL_AUTH_HMAC_SECRET` | Console and coordinator env | Forgery of console sessions into the coordinator |
+| `BLAKTAIL_AUTH_HMAC_SECRET` | Console and coordinator env | Forgery of console assertions as any person and role in any organisation. It is also the root key for everything the coordinator seals or signs: remote-job signing keys, the remote SSH user CA and private-service CA keys, webhook and notification-channel secrets, posture integration secrets, agent provider credentials and full-logging content. With a database copy it opens all of them. See [After revoke](#5-after-revoke) for what rotating it breaks |
 | Bootstrap/invitation credentials | Shown once to operator/invitee; SHA-256 hashes in Postgres | First-owner or invited-role takeover before expiry/use |
 | TLS private key | Coordinator host | Intercept of control-plane HTTP |
 
@@ -85,11 +85,18 @@ always-on onshore gateway. What each compromise buys:
   coordinator, sealed with the coordinator secret) and cannot see RDP
   passwords except those typed during its compromise. Suspend or revoke the
   gateway node to stop it.
-- **Database write without the coordinator secret.** Cannot sign a runnable
-  job (the job key is derived from the coordinator secret) and cannot read
-  the CA key. It can change a pinned host key, but that alone does not
-  redirect a session: the device's overlay address routes only to the peer
-  holding its WireGuard key.
+- **Database write without the coordinator secret.** Cannot forge console
+  assertions, sign a runnable job (the job key is derived from the
+  coordinator secret) or read any sealed value (CA keys, webhook, channel,
+  posture and agent provider secrets). It can change a pinned host key, but
+  that alone does not redirect a session: the device's overlay address
+  routes only to the peer holding its WireGuard key. It is still not a safe
+  boundary: everything unsealed is plaintext and authoritative, including
+  the policy, roles, node-token hashes and the endpoints sealed secrets are
+  sent to. Sealed values are not bound to their row, so rewriting an agent
+  provider's base URL or a posture integration's endpoint in the database
+  sends the stored credential there. Treat database write as coordinator
+  compromise for everything except reading sealed values.
 - **Compromised coordinator.** Can issue certificates and sign jobs for any
   opted-in device of that organisation. Opt-in on the device (sshd drop-in,
   `BLAKTAIL_SSH_USER_CA`, `--allow-remote-jobs`) is the boundary; leave it
@@ -282,6 +289,33 @@ sudo shred -u /etc/blaktail/blaktaild.env 2>/dev/null || sudo rm -f /etc/blaktai
 ```
 
 Mint a new single-use join key with a short expiry (an hour, not a month). Enrol only the replacement device. Rotate `BLAKTAIL_AUTH_HMAC_SECRET` and `BETTER_AUTH_SECRET` if those files were on the same laptop.
+
+Rotating `BLAKTAIL_AUTH_HMAC_SECRET` is not just a session reset. Nothing is
+re-sealed automatically, so plan for all of this:
+
+- Set the same new value on the console and the coordinator and restart both;
+  outstanding console assertions stop working (they are short-lived).
+- Webhook destinations: sealed signing secrets no longer open and deliveries
+  are skipped. Recreate each destination and give receivers the new secret.
+- Notification channels: Slack/Teams URLs and signing secrets no longer open.
+  Re-enter them.
+- Posture integrations: secrets no longer open and syncs fail. Re-enter each
+  secret.
+- Agent gateway: provider credentials no longer open, so grants fail;
+  re-enter each credential. Sealed full-logging content becomes unreadable
+  for good.
+- Private services: the organisation CA key no longer opens, so certificate
+  issue fails until the organisation's `service_cas` row is removed and a new
+  CA is generated. Clients that trusted the old CA must trust the new one.
+- Browser remote access: the SSH user CA key no longer opens, so every redeem
+  fails. Remove the organisation's `remote_access_settings` row and set the
+  gateway again to create a new CA; agents write the new CA public key on
+  their next poll.
+- Remote jobs: the job signing key is derived from the secret, so it changes.
+  Every device pinned the old key and keeps remote jobs off until its
+  `remote-jobs.pub` (in the agent state directory) is removed. Jobs are signed
+  at approval, so runs approved but not yet claimed fail verification; let
+  them expire and approve them again.
 
 ## What never goes in git
 
