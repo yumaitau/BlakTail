@@ -32,7 +32,13 @@ without inventing a new data-plane or storing files in the coordinator.
 - Read-only. Writable shares need an auth model that does not exist yet.
 - One TCP port per node (default 5647). Several labels share that port.
 - Bind is overlay IPv4 only. No LAN and no `0.0.0.0`.
-- Path jail: canonicalise under the declared root; reject `..` and symlink escape.
+- Path jail: the root is stored canonical at enable time and must still
+  canonicalise to itself on every request, so a folder swapped for a link or
+  junction is refused. Each path component is opened without following links
+  (`openat(O_NOFOLLOW)` on Unix; reparse points refused and the chain held
+  open on Windows), files are read from the handle that was opened, and links
+  inside the share are neither listed nor followed. `..`, dot-files, `\`, `:`
+  and control characters are refused in request paths.
 - Peers that current policy already allows to see the node get the share port
   unless a deny rule blocks it.
 - macOS still has no packet filter; overlay bind is the control there.

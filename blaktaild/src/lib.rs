@@ -31,6 +31,7 @@ pub mod flow_events;
 #[path = "../../blaktail-ios-wg/src/flow_report.rs"]
 pub mod flow_report;
 pub mod forward_filter;
+mod jail;
 pub mod pf_filter;
 pub mod pq;
 pub mod relay_client;

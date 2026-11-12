@@ -1,9 +1,9 @@
-use crate::{Error, NodeState};
+use crate::{jail, Error, NodeState};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write as _,
+    io::{self, Write as _},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,6 +12,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::AbortHandle,
 };
 
@@ -24,7 +25,7 @@ const MAX_LISTING: usize = 200;
 const MAX_HEADER: usize = 8_192;
 const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
+const MAX_CONNECTIONS: usize = 64;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LocalShare {
     pub label: String,
@@ -189,15 +190,21 @@ impl ShareServer {
         let fingerprint = format!("{}#{}", fingerprint_shares(&enabled), gate.fingerprint());
         let served = Arc::new(enabled);
         let gate = Arc::new(gate);
+        let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, peer)) = listener.accept().await else {
                     return;
                 };
+                let Ok(permit) = limit.clone().try_acquire_owned() else {
+                    drop(stream);
+                    continue;
+                };
                 let shares = served.clone();
                 let gate = gate.clone();
                 tokio::spawn(async move {
                     let _ = handle_client(stream, Some(peer.ip()), &shares, &gate).await;
+                    drop(permit);
                 });
             }
         });
@@ -582,35 +589,26 @@ async fn handle_client(
             return Ok(());
         }
     };
+    // Only PUT reads a body, and it streams the rest from the socket.
     let body_start = header_end + separator;
     parsed.body = buffer[body_start..length].to_vec();
     if gate.enforce && shares.is_empty() {
         write_plain(&mut stream, 403, "Forbidden", "forbidden\n", true).await?;
         return Ok(());
     }
-    if let Some(needed) = parsed.content_length {
-        if needed > MAX_PUT_BYTES {
-            write_plain(
-                &mut stream,
-                413,
-                "Payload Too Large",
-                "file is too large\n",
-                true,
-            )
-            .await?;
-            return Ok(());
-        }
-        while parsed.body.len() < needed {
-            let mut chunk = [0u8; 8192];
-            let read = tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut chunk))
-                .await
-                .map_err(|_| Error::Message("share request timed out".into()))??;
-            if read == 0 {
-                break;
-            }
-            parsed.body.extend_from_slice(&chunk[..read]);
-        }
-        parsed.body.truncate(needed);
+    if parsed
+        .content_length
+        .is_some_and(|needed| needed > MAX_PUT_BYTES)
+    {
+        write_plain(
+            &mut stream,
+            413,
+            "Payload Too Large",
+            "file is too large\n",
+            true,
+        )
+        .await?;
+        return Ok(());
     }
     match parsed.method.as_str() {
         "OPTIONS" => {
@@ -636,7 +634,14 @@ async fn handle_client(
             serve_propfind(&mut stream, &shares, &parsed.path, parsed.depth.as_deref()).await?;
         }
         "PUT" => {
-            serve_put(&mut stream, &shares, &parsed.path, &parsed.body).await?;
+            serve_put(
+                &mut stream,
+                &shares,
+                &parsed.path,
+                parsed.content_length,
+                std::mem::take(&mut parsed.body),
+            )
+            .await?;
         }
         "MKCOL" => {
             serve_mkcol(&mut stream, &shares, &parsed.path).await?;
@@ -742,42 +747,49 @@ fn destination_path(value: &str) -> Option<String> {
     percent_decode(path.split('?').next().unwrap_or(path))
 }
 
-fn share_for_path<'a>(shares: &'a [LocalShare], path: &str) -> Option<&'a LocalShare> {
-    shares.iter().filter(|share| share.enabled).find(|share| {
-        path == format!("/{}", share.label) || path.starts_with(&format!("/{}/", share.label))
-    })
+/// A request path split at its share label. Every component below the
+/// label has passed `jail::safe_component`: no `..`, no dot-files, no
+/// separators or stream names.
+enum Located<'a> {
+    Index,
+    Share(&'a LocalShare, Vec<String>),
+    NotFound,
+    Forbidden,
 }
 
-fn resolve_put_path(share: &LocalShare, url_path: &str) -> Result<PathBuf, Error> {
-    let prefix = format!("/{}", share.label);
-    let rest = url_path
-        .strip_prefix(&prefix)
-        .unwrap_or("")
-        .trim_start_matches('/');
-    if rest.is_empty()
-        || rest.ends_with('/')
-        || rest
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(Error::Message("share file path is not acceptable".into()));
+fn locate<'a>(shares: &'a [LocalShare], path: &str) -> Located<'a> {
+    if path.contains('\0') {
+        return Located::Forbidden;
     }
-    let root = fs::canonicalize(&share.path)?;
-    let target = root.join(rest);
-    let parent = target
-        .parent()
-        .ok_or_else(|| Error::Message("share file path is not acceptable".into()))?;
-    let parent = fs::canonicalize(parent)?;
-    if !parent.starts_with(&root) {
-        return Err(Error::Message("share file path escapes the folder".into()));
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let Some(label) = parts.next() else {
+        return Located::Index;
+    };
+    let Some(share) = shares
+        .iter()
+        .find(|share| share.enabled && share.label == label)
+    else {
+        return Located::NotFound;
+    };
+    let rest = parts.map(str::to_owned).collect::<Vec<_>>();
+    if rest.iter().any(|part| !jail::safe_component(part)) {
+        return Located::Forbidden;
     }
-    if target.exists() {
-        let existing = fs::canonicalize(&target)?;
-        if !existing.starts_with(&root) {
-            return Err(Error::Message("share file path escapes the folder".into()));
+    Located::Share(share, rest)
+}
+
+/// Open the share root (refusing a root that was swapped for a link or
+/// junction since it was enabled) and walk `parts` without following links.
+fn walk(share: &LocalShare, parts: &[String]) -> io::Result<jail::Dir> {
+    let mut dir = jail::open_root(Path::new(&share.path)).inspect_err(|error| {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            tracing::warn!(label = %share.label, %error, "refusing share whose folder moved");
         }
+    })?;
+    for part in parts {
+        dir = dir.descend(part)?;
     }
-    Ok(target)
+    Ok(dir)
 }
 
 enum JailError {
@@ -786,37 +798,41 @@ enum JailError {
     MissingParent,
 }
 
-/// `(root, target)` for one child of the share. The share root itself is refused.
-fn child_paths(share: &LocalShare, url_path: &str) -> Result<(PathBuf, PathBuf), JailError> {
-    let prefix = format!("/{}", share.label);
-    let rest = url_path
-        .strip_prefix(&prefix)
-        .unwrap_or("")
-        .trim_matches('/');
-    if rest.is_empty()
-        || rest
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
+/// The pinned parent directory and final name of one child of the share.
+/// The share root itself is refused.
+fn parent_dir(share: &LocalShare, parts: &[String]) -> Result<(jail::Dir, String), JailError> {
+    let Some((name, parents)) = parts.split_last() else {
         return Err(JailError::Bad);
+    };
+    match walk(share, parents) {
+        Ok(dir) => Ok((dir, name.clone())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(JailError::MissingParent),
+        Err(_) => Err(JailError::Escape),
     }
-    let root = fs::canonicalize(&share.path).map_err(|_| JailError::Escape)?;
-    let target = root.join(rest);
-    let parent = target.parent().ok_or(JailError::Bad)?;
-    if !parent.exists() {
-        return Err(JailError::MissingParent);
-    }
-    let parent = fs::canonicalize(parent).map_err(|_| JailError::Escape)?;
-    if !parent.starts_with(&root) {
-        return Err(JailError::Escape);
-    }
-    if target.exists() {
-        let existing = fs::canonicalize(&target).map_err(|_| JailError::Escape)?;
-        if !existing.starts_with(&root) {
-            return Err(JailError::Escape);
+}
+
+/// The writable share and child path for a write verb, or the response
+/// already sent.
+async fn write_target<'a>(
+    stream: &mut TcpStream,
+    shares: &'a [LocalShare],
+    path: &str,
+) -> Result<Option<(&'a LocalShare, Vec<String>)>, Error> {
+    match locate(shares, path) {
+        Located::Share(share, _) if share.read_only => {
+            write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
+            Ok(None)
+        }
+        Located::Share(share, parts) if !parts.is_empty() => Ok(Some((share, parts))),
+        Located::NotFound => {
+            write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+            Ok(None)
+        }
+        _ => {
+            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+            Ok(None)
         }
     }
-    Ok((root, target))
 }
 
 async fn serve_mkcol(
@@ -824,30 +840,28 @@ async fn serve_mkcol(
     shares: &[LocalShare],
     path: &str,
 ) -> Result<(), Error> {
-    let Some(share) = share_for_path(shares, path) else {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+    let Some((share, parts)) = write_target(stream, shares, path).await? else {
         return Ok(());
     };
-    if share.read_only {
-        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
-        return Ok(());
-    }
-    match child_paths(share, path) {
-        Ok((_, target)) if target.exists() => {
-            write_plain(stream, 405, "Method Not Allowed", "already exists\n", true).await?;
-        }
-        Ok((_, target)) => {
-            fs::create_dir(&target)?;
-            write_plain(stream, 201, "Created", "created\n", true).await?;
-        }
+    let created = match parent_dir(share, &parts) {
+        Ok((dir, name)) => match dir.kind(&name) {
+            Ok(Some(_)) => {
+                return write_plain(stream, 405, "Method Not Allowed", "already exists\n", true)
+                    .await;
+            }
+            Ok(None) => dir.mkdir(&name).is_ok(),
+            Err(_) => false,
+        },
         Err(JailError::MissingParent) => {
-            write_plain(stream, 409, "Conflict", "parent is missing\n", true).await?;
+            return write_plain(stream, 409, "Conflict", "parent is missing\n", true).await;
         }
-        Err(_) => {
-            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-        }
+        Err(_) => false,
+    };
+    if created {
+        write_plain(stream, 201, "Created", "created\n", true).await
+    } else {
+        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await
     }
-    Ok(())
 }
 
 async fn serve_delete(
@@ -855,35 +869,31 @@ async fn serve_delete(
     shares: &[LocalShare],
     path: &str,
 ) -> Result<(), Error> {
-    let Some(share) = share_for_path(shares, path) else {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+    let Some((share, parts)) = write_target(stream, shares, path).await? else {
         return Ok(());
     };
-    if share.read_only {
-        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
-        return Ok(());
-    }
-    let (_, target) = match child_paths(share, path) {
-        Ok(paths) => paths,
-        Err(_) => {
-            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-            return Ok(());
+    let (dir, name) = match parent_dir(share, &parts) {
+        Ok(found) => found,
+        Err(JailError::MissingParent) => {
+            return write_plain(stream, 404, "Not Found", "not found\n", true).await;
+        }
+        Err(_) => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
+    };
+    let removed = match dir.kind(&name) {
+        Ok(None) => return write_plain(stream, 404, "Not Found", "not found\n", true).await,
+        Ok(Some(jail::Kind::File)) => dir.remove_file(&name),
+        Ok(Some(jail::Kind::Dir)) => dir.remove_dir(&name),
+        Ok(Some(jail::Kind::Other)) | Err(_) => {
+            return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await;
         }
     };
-    if !target.exists() {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
-        return Ok(());
-    }
-    if target.is_dir() {
-        if fs::read_dir(&target)?.next().is_some() {
-            write_plain(stream, 403, "Forbidden", "directory is not empty\n", true).await?;
-            return Ok(());
+    match removed {
+        Ok(()) => write_plain(stream, 204, "No Content", "", false).await,
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+            write_plain(stream, 403, "Forbidden", "directory is not empty\n", true).await
         }
-        fs::remove_dir(&target)?;
-    } else {
-        fs::remove_file(&target)?;
+        Err(_) => write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
     }
-    write_plain(stream, 204, "No Content", "", false).await
 }
 
 async fn serve_move(
@@ -896,53 +906,44 @@ async fn serve_move(
         write_plain(stream, 400, "Bad Request", "destination required\n", true).await?;
         return Ok(());
     };
-    let Some(share) = share_for_path(shares, path) else {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+    let Some((share, source_parts)) = write_target(stream, shares, path).await? else {
         return Ok(());
     };
-    if share.read_only {
-        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
-        return Ok(());
-    }
-    let Some(dest_share) = share_for_path(shares, destination) else {
-        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-        return Ok(());
+    let target_parts = match locate(shares, destination) {
+        Located::Share(target, parts) if target.label == share.label && !parts.is_empty() => parts,
+        _ => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
     };
-    if dest_share.label != share.label {
-        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-        return Ok(());
-    }
-    let (_, source) = match child_paths(share, path) {
-        Ok(paths) => paths,
-        Err(_) => {
-            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-            return Ok(());
-        }
-    };
-    if !source.exists() {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
-        return Ok(());
-    }
-    let (_, target) = match child_paths(share, destination) {
-        Ok(paths) => paths,
+    let (source_dir, source_name) = match parent_dir(share, &source_parts) {
+        Ok(found) => found,
         Err(JailError::MissingParent) => {
-            write_plain(stream, 409, "Conflict", "parent is missing\n", true).await?;
-            return Ok(());
+            return write_plain(stream, 404, "Not Found", "not found\n", true).await;
         }
-        Err(_) => {
-            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-            return Ok(());
-        }
+        Err(_) => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
     };
-    if target.is_dir() {
-        write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
-        return Ok(());
+    let source_kind = match source_dir.kind(&source_name) {
+        Ok(None) => return write_plain(stream, 404, "Not Found", "not found\n", true).await,
+        Ok(Some(kind @ (jail::Kind::File | jail::Kind::Dir))) => kind,
+        _ => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
+    };
+    let (target_dir, target_name) = match parent_dir(share, &target_parts) {
+        Ok(found) => found,
+        Err(JailError::MissingParent) => {
+            return write_plain(stream, 409, "Conflict", "parent is missing\n", true).await;
+        }
+        Err(_) => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
+    };
+    let replaced = match target_dir.kind(&target_name) {
+        Ok(None) => false,
+        // A file may replace a file; nothing replaces a folder or a link.
+        Ok(Some(jail::Kind::File)) if source_kind == jail::Kind::File => true,
+        _ => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
+    };
+    if source_dir
+        .rename(&source_name, &target_dir, &target_name)
+        .is_err()
+    {
+        return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await;
     }
-    let replaced = target.exists();
-    if replaced {
-        fs::remove_file(&target)?;
-    }
-    fs::rename(&source, &target)?;
     if replaced {
         write_plain(stream, 204, "No Content", "", false).await
     } else {
@@ -954,41 +955,64 @@ async fn serve_put(
     stream: &mut TcpStream,
     shares: &[LocalShare],
     path: &str,
-    body: &[u8],
+    content_length: Option<usize>,
+    mut body: Vec<u8>,
 ) -> Result<(), Error> {
-    let Some(share) = share_for_path(shares, path) else {
-        write_plain(stream, 404, "Not Found", "not found\n", true).await?;
+    let Some((share, parts)) = write_target(stream, shares, path).await? else {
         return Ok(());
     };
-    if share.read_only {
-        write_plain(stream, 403, "Forbidden", "read-only\n", true).await?;
-        return Ok(());
-    }
-    if body.len() > MAX_PUT_BYTES {
-        write_plain(
+    let Some(needed) = content_length else {
+        return write_plain(stream, 411, "Length Required", "length required\n", true).await;
+    };
+    if needed > MAX_PUT_BYTES {
+        return write_plain(
             stream,
             413,
             "Payload Too Large",
             "file is too large\n",
             true,
         )
-        .await?;
-        return Ok(());
+        .await;
     }
-    let target = match resolve_put_path(share, path) {
-        Ok(target) => target,
-        Err(_) => {
-            write_plain(stream, 403, "Forbidden", "forbidden\n", true).await?;
+    let (dir, name) = match parent_dir(share, &parts) {
+        Ok(found) => found,
+        Err(JailError::MissingParent) => {
+            return write_plain(stream, 409, "Conflict", "parent is missing\n", true).await;
+        }
+        Err(_) => return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await,
+    };
+    if !matches!(dir.kind(&name), Ok(None | Some(jail::Kind::File))) {
+        return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await;
+    }
+    // A fresh random name, created exclusively next to the target, so a
+    // planted link or an old partial file can never be written through.
+    let temporary = format!(".blaktail-partial-{:032x}", rand::random::<u128>());
+    let Ok(mut file) = dir.create_new(&temporary) else {
+        return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await;
+    };
+    body.truncate(needed);
+    let mut written = body.len();
+    let mut stored = file.write_all(&body).is_ok();
+    let mut chunk = vec![0u8; 64 * 1024];
+    while stored && written < needed {
+        let want = chunk.len().min(needed - written);
+        let read =
+            match tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut chunk[..want])).await {
+                Ok(Ok(read)) if read > 0 => read,
+                _ => break,
+            };
+        stored = file.write_all(&chunk[..read]).is_ok();
+        written += read;
+    }
+    let complete = stored && written == needed && file.sync_all().is_ok();
+    drop(file);
+    if !complete || dir.rename(&temporary, &dir, &name).is_err() {
+        let _ = dir.remove_file(&temporary);
+        if written < needed {
             return Ok(());
         }
-    };
-    let temporary = target.with_extension("blaktail-partial");
-    {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(body)?;
-        file.sync_all()?;
+        return write_plain(stream, 403, "Forbidden", "forbidden\n", true).await;
     }
-    fs::rename(&temporary, &target)?;
     write_plain(stream, 201, "Created", "created\n", true).await
 }
 
@@ -1034,7 +1058,8 @@ async fn serve_get(
     head: bool,
 ) -> Result<(), Error> {
     match resolve_request(shares, path) {
-        ShareResponse::Index(body) => {
+        ShareResponse::Index => {
+            let body = index_page(shares);
             write_plain_typed(
                 stream,
                 200,
@@ -1045,7 +1070,8 @@ async fn serve_get(
             )
             .await
         }
-        ShareResponse::Listing(body) => {
+        ShareResponse::Directory { share, rest, dir } => {
+            let body = listing_page(share, &rest.join("/"), &dir);
             write_plain_typed(
                 stream,
                 200,
@@ -1056,26 +1082,40 @@ async fn serve_get(
             )
             .await
         }
-        ShareResponse::File { path, content_type } => {
+        ShareResponse::File { mut file, name } => {
+            let length = file.metadata()?.len();
+            write_response(
+                stream,
+                200,
+                "OK",
+                &[
+                    ("Content-Type", content_type(&name)),
+                    ("Content-Length", &length.to_string()),
+                    ("Cache-Control", "no-store"),
+                ],
+                b"",
+                false,
+            )
+            .await?;
             if head {
-                let length = fs::metadata(&path)?.len();
-                write_response(
-                    stream,
-                    200,
-                    "OK",
-                    &[
-                        ("Content-Type", content_type),
-                        ("Content-Length", &length.to_string()),
-                        ("Cache-Control", "no-store"),
-                    ],
-                    b"",
-                    false,
-                )
-                .await
-            } else {
-                let bytes = fs::read(&path)?;
-                write_plain_typed(stream, 200, "OK", content_type, &bytes, true).await
+                return Ok(());
             }
+            // Stream from the handle that was opened inside the share, never
+            // from the path again, and never more than was announced.
+            let mut remaining = length;
+            let mut chunk = vec![0u8; 64 * 1024];
+            while remaining > 0 {
+                let want = chunk
+                    .len()
+                    .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                let read = std::io::Read::read(&mut file, &mut chunk[..want])?;
+                if read == 0 {
+                    break;
+                }
+                stream.write_all(&chunk[..read]).await?;
+                remaining -= read as u64;
+            }
+            Ok(())
         }
         ShareResponse::NotFound => {
             write_plain(stream, 404, "Not Found", "not found\n", !head).await
@@ -1143,62 +1183,61 @@ async fn serve_propfind(
     .await
 }
 
-enum ShareResponse {
-    Index(String),
-    Listing(String),
+enum ShareResponse<'a> {
+    Index,
+    Directory {
+        share: &'a LocalShare,
+        rest: Vec<String>,
+        dir: jail::Dir,
+    },
     File {
-        path: PathBuf,
-        content_type: &'static str,
+        file: fs::File,
+        name: String,
     },
     NotFound,
     Forbidden,
 }
 
-fn resolve_request(shares: &[LocalShare], path: &str) -> ShareResponse {
-    let trimmed = path.trim_start_matches('/');
-    if trimmed.is_empty() {
-        return ShareResponse::Index(index_page(shares));
-    }
-    let (label, rest) = match trimmed.split_once('/') {
-        Some((label, rest)) => (label, rest.trim_start_matches('/')),
-        None => (trimmed, ""),
-    };
-    let Some(share) = shares
-        .iter()
-        .find(|share| share.enabled && share.label == label)
-    else {
-        return ShareResponse::NotFound;
-    };
-    let root = match fs::canonicalize(&share.path) {
-        Ok(root) => root,
-        Err(_) => return ShareResponse::NotFound,
-    };
-    if rest.contains('\0') || rest.split('/').any(|part| part == "..") {
-        return ShareResponse::Forbidden;
-    }
-    let target = if rest.is_empty() {
-        root.clone()
+fn io_response<'a>(error: &io::Error) -> ShareResponse<'a> {
+    if error.kind() == io::ErrorKind::NotFound {
+        ShareResponse::NotFound
     } else {
-        root.join(rest)
-    };
-    let Ok(canonical) = fs::canonicalize(&target) else {
-        return ShareResponse::NotFound;
-    };
-    if !canonical.starts_with(&root) {
-        return ShareResponse::Forbidden;
+        ShareResponse::Forbidden
     }
-    let Ok(metadata) = fs::metadata(&canonical) else {
-        return ShareResponse::NotFound;
+}
+
+fn resolve_request<'a>(shares: &'a [LocalShare], path: &str) -> ShareResponse<'a> {
+    let (share, rest) = match locate(shares, path) {
+        Located::Index => return ShareResponse::Index,
+        Located::NotFound => return ShareResponse::NotFound,
+        Located::Forbidden => return ShareResponse::Forbidden,
+        Located::Share(share, rest) => (share, rest),
     };
-    if metadata.is_dir() {
-        return ShareResponse::Listing(listing_page(share, rest, &canonical));
-    }
-    if !metadata.is_file() {
-        return ShareResponse::Forbidden;
-    }
-    ShareResponse::File {
-        path: canonical,
-        content_type: content_type(rest),
+    let Some((last, parents)) = rest.split_last() else {
+        return match walk(share, &[]) {
+            Ok(dir) => ShareResponse::Directory { share, rest, dir },
+            Err(error) => io_response(&error),
+        };
+    };
+    let dir = match walk(share, parents) {
+        Ok(dir) => dir,
+        Err(error) => return io_response(&error),
+    };
+    match dir.kind(last) {
+        Ok(Some(jail::Kind::Dir)) => match dir.descend(last) {
+            Ok(dir) => ShareResponse::Directory { share, rest, dir },
+            Err(error) => io_response(&error),
+        },
+        Ok(Some(jail::Kind::File)) => match dir.open_file(last) {
+            Ok(file) => ShareResponse::File {
+                file,
+                name: last.clone(),
+            },
+            Err(error) => io_response(&error),
+        },
+        Ok(Some(jail::Kind::Other)) => ShareResponse::Forbidden,
+        Ok(None) => ShareResponse::NotFound,
+        Err(error) => io_response(&error),
     }
 }
 
@@ -1217,7 +1256,16 @@ fn index_page(shares: &[LocalShare]) -> String {
     body
 }
 
-fn listing_page(share: &LocalShare, relative: &str, directory: &Path) -> String {
+/// Files and folders a listing shows. Links, devices and dot-files are
+/// never listed, matching what a request can open.
+fn visible_entries(dir: &jail::Dir) -> Vec<jail::Entry> {
+    let mut entries = dir.entries(usize::MAX);
+    entries.retain(|entry| entry.kind != jail::Kind::Other);
+    entries.truncate(MAX_LISTING);
+    entries
+}
+
+fn listing_page(share: &LocalShare, relative: &str, directory: &jail::Dir) -> String {
     let prefix = collection_href(&share.label, relative);
     let mut body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title></head><body><h1>{}</h1><ul>",
@@ -1230,8 +1278,12 @@ fn listing_page(share: &LocalShare, relative: &str, directory: &Path) -> String 
             escape(&share.label)
         ));
     }
-    for entry in list_visible_entries(directory) {
-        let suffix = if entry.is_dir { "/" } else { "" };
+    for entry in visible_entries(directory) {
+        let suffix = if entry.kind == jail::Kind::Dir {
+            "/"
+        } else {
+            ""
+        };
         body.push_str(&format!(
             "<li><a href=\"{}{}{suffix}\">{}{suffix}</a></li>",
             escape(&prefix),
@@ -1243,33 +1295,6 @@ fn listing_page(share: &LocalShare, relative: &str, directory: &Path) -> String 
     body
 }
 
-struct DirEntry {
-    name: String,
-    is_dir: bool,
-    path: PathBuf,
-}
-
-fn list_visible_entries(directory: &Path) -> Vec<DirEntry> {
-    let mut entries = fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if name.starts_with('.') {
-                return None;
-            }
-            Some(DirEntry {
-                is_dir: entry.path().is_dir(),
-                path: entry.path(),
-                name,
-            })
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
-    entries.into_iter().take(MAX_LISTING).collect()
-}
-
 enum DavDocument {
     Xml(String),
     NotFound,
@@ -1278,76 +1303,56 @@ enum DavDocument {
 
 fn dav_document(shares: &[LocalShare], path: &str, depth: u8) -> DavDocument {
     match resolve_request(shares, path) {
-        ShareResponse::Index(_) => {
+        ShareResponse::Index => {
             let mut xml = dav_header();
             xml.push_str(&dav_collection("/", "BlakTail shares", None));
             if depth > 0 {
                 for share in shares.iter().filter(|share| share.enabled) {
+                    let modified = walk(share, &[])
+                        .and_then(|dir| dir.metadata())
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
                     xml.push_str(&dav_collection(
                         &format!("/{}/", share.label),
                         &share.label,
-                        fs::metadata(&share.path).ok().as_ref(),
+                        modified,
                     ));
                 }
             }
             xml.push_str("</D:multistatus>\n");
             DavDocument::Xml(xml)
         }
-        ShareResponse::Listing(_) => {
-            let trimmed = path.trim_start_matches('/');
-            let (label, rest) = match trimmed.split_once('/') {
-                Some((label, rest)) => (label, rest.trim_start_matches('/')),
-                None => (trimmed, ""),
-            };
-            let Some(share) = shares
-                .iter()
-                .find(|share| share.enabled && share.label == label)
-            else {
-                return DavDocument::NotFound;
-            };
-            let root = match fs::canonicalize(&share.path) {
-                Ok(root) => root,
-                Err(_) => return DavDocument::NotFound,
-            };
-            let target = if rest.is_empty() {
-                root.clone()
-            } else {
-                root.join(rest)
-            };
-            let Ok(canonical) = fs::canonicalize(&target) else {
-                return DavDocument::NotFound;
-            };
-            let href = collection_href(&share.label, rest);
-            let display = if rest.is_empty() {
-                share.label.clone()
-            } else {
-                Path::new(rest)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&share.label)
-                    .to_owned()
-            };
+        ShareResponse::Directory { share, rest, dir } => {
+            let rest = rest.join("/");
+            let href = collection_href(&share.label, &rest);
+            let display = rest
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&share.label)
+                .to_owned();
             let mut xml = dav_header();
             xml.push_str(&dav_collection(
                 &href,
                 &display,
-                fs::metadata(&canonical).ok().as_ref(),
+                dir.metadata().and_then(|metadata| metadata.modified()).ok(),
             ));
             if depth > 0 {
-                for entry in list_visible_entries(&canonical) {
+                for entry in visible_entries(&dir) {
                     let child = format!("{href}{}", entry.name);
-                    if entry.is_dir {
+                    if entry.kind == jail::Kind::Dir {
                         xml.push_str(&dav_collection(
                             &format!("{child}/"),
                             &entry.name,
-                            fs::metadata(&entry.path).ok().as_ref(),
+                            entry.modified,
                         ));
                     } else {
                         xml.push_str(&dav_file(
                             &child,
                             &entry.name,
                             content_type(&entry.name),
-                            fs::metadata(&entry.path).ok().as_ref(),
+                            entry.len,
+                            entry.modified,
                         ));
                     }
                 }
@@ -1355,25 +1360,20 @@ fn dav_document(shares: &[LocalShare], path: &str, depth: u8) -> DavDocument {
             xml.push_str("</D:multistatus>\n");
             DavDocument::Xml(xml)
         }
-        ShareResponse::File {
-            path: file,
-            content_type,
-        } => {
-            let name = file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("file");
+        ShareResponse::File { file, name } => {
             let href = if path.starts_with('/') {
                 path.to_owned()
             } else {
                 format!("/{path}")
             };
+            let metadata = file.metadata().ok();
             let mut xml = dav_header();
             xml.push_str(&dav_file(
                 href.trim_end_matches('/'),
-                name,
-                content_type,
-                fs::metadata(&file).ok().as_ref(),
+                &name,
+                content_type(&name),
+                metadata.as_ref().map(fs::Metadata::len).unwrap_or(0),
+                metadata.and_then(|metadata| metadata.modified().ok()),
             ));
             xml.push_str("</D:multistatus>\n");
             DavDocument::Xml(xml)
@@ -1395,12 +1395,12 @@ fn dav_header() -> String {
     String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">")
 }
 
-fn dav_collection(href: &str, display: &str, metadata: Option<&fs::Metadata>) -> String {
+fn dav_collection(href: &str, display: &str, modified: Option<SystemTime>) -> String {
     format!(
         "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype><D:displayname>{}</D:displayname>{}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
         escape_xml(&href_encode(href)),
         escape_xml(display),
-        dav_mtime(metadata)
+        dav_mtime(modified)
     )
 }
 
@@ -1408,30 +1408,29 @@ fn dav_file(
     href: &str,
     display: &str,
     content_type: &str,
-    metadata: Option<&fs::Metadata>,
+    length: u64,
+    modified: Option<SystemTime>,
 ) -> String {
-    let length = metadata.map(fs::Metadata::len).unwrap_or(0);
     format!(
         "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:resourcetype/><D:displayname>{}</D:displayname><D:getcontentlength>{length}</D:getcontentlength><D:getcontenttype>{}</D:getcontenttype>{}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
         escape_xml(&href_encode(href)),
         escape_xml(display),
         escape_xml(content_type),
-        dav_mtime(metadata)
+        dav_mtime(modified)
     )
 }
 
-fn dav_mtime(metadata: Option<&fs::Metadata>) -> String {
-    let Some(metadata) = metadata else {
+fn dav_mtime(modified: Option<SystemTime>) -> String {
+    let Some(modified) = modified else {
         return String::new();
     };
-    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
     format!(
         "<D:getlastmodified>{}</D:getlastmodified>",
         http_date(modified)
     )
 }
 
-fn href_encode(path: &str) -> String {
+pub(crate) fn href_encode(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
@@ -1877,6 +1876,251 @@ mod tests {
         assert!(put.starts_with("HTTP/1.1 403"), "{put}");
         assert!(!root.join("other.txt").exists());
         allowed.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Directory link: a symlink on Unix, a junction on Windows (no admin
+    /// rights needed). `false` when the platform refused to make one.
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        }
+    }
+
+    /// File symlink. Windows needs a privilege or developer mode for this,
+    /// so callers skip that part when it returns `false`.
+    fn link_file(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+
+    fn remove_link(link: &Path) {
+        // A junction or directory symlink is removed as a directory on
+        // Windows and as a file on Unix; neither touches the target.
+        let _ = fs::remove_dir(link).or_else(|_| fs::remove_file(link));
+    }
+
+    fn status_of(response: &str) -> &str {
+        response.get(9..12).unwrap_or("")
+    }
+
+    #[tokio::test]
+    async fn swapped_share_root_is_refused() {
+        let base = temp_dir();
+        let shared = base.join("shared");
+        let outside = base.join("outside");
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(shared.join("note.txt"), "inside").unwrap();
+        fs::write(outside.join("private.key"), "fake-test-secret").unwrap();
+        let share =
+            validate_local_share_mode(&shared, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let server = spawn_on_free_port(share).await;
+        let addr = server.listen_addr();
+        assert_eq!(http_get(addr, "/drop/note.txt").await, "inside");
+
+        // The folder's owner swaps it for a link to somewhere private.
+        fs::rename(&shared, base.join("shared-old")).unwrap();
+        assert!(
+            link_dir(&outside, &shared),
+            "could not create a directory link"
+        );
+        for (method, path) in [
+            ("GET", "/drop/private.key"),
+            ("HEAD", "/drop/private.key"),
+            ("GET", "/drop/"),
+            ("PROPFIND", "/drop/"),
+            ("PROPFIND", "/drop/private.key"),
+            ("DELETE", "/drop/private.key"),
+            ("MKCOL", "/drop/made"),
+        ] {
+            let response = http_exchange(addr, method, path, &[("Depth", "1")]).await;
+            assert_eq!(status_of(&response), "403", "{method} {path}: {response}");
+            assert!(!response.contains("fake-test-secret"), "{response}");
+            assert!(!response.contains("private.key"), "{response}");
+        }
+        assert!(
+            put_share_file(&format!("http://{addr}/drop/planted.txt"), b"x")
+                .await
+                .is_err()
+        );
+        assert!(!outside.join("planted.txt").exists());
+        assert!(!outside.join("made").exists());
+        assert!(outside.join("private.key").exists());
+        server.stop();
+        remove_link(&shared);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn links_inside_the_share_are_not_followed() {
+        let base = temp_dir();
+        let shared = base.join("shared");
+        let outside = base.join("outside");
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(shared.join("note.txt"), "inside").unwrap();
+        fs::write(outside.join("private.key"), "fake-test-secret").unwrap();
+        assert!(
+            link_dir(&outside, &shared.join("inner")),
+            "could not create a directory link"
+        );
+        let file_link = link_file(&outside.join("private.key"), &shared.join("key.txt"));
+        let share =
+            validate_local_share_mode(&shared, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let server = spawn_on_free_port(share).await;
+        let addr = server.listen_addr();
+
+        let listing = http_get(addr, "/drop/").await;
+        assert!(listing.contains("note.txt"), "{listing}");
+        assert!(!listing.contains("inner"), "{listing}");
+        assert!(!listing.contains("key.txt"), "{listing}");
+        let propfind = http_exchange(addr, "PROPFIND", "/drop/", &[("Depth", "1")]).await;
+        assert!(propfind.contains("note.txt"), "{propfind}");
+        assert!(!propfind.contains("inner"), "{propfind}");
+        assert!(!propfind.contains("key.txt"), "{propfind}");
+        for (method, path) in [
+            ("GET", "/drop/inner/private.key"),
+            ("GET", "/drop/inner/"),
+            ("PROPFIND", "/drop/inner/"),
+            ("PROPFIND", "/drop/inner/private.key"),
+            ("DELETE", "/drop/inner/private.key"),
+            ("DELETE", "/drop/inner"),
+            ("MKCOL", "/drop/inner/made"),
+        ] {
+            let response = http_exchange(addr, method, path, &[("Depth", "1")]).await;
+            assert_eq!(status_of(&response), "403", "{method} {path}: {response}");
+            assert!(!response.contains("fake-test-secret"), "{response}");
+        }
+        assert!(
+            put_share_file(&format!("http://{addr}/drop/inner/planted.txt"), b"x")
+                .await
+                .is_err()
+        );
+        // PUT onto the junction or link name itself is refused too.
+        assert!(put_share_file(&format!("http://{addr}/drop/inner"), b"x")
+            .await
+            .is_err());
+        let moved = http_exchange(
+            addr,
+            "MOVE",
+            "/drop/note.txt",
+            &[("Destination", &format!("http://{addr}/drop/inner/note.txt"))],
+        )
+        .await;
+        assert_eq!(status_of(&moved), "403", "{moved}");
+        if file_link {
+            let read = http_exchange(addr, "GET", "/drop/key.txt", &[]).await;
+            assert_eq!(status_of(&read), "403", "{read}");
+            assert!(!read.contains("fake-test-secret"), "{read}");
+            // A PUT over a planted link must not write through it.
+            assert!(
+                put_share_file(&format!("http://{addr}/drop/key.txt"), b"overwritten")
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            fs::read(outside.join("private.key")).unwrap(),
+            b"fake-test-secret"
+        );
+        assert!(!outside.join("planted.txt").exists());
+        assert!(!outside.join("made").exists());
+        assert!(!outside.join("note.txt").exists());
+        server.stop();
+        remove_link(&shared.join("inner"));
+        if file_link {
+            remove_link(&shared.join("key.txt"));
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dot_files_are_hidden_and_denied() {
+        let root = temp_dir();
+        fs::write(root.join("note.txt"), "inside").unwrap();
+        fs::write(root.join(".env"), "fake-test-secret").unwrap();
+        fs::create_dir_all(root.join(".ssh")).unwrap();
+        fs::write(root.join(".ssh").join("id"), "fake-test-secret").unwrap();
+        let share =
+            validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let server = spawn_on_free_port(share).await;
+        let addr = server.listen_addr();
+        let listing = http_get(addr, "/drop/").await;
+        assert!(
+            listing.contains("note.txt") && !listing.contains(".env"),
+            "{listing}"
+        );
+        for (method, path) in [
+            ("GET", "/drop/.env"),
+            ("HEAD", "/drop/.env"),
+            ("GET", "/drop/.ssh/id"),
+            ("GET", "/drop/.ssh/"),
+            ("PROPFIND", "/drop/.env"),
+            ("PROPFIND", "/drop/.ssh/"),
+            ("GET", "/drop/%2eenv"),
+            ("DELETE", "/drop/.env"),
+            ("MKCOL", "/drop/.config"),
+            ("GET", "/drop/note.txt:stream"),
+            ("GET", "/drop/..%5cnote.txt"),
+        ] {
+            let response = http_exchange(addr, method, path, &[("Depth", "1")]).await;
+            assert_eq!(status_of(&response), "403", "{method} {path}: {response}");
+            assert!(!response.contains("fake-test-secret"), "{response}");
+        }
+        assert!(
+            put_share_file(&format!("http://{addr}/drop/.ssh/authorized_keys"), b"x")
+                .await
+                .is_err()
+        );
+        assert!(!root.join(".ssh").join("authorized_keys").exists());
+        assert!(root.join(".env").exists());
+        server.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_streams_large_files_and_put_leaves_no_partial() {
+        let root = temp_dir();
+        let big = vec![b'z'; 300 * 1024];
+        fs::write(root.join("big.bin"), &big).unwrap();
+        let share =
+            validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let server = spawn_on_free_port(share).await;
+        let addr = server.listen_addr();
+        let response = http_exchange(addr, "GET", "/drop/big.bin", &[]).await;
+        assert!(response.contains("Content-Length: 307200"));
+        assert_eq!(response.split("\r\n\r\n").nth(1).unwrap().len(), big.len());
+        let sent = put_share_file(&format!("http://{addr}/drop/new.bin"), &big)
+            .await
+            .unwrap();
+        assert_eq!(sent, 201);
+        assert_eq!(fs::read(root.join("new.bin")).unwrap(), big);
+        let missing = http_exchange(addr, "PUT", "/drop/nolength.txt", &[]).await;
+        assert_eq!(status_of(&missing), "411", "{missing}");
+        let leftovers = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("partial"))
+            .count();
+        assert_eq!(leftovers, 0);
+        server.stop();
         fs::remove_dir_all(root).unwrap();
     }
 }

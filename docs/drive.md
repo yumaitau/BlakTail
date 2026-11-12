@@ -59,8 +59,14 @@ http://store.abcdef12.blaktail:5647/files/
 Finder or rclone can use either URL. `GET`, `HEAD`, `PROPFIND`, `PUT`,
 `MKCOL`, `DELETE`, and `MOVE` are supported on a writable share. `COPY`,
 `LOCK`, and `PROPPATCH` are refused. `PROPFIND` with `Depth: infinity` is
-refused. A `PUT` is limited to 8MB and is held in memory on the sharing
-device.
+refused. A `PUT` needs a `Content-Length`, is limited to 8MB, and is
+streamed to a randomly named temporary file next to the target before it
+replaces it. Dot-files are hidden and refused, and links or junctions inside
+a shared folder are neither listed nor followed.
+
+The folder browser only answers requests whose `Host` is `127.0.0.1`,
+`localhost` or `[::1]` on its own port, so a web page cannot rebind its name
+to the loopback address and drive it.
 
 If port 8080 is already taken, the agent logs the failure and keeps running.
 The overlay listener is unchanged.
