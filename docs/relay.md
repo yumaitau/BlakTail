@@ -25,7 +25,15 @@ Protocol frames use one-byte opcode plus 16-byte node id:
 - `PUNCH`/`PUNCH_ACK` (`7`/`8`): source id plus a random 64-bit challenge.
 
 Registrations expire by capability time and after 120 seconds idle. Clients refresh
-every 25 seconds (every 5 seconds while a probe is unanswered). Relay applies per-source token-bucket limits, rejects oversized
+every 25 seconds (every 5 seconds while a probe is unanswered). A live
+registration moves to a different source only from the same IP (NAT rebinding,
+a new socket, UDP and WebSocket from one host), after it has been silent for 30
+seconds, or, for a UDP registration, with a strictly newer token from the
+node's next coordinator poll. A `REGISTER` copied off the wire and replayed
+from elsewhere therefore cannot take a node's relayed traffic while the node is
+still heard from. When the per-source and per-node bucket tables fill
+(65,536 entries each), buckets that have refilled are dropped first and then
+the least recently used eighth, so new sources are never locked out. Relay applies per-source token-bucket limits, rejects oversized
 frames, and exposes Prometheus text metrics on `127.0.0.1:9702` by default. It never
 decrypts or logs tunnel payloads.
 
@@ -111,7 +119,8 @@ BLAKTAIL_RELAY_WSS_KEY_FILE=/etc/blaktail/relay.key \
   carries one registration; closing it drops the registration at once.
 - Bounds: frames over 2,065 bytes (`SEND` header + 2,048-byte payload) or any
   text message close the connection; handshakes must finish within 10 s
-  (slowloris); at most 4,096 concurrent connections; each connection has a
+  (slowloris); a connection without a valid `REGISTER` 10 s after the
+  upgrade is closed; at most 4,096 concurrent connections; each connection has a
   64-frame outbound queue and excess frames are dropped as UDP would drop
   them; a peer that does not read for 10 s is disconnected. Per-source and
   per-node rate limits are shared with UDP. Behind an ALB the per-source
