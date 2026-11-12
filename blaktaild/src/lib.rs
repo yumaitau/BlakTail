@@ -616,10 +616,7 @@ impl Coordinator {
 
     pub fn with_ca(base: &str, ca_pem: Option<&[u8]>) -> Result<Self, Error> {
         let base = base.trim_end_matches('/').to_owned();
-        if !(base.starts_with("https://")
-            || base.starts_with("http://127.0.0.1")
-            || base.starts_with("http://localhost"))
-        {
+        if !coordinator_url_allowed(&base) {
             return Err(Error::Message(
                 "coordinator must use HTTPS (HTTP is allowed only for localhost)".into(),
             ));
@@ -674,6 +671,8 @@ impl Coordinator {
         Ok(response.json().await?)
     }
     pub async fn device_authorization_approved(&self, device_code: &str) -> Result<bool, Error> {
+        // The device code is a bearer secret in the URL path, so transport
+        // and decode errors drop the URL before they reach a log or prompt.
         let response = self
             .client
             .get(format!(
@@ -681,7 +680,8 @@ impl Coordinator {
                 self.base
             ))
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         let status = response.status();
         if status == reqwest::StatusCode::GONE || status == reqwest::StatusCode::UNAUTHORIZED {
             let message = response
@@ -696,7 +696,8 @@ impl Coordinator {
                 "device authorization polling failed ({status})"
             )));
         }
-        let body: DeviceAuthorizationStatus = response.json().await?;
+        let body: DeviceAuthorizationStatus =
+            response.json().await.map_err(reqwest::Error::without_url)?;
         match (status, body.status.as_str()) {
             (reqwest::StatusCode::OK, "approved") => Ok(true),
             (reqwest::StatusCode::ACCEPTED, "pending") => Ok(false),
@@ -1078,6 +1079,23 @@ impl Coordinator {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+}
+
+/// HTTPS anywhere, or plain HTTP only when the parsed host is exactly a
+/// loopback name (`localhost`, `127.0.0.1`, `[::1]`). A prefix test would
+/// let `http://localhost.example.com` or `http://localhost@example.com` by.
+pub fn coordinator_url_allowed(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => url.host_str().is_some_and(|host| !host.is_empty()),
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
     }
 }
 
@@ -3172,6 +3190,34 @@ fn apply_org_dns_snapshot(state: &mut NodeState, incoming: Option<OrgDnsSnapshot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinator_http_is_only_for_exact_loopback_hosts() {
+        for allowed in [
+            "https://coord.example.com",
+            "http://localhost",
+            "http://localhost:3000",
+            "http://127.0.0.1:8080/",
+            "http://[::1]:3000",
+        ] {
+            assert!(coordinator_url_allowed(allowed), "{allowed}");
+            assert!(Coordinator::new(allowed).is_ok(), "{allowed}");
+        }
+        for refused in [
+            "http://localhost.evil.com",
+            "http://localhost.evil.com:3000",
+            "http://127.0.0.1.evil.com",
+            "http://localhost@evil.com",
+            "http://user:pw@localhost",
+            "http://coord.example.com",
+            "ftp://localhost",
+            "localhost:3000",
+            "",
+        ] {
+            assert!(!coordinator_url_allowed(refused), "{refused}");
+            assert!(Coordinator::new(refused).is_err(), "{refused}");
+        }
+    }
 
     #[test]
     fn ioreg_serial_is_parsed_from_platform_expert_output() {
