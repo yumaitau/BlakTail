@@ -66,8 +66,9 @@ class TunnelService : VpnService() {
             val key = android.util.Base64.decode(parts[0], android.util.Base64.DEFAULT)
             NativeTunnel.addPeer(tunnel, key, parts[1].toByteArray())
         }
-        // Inbound filter between decrypt and the TUN write. A phone enrolled
-        // before policies were stored has none, which leaves it unfiltered.
+        // Inbound filter between decrypt and the TUN write. NativeTunnel.create
+        // starts deny-all; without a stored policy it stays that way until the
+        // first peer-map refresh (relayLoop runs it straight away) installs grants.
         intent.getStringExtra(EXTRA_POLICY)?.let { NativeTunnel.setPolicy(tunnel, it.toByteArray()) }
         val udp = DatagramSocket()
         protect(udp)

@@ -116,5 +116,7 @@ fun TunnelService.Companion.launchIntent(context: Context): Intent? {
         putExtra(TunnelService.EXTRA_ADDRESS, address)
         putExtra(TunnelService.EXTRA_PRIVATE_KEY, Base64.decode(key, Base64.NO_WRAP))
         putStringArrayListExtra(TunnelService.EXTRA_PEERS, peers)
+        // Same as MainActivity: start with the stored grants, not unfiltered.
+        putExtra(TunnelService.EXTRA_POLICY, prefs.getString("policy", null))
     }
 }

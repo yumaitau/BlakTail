@@ -68,6 +68,9 @@ int blaktail_tunnel_update_timers(
  * `allowed_ips`, `ingress`). Invalid JSON installs deny-all and returns -1. */
 int blaktail_tunnel_set_policy(BlakTailTunnel *tunnel, const uint8_t *json, size_t len);
 
+/* Deny-all inbound (replies to own flows only) until set_policy replaces it. */
+int blaktail_tunnel_deny_until_policy(BlakTailTunnel *tunnel);
+
 /* Traffic counters on (non-zero) or off; off discards them at once. */
 int blaktail_tunnel_set_traffic(BlakTailTunnel *tunnel, int enabled);
 
