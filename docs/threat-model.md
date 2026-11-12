@@ -46,7 +46,7 @@ to the waiting node name and WireGuard public key; the raw secret stays in the a
 - Nodes treat the coordinator as the source of truth for membership and ACL.
 - Relays are organisation infrastructure. They forward opaque UDP. They are not a second control plane.
 - GitHub holds public code. It must not hold keys, env files, or the coordinator database.
-- CI runs on GitHub-hosted runners (`ubuntu-latest`, `macos-latest`). The tree is never uploaded to a scanning SaaS; gitleaks and cargo-deny run as checksum-pinned binaries inside the workflow.
+- CI (build, test, gitleaks, cargo-deny, releases, PR review) runs on GitHub-hosted runners (`ubuntu-latest`, `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-latest`, `macos-15`, `macos-15-intel`). Only two manual drills use self-hosted runners: `aws-e2e.yml` (`[self-hosted, linux]`, `aws-e2e` environment) and `two-vm-e2e.yml` (`[self-hosted]`, also weekly). Neither runs on `pull_request`, so fork code never reaches them. The tree is never uploaded to a scanning SaaS; gitleaks and cargo-deny run as checksum-pinned binaries inside the workflow.
 
 ## Attackers we actually design for
 
@@ -302,7 +302,7 @@ If a secret does land in git: treat it as leaked, rotate it, rewrite or abandon 
 
 ## CI
 
-GitHub-hosted runners. The security workflow must not upload the tree to a scanning SaaS; scanners are pinned binaries fetched with verified checksums.
+GitHub-hosted runners for every push and pull request, including the gitleaks and cargo-deny jobs. Self-hosted runners serve only `aws-e2e.yml` (`workflow_dispatch`, `aws-e2e` environment, AWS access through OIDC) and `two-vm-e2e.yml` (`workflow_dispatch` and a weekly schedule, SSH to two disposable VMs); keep them on hosts that hold no long-lived secrets and never add a `pull_request` trigger to either. Every `uses:` is pinned to a commit SHA. The security workflow must not upload the tree to a scanning SaaS; scanners are pinned binaries fetched with verified checksums.
 
 | Check | Job |
 | --- | --- |
