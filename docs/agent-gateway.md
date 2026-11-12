@@ -153,7 +153,10 @@ No `/api/v1` automation endpoints exist for the agent network yet.
   private-service CA key), never returned after creation and never logged.
   They leave the coordinator only inside a grant to an authenticated gateway
   node, which holds them in memory for one request. Agent keys are stored as
-  SHA-256 hashes. The gateway wraps keys, node token and credentials in a type
+  SHA-256 hashes. Changing a provider's base URL (after normalisation, so a
+  trailing slash does not count) while it holds a credential is refused unless
+  the same update supplies a new credential or clears it, so an admin cannot
+  redirect a stored credential to a host they control. The gateway wraps keys, node token and credentials in a type
   whose debug output is `[redacted]`, and tests capture all logs and assert
   none of them appear.
 - **Fail closed.** No coordinator, no request (`503 gateway_unavailable`).
@@ -183,7 +186,8 @@ No `/api/v1` automation endpoints exist for the agent network yet.
   credential never returned/stored in clear/audited, full-logging owner + ICIP
   acknowledgement + ≤30 days, content sealed and purged on mode change,
   usage recorded once by the reserving gateway, cross-organisation isolation,
-  member/network-admin/auditor rejection, provider URL validation.
+  member/network-admin/auditor rejection, provider URL validation, base URL
+  change needs the credential again.
 - `cargo test -p blaktail-agentgw` — a real in-memory coordinator, the gateway
   and a local axum mock upstream: non-streaming and byte-for-byte SSE
   passthrough with usage metered, redaction before forwarding, bad key and
