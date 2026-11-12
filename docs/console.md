@@ -273,6 +273,16 @@ recovery process. Deleting an identity cascades only its own network accounts an
 memberships; unrelated linked identities remain. Provider-specific
 reauthentication must preserve provider MFA when OIDC linking is enabled.
 
+Every single sign-on start sets a ten-minute, HttpOnly, `SameSite=Lax` binding
+cookie (Secure on HTTPS, scoped to `/api/oidc/callback`) and stores only its
+SHA-256 with the state row; the callback refuses a missing or foreign cookie and
+clears it, so a callback URL from another browser cannot be completed. A plain
+sign-in never links, whatever session the browser already has. Linking an
+identity-provider sign-in happens only from **Settings, Link single sign-on**: a
+same-origin form post by a signed-in user, whose state row records that user and
+session. The callback links only back into that same user and session, within the
+link freshness window.
+
 The browser `GET /api/me` and desktop `GET /api/desktop/me` responses list all
 live organisations and network accounts. The workspace cookie selects only which
 organisation-scoped ACL, key, audit, invitation, and enrolment pages are shown; it

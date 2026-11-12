@@ -28,6 +28,15 @@ function trustedOrigins(): Set<string> {
 }
 
 export function assertSameOrigin(request: Request): void {
+  assertTrustedOrigin(request);
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    throw new RequestSecurityError("JSON content type is required.", 415);
+  }
+}
+
+/** Origin check alone, for plain HTML form posts. */
+export function assertTrustedOrigin(request: Request): void {
   const origin = request.headers.get("origin");
   if (!origin) {
     throw new RequestSecurityError("Request origin is required.", 403);
@@ -40,10 +49,6 @@ export function assertSameOrigin(request: Request): void {
   }
   if (!trustedOrigins().has(parsed)) {
     throw new RequestSecurityError("Request origin is not allowed.", 403);
-  }
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().startsWith("application/json")) {
-    throw new RequestSecurityError("JSON content type is required.", 415);
   }
 }
 

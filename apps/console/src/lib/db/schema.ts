@@ -283,6 +283,13 @@ export const oidcLoginState = pgTable(
     codeVerifier: text("code_verifier").notNull(),
     nonce: text("nonce").notNull(),
     redirectTo: text("redirect_to").notNull(),
+    /** SHA-256 of the browser-binding cookie set by /api/oidc/start. */
+    bindingHash: text("binding_hash").notNull(),
+    /** Set only by an explicit, authenticated link start from Settings. */
+    linkUserId: text("link_user_id").references(() => user.id, {
+      onDelete: "cascade",
+    }),
+    linkSessionId: text("link_session_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
