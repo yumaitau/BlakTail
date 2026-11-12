@@ -110,7 +110,7 @@ class WidgetToggleReceiver : BroadcastReceiver() {
 fun TunnelService.Companion.launchIntent(context: Context): Intent? {
     val prefs = context.getSharedPreferences(BlakTailWidget.PREFS, Context.MODE_PRIVATE)
     val address = prefs.getString("address", null) ?: return null
-    val key = prefs.getString("privateKey", null) ?: return null
+    val key = Secrets.read(prefs, "privateKey") ?: return null
     val peers = ArrayList(prefs.getStringSet("peers", emptySet()) ?: emptySet())
     return Intent(context, TunnelService::class.java).apply {
         putExtra(TunnelService.EXTRA_ADDRESS, address)

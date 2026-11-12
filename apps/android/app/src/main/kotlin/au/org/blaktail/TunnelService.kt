@@ -185,7 +185,7 @@ class TunnelService : VpnService() {
         val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
         val coordinator = prefs.getString("coordinator", null) ?: return
         val nodeId = prefs.getString("nodeId", null) ?: return
-        val nodeToken = prefs.getString("nodeToken", null) ?: return
+        val nodeToken = Secrets.read(prefs, "nodeToken") ?: return
         val map = runCatching { EnrolmentClient(coordinator).peers(nodeId, nodeToken) }.getOrNull() ?: return
         // The same response carries the current inbound grants.
         NativeTunnel.setPolicy(tunnel, map.policy.toByteArray())

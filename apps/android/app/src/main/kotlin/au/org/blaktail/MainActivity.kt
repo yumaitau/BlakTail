@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity() {
                         getSharedPreferences("blaktail", MODE_PRIVATE).edit()
                             .putString("address", joined.address)
                             .putString("nodeId", joined.id)
-                            .putString("nodeToken", joined.nodeToken)
+                            .putString("nodeToken", Secrets.seal(joined.nodeToken))
                             .putString("coordinator", coordinator.text.toString())
                             .putStringSet("peers", map.peers.toSet())
                             .putString("policy", map.policy)
@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         thread {
             runCatching { DesktopSignIn.exchange(pending, code) }
                 .onSuccess { token ->
-                    prefs.edit().putString("session", token).putString("console", consoleBase).apply()
+                    prefs.edit().putString("session", Secrets.seal(token)).putString("console", consoleBase).apply()
                     runOnUiThread {
                         status.text = "Signed in. Enrol this phone, then approve the code in the console."
                     }
@@ -167,16 +167,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun privateKey(): ByteArray {
         val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
-        prefs.getString("privateKey", null)?.let { return Base64.decode(it, Base64.NO_WRAP) }
+        Secrets.read(prefs, "privateKey")?.let { return Base64.decode(it, Base64.NO_WRAP) }
         val created = ByteArray(32).also(SecureRandom()::nextBytes)
-        prefs.edit().putString("privateKey", Base64.encodeToString(created, Base64.NO_WRAP)).apply()
+        prefs.edit()
+            .putString("privateKey", Secrets.seal(Base64.encodeToString(created, Base64.NO_WRAP)))
+            .apply()
         return created
     }
 
     private fun connectTunnel() {
         val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
         val address = prefs.getString("address", null)
-        val key = prefs.getString("privateKey", null)
+        val key = Secrets.read(prefs, "privateKey")
         if (address == null || key == null) {
             status.text = "Join this phone before connecting"
             return
