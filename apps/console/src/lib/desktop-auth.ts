@@ -30,6 +30,7 @@ type CredentialRow = {
   session_expires_at: Date;
   session_created_at: Date;
   session_updated_at: Date;
+  session_auth_method: string | null;
   user_id: string;
   email: string;
   name: string;
@@ -55,6 +56,7 @@ export async function sessionFromBearer(request: Request): Promise<Session | nul
     SELECT d.id AS credential_id, d.expires_at AS credential_expires_at, d.revoked_at,
       s.id AS session_id, s.expires_at AS session_expires_at,
       s.created_at AS session_created_at, s.updated_at AS session_updated_at,
+      s.auth_method AS session_auth_method,
       u.id AS user_id, u.email, u.name, u.email_verified, u.image,
       u.two_factor_enabled, u.created_at AS user_created_at, u.updated_at AS user_updated_at
     FROM desktop_credential d
@@ -98,6 +100,9 @@ export async function sessionFromBearer(request: Request): Promise<Session | nul
       updatedAt: new Date(row.session_updated_at),
       ipAddress: null,
       userAgent: null,
+      // The approving browser session's sign-in method, so privileged MFA
+      // rules judge the desktop credential exactly as they judge that session.
+      authMethod: row.session_auth_method,
     },
     user: {
       id: row.user_id,
