@@ -102,6 +102,16 @@ pub fn email_allowed(email: &str, domains: &[String]) -> bool {
         && (domains.is_empty() || domains.iter().any(|d| d.eq_ignore_ascii_case(domain)))
 }
 
+/// A domain rule is only meaningful if the provider vouches for the address:
+/// with domain rules set, `email_verified` must be present and `true`.
+/// Without rules, only an explicit `false` is refused.
+pub fn email_verification_ok(email_verified: Option<bool>, domains: &[String]) -> bool {
+    match email_verified {
+        Some(verified) => verified,
+        None => domains.is_empty(),
+    }
+}
+
 fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(COOKIE)
@@ -327,7 +337,7 @@ impl Oidc {
         if claims.nonce.as_deref() != Some(flow.nonce.as_str()) {
             return Err("sign-in nonce did not match".into());
         }
-        if claims.email_verified == Some(false) {
+        if !email_verification_ok(claims.email_verified, domains) {
             return Err("your email address is not verified with the identity provider".into());
         }
         let email = claims
@@ -482,6 +492,17 @@ mod tests {
         ));
         assert!(!email_allowed("@example.org.au", &[]));
         assert!(!email_allowed("nobody", &[]));
+    }
+
+    #[test]
+    fn domain_rules_require_a_verified_email() {
+        let rules = vec!["example.org.au".to_owned()];
+        assert!(email_verification_ok(Some(true), &rules));
+        assert!(!email_verification_ok(None, &rules));
+        assert!(!email_verification_ok(Some(false), &rules));
+        assert!(email_verification_ok(None, &[]));
+        assert!(email_verification_ok(Some(true), &[]));
+        assert!(!email_verification_ok(Some(false), &[]));
     }
 
     #[test]

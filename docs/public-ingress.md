@@ -84,7 +84,9 @@ provider before anything reaches the target. The ingress runs the
 authorisation-code flow with PKCE and nonce, verifies the ID token signature
 (JWKS, asymmetric algorithms only), issuer, audience and expiry, requires an
 email that is not marked unverified, and applies the route's optional email
-domain allow-list. It then sets a host-bound, HMAC-signed `__Host-` session
+domain allow-list. When the route has an allow-list, the ID token must carry
+`email_verified: true`; a missing claim is refused, because an unverified
+address could otherwise claim any domain. It then sets a host-bound, HMAC-signed `__Host-` session
 cookie (8 hours, `Secure; HttpOnly; SameSite=Lax`). The ingress strips its own
 cookies before forwarding and passes the signed-in email as `X-BlakTail-User`
 (clients cannot inject that header).
