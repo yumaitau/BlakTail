@@ -58,6 +58,13 @@ the complete set, and publishes only after re-downloading and verifying the byte
 Enable GitHub release immutability before the first tag so the published tag and
 assets cannot later be replaced.
 
+The Linux, macOS and publish jobs run in the `release` GitHub environment. Create
+it in repository settings before the first tag, with required reviewers and a
+deployment rule that allows only `v*.*.*` tags; the signing secrets below can
+then move from repository secrets to that environment. Every `uses:` in
+`.github/workflows` is pinned to a full commit SHA with the release tag as a
+comment, so a moved or compromised action tag cannot change what runs.
+
 The macOS jobs fail closed unless these Actions secrets exist:
 
 - `MACOS_DEVELOPER_CERTIFICATES_P12_BASE64`
