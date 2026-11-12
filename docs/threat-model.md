@@ -106,6 +106,18 @@ always-on onshore gateway. What each compromise buys:
   `BLAKTAIL_SSH_USER_CA`, `--allow-remote-jobs`) is the boundary; leave it
   off where that risk is unacceptable.
 
+### Desktop and mobile app sign-in
+
+The apps sign in with PKCE ([console.md](console.md#desktop-and-mobile-sign-in)).
+A page that sends a signed-in person to `/desktop/auth` gets nothing without the
+person pressing **Allow**, and the console page cannot be framed. Another app
+that registers `blaktail://` and catches the callback gets only a 60-second code
+it cannot redeem without the verifier. A stolen desktop credential is scoped to
+`/api/desktop/*`, cannot be used as a browser cookie, and dies with app sign-out,
+30 days, or the approving browser session. Suspension and role changes apply on
+the next request. Limit: someone who persuades the person to press **Allow** for
+a request they did not start gets that person's desktop access.
+
 ### Offshore SaaS mistake
 
 Typical ways to break the onshore rule without dropping a key in Slack:

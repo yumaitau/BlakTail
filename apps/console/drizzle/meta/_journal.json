@@ -85,6 +85,13 @@
       "when": 1791360000000,
       "tag": "0011_session_auth_method",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791446400000,
+      "tag": "0012_desktop_credential",
+      "breakpoints": true
     }
   ]
 }

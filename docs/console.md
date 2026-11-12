@@ -221,6 +221,33 @@ and does not issue or replace a Better Auth session. The desktop session endpoin
 also returns the full workspace list and accepts `X-BlakTail-Organisation` for an
 explicit, membership-checked selection.
 
+### Desktop and mobile sign-in
+
+The Mac, iPhone and Android apps never receive the browser session. They use
+PKCE (RFC 7636, S256 only):
+
+1. The app opens `/desktop/auth?redirect_uri=blaktail://auth/callback&state=…&code_challenge=…&code_challenge_method=S256`.
+   `redirect_uri` must be exactly `blaktail://auth/callback`; `state` is 16–256
+   URL-safe characters; the challenge is base64url(SHA-256(verifier)).
+2. The person signs in if needed and presses **Allow**. Nothing is issued without
+   that press. The page sends a same-origin JSON `POST /api/desktop/auth/authorize`;
+   the console stores a single-use code (hashed, 60 seconds, bound to the user,
+   the approving browser session and the challenge) and the page opens
+   `blaktail://auth/callback?code=btc_…&state=…`. **Cancel** opens
+   `blaktail://auth/callback?error=access_denied&state=…`.
+3. The app checks `state`, then `POST /api/desktop/auth/token` with JSON
+   `{ "code": …, "code_verifier": … }`. A wrong verifier burns the code. The
+   response is `{ "token": "btd_…", "token_type": "Bearer", "expires_at": … }`.
+4. The app sends `Authorization: Bearer btd_…` to `/api/desktop/*`. Each request
+   re-resolves identity suspension, memberships and roles like a browser request.
+   Browser session tokens are refused as Bearer.
+
+A desktop credential is stored hashed (`desktop_credential`) and ends at the
+first of: app sign-out (`DELETE /api/desktop/auth/token` with the Bearer),
+30 days, or the end of the browser session that approved it (sign-out in that
+browser, revoking sessions, password change that signs other sessions out, or
+session expiry). The apps then ask the person to sign in again.
+
 Lost sole-owner credentials have no web reset. From a trusted host, create a new
 protected password file and run:
 
