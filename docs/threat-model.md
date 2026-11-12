@@ -196,11 +196,23 @@ recovery: if the private key may have leaked, revoke the node and enrol a new on
 
 **Revoke is not instant if the coordinator is down.** Peers keep the last applied WireGuard configuration when polling fails, so existing tunnels survive a coordinator outage. That is deliberate. It also means a revoke does not propagate until peers can reach the coordinator again.
 
-**Overlay shares are unauthenticated HTTP and read-only WebDAV.** The listener
-binds only the node's tailnet IPv4 address. Anyone who can already reach that
-node over the overlay can list and read the published directory. There is no
-share password. macOS still has no packet filter, so the bind is the control
-there. Writable uploads are rejected.
+**Overlay shares are unauthenticated HTTP and WebDAV.** The listener binds
+only the node's tailnet IPv4 address and there is no share password. Without a
+`drive` policy, anyone who can reach that address and port can list and read
+the published folder. With a `drive` policy the listener matches the TCP source
+address against the coordinator's caller grants; WireGuard only delivers a
+peer's packets with source addresses in that peer's allowed IPs, so the grant
+follows the peer's overlay address, but it trusts the coordinator's grant list,
+and any process or local user on the sharing device (loopback or its own
+overlay address, including through the folder browser on `127.0.0.1:8080`)
+gets the device's local grant. macOS still has no packet filter, so the bind is
+the control there. Every share is served read-only unless the agent on the
+sharing device runs with `BLAKTAIL_ALLOW_WRITABLE_SHARES=1`; the coordinator,
+console and policy cannot turn writes on, only narrow them. With the opt-in, a
+share marked writable accepts `PUT`, `MKCOL`, `DELETE` and `MOVE` from anyone
+the rules above allow, and files are written as the agent's user (root or
+SYSTEM). Paths never follow links or junctions out of the folder, and
+dot-files are refused.
 
 **This is not IRAP.** Public code, org-held keys, and onshore hosting are the product. Formal accreditation is out of scope.
 

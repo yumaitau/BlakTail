@@ -30,8 +30,16 @@ folders, all on TCP port 5647.
 as `C:\Shared\Docs` are accepted.
 
 `blaktaild share enable|disable|send|list` still works. `drive share`
-publishes the folder as writable. A share created read-only stays read-only
+publishes the folder marked writable. A share created read-only stays read-only
 even when a grant says `rw`.
+
+Writes are off unless you opt in on the sharing device. The agent serves every
+share read-only until it runs with `BLAKTAIL_ALLOW_WRITABLE_SHARES=1` in its
+own environment (the systemd unit or launchd plist, or a machine-wide
+environment variable on Windows followed by a service restart). The
+coordinator, console and policy cannot set it. Peers may still see a share as
+writable in their catalog; the sharing device answers writes with 403. Files
+are written as the agent's user (root or SYSTEM).
 
 ## Browse
 

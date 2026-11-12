@@ -170,7 +170,8 @@ enum ShareCommand {
         path: PathBuf,
         #[arg(long)]
         name: Option<String>,
-        /// Accept PUT of a single file. Omitted shares stay read-only.
+        /// Mark the share writable. Writes are still refused unless the agent
+        /// on this device runs with BLAKTAIL_ALLOW_WRITABLE_SHARES=1.
         #[arg(long)]
         writable: bool,
     },
@@ -192,7 +193,8 @@ enum ShareCommand {
 
 #[derive(Subcommand)]
 enum DriveCommand {
-    /// Publish a writable folder. The name is stored in lowercase.
+    /// Publish a folder marked writable. The name is stored in lowercase.
+    /// Writes need BLAKTAIL_ALLOW_WRITABLE_SHARES=1 on the agent.
     Share { name: String, path: PathBuf },
     /// Remove a published folder.
     Unshare { name: String },
@@ -991,6 +993,14 @@ async fn manage_shares(
     }
     if let Some(active) = server.take() {
         active.stop();
+    }
+    if !blaktaild::share::writable_shares_allowed()
+        && local.iter().any(|share| share.enabled && !share.read_only)
+    {
+        warn!(
+            "serving writable shares read-only; set {}=1 in the agent's environment to accept writes",
+            blaktaild::share::ALLOW_WRITABLE_SHARES_ENV
+        );
     }
     match ShareServer::spawn_with_gate(bind_ip, &local, gate).await {
         Ok(created) => {
@@ -2064,6 +2074,9 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                     let shares = load_shares(state_dir)?;
                     coordinator.publish_shares(&state, &shares).await?;
                     println!("share enabled {}", share.url(&state.dns_name));
+                    if writable {
+                        print_writable_note();
+                    }
                 }
                 ShareCommand::Disable { name } => {
                     let shares = disable_share(state_dir, name.as_deref())?;
@@ -2099,6 +2112,7 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 let share = drive_share(state_dir, &path, &name)?;
                 publish_drive(state_dir, cli.coord_ca.as_deref()).await?;
                 println!("shared {} as {}", share.label, share.as_user);
+                print_writable_note();
             }
             DriveCommand::Unshare { name } => {
                 drive_unshare(state_dir, &name)?;
@@ -2181,6 +2195,13 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
 
 /// Fetches the organisation's service CA, checks its fingerprint, and either
 /// writes it out or installs it after explicit confirmation.
+fn print_writable_note() {
+    println!(
+        "writes are accepted only while the agent runs with {}=1 (local setting; the coordinator cannot change it); anyone the share's network policy or drive grants allow can then change files",
+        blaktaild::share::ALLOW_WRITABLE_SHARES_ENV
+    );
+}
+
 async fn trust_service_ca(
     coordinator: &Coordinator,
     state: &blaktaild::NodeState,

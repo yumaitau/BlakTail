@@ -26,6 +26,29 @@ const MAX_HEADER: usize = 8_192;
 const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
+/// Local opt-in for share writes. Only the environment of the agent process
+/// on the sharing device decides it; nothing from the coordinator, the
+/// console or `shares.json` can turn writes on.
+pub const ALLOW_WRITABLE_SHARES_ENV: &str = "BLAKTAIL_ALLOW_WRITABLE_SHARES";
+
+/// Whether this process may accept writes to shares marked writable.
+pub fn writable_shares_allowed() -> bool {
+    std::env::var(ALLOW_WRITABLE_SHARES_ENV).is_ok_and(|value| value.trim() == "1")
+}
+
+/// Shares as this process will serve them: every share is read-only unless
+/// the local opt-in is set.
+pub fn effective_shares(shares: &[LocalShare], allow_writes: bool) -> Vec<LocalShare> {
+    shares
+        .iter()
+        .cloned()
+        .map(|mut share| {
+            share.read_only |= !allow_writes;
+            share
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LocalShare {
     pub label: String,
@@ -176,10 +199,18 @@ impl ShareServer {
         shares: &[LocalShare],
         gate: ShareGate,
     ) -> Result<Self, Error> {
-        let enabled = shares
-            .iter()
+        Self::spawn_with_policy(bind_ip, shares, gate, writable_shares_allowed()).await
+    }
+
+    async fn spawn_with_policy(
+        bind_ip: IpAddr,
+        shares: &[LocalShare],
+        gate: ShareGate,
+        allow_writes: bool,
+    ) -> Result<Self, Error> {
+        let enabled = effective_shares(shares, allow_writes)
+            .into_iter()
             .filter(|share| share.enabled)
-            .cloned()
             .collect::<Vec<_>>();
         if enabled.is_empty() {
             return Err(Error::Message("no enabled shares to serve".into()));
@@ -216,10 +247,9 @@ impl ShareServer {
     }
 
     pub fn matches(&self, bind_ip: IpAddr, shares: &[LocalShare], gate: &ShareGate) -> bool {
-        let enabled = shares
-            .iter()
+        let enabled = effective_shares(shares, writable_shares_allowed())
+            .into_iter()
             .filter(|share| share.enabled)
-            .cloned()
             .collect::<Vec<_>>();
         self.listen_addr.ip() == bind_ip
             && self.fingerprint
@@ -1636,6 +1666,27 @@ mod tests {
         panic!("no free localhost port for share test");
     }
 
+    // Writable shares only accept writes with the local opt-in, which tests
+    // pass directly instead of through the process environment.
+    async fn spawn_writable(mut share: LocalShare) -> ShareServer {
+        for _ in 0..20 {
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            share.port = probe.local_addr().unwrap().port();
+            drop(probe);
+            if let Ok(server) = ShareServer::spawn_with_policy(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                std::slice::from_ref(&share),
+                ShareGate::open(),
+                true,
+            )
+            .await
+            {
+                return server;
+            }
+        }
+        panic!("no free localhost port for share test");
+    }
+
     // Parallel tests can read the same clock value; a counter cannot collide.
     static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1727,7 +1778,7 @@ mod tests {
 
         let writable =
             validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let writable_server = spawn_on_free_port(writable).await;
+        let writable_server = spawn_writable(writable).await;
         let write_addr = writable_server.listen_addr();
         let sent = put_share_file(
             &format!("http://{write_addr}/drop/arrived.txt"),
@@ -1822,7 +1873,7 @@ mod tests {
         let root = temp_dir();
         let share =
             validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let server = spawn_on_free_port(share).await;
+        let server = spawn_writable(share).await;
         let addr = server.listen_addr();
         let mkcol = http_exchange(addr, "MKCOL", "/drop/folder", &[]).await;
         assert!(mkcol.starts_with("HTTP/1.1 201"), "{mkcol}");
@@ -1931,7 +1982,7 @@ mod tests {
         fs::write(outside.join("private.key"), "fake-test-secret").unwrap();
         let share =
             validate_local_share_mode(&shared, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let server = spawn_on_free_port(share).await;
+        let server = spawn_writable(share).await;
         let addr = server.listen_addr();
         assert_eq!(http_get(addr, "/drop/note.txt").await, "inside");
 
@@ -1984,7 +2035,7 @@ mod tests {
         let file_link = link_file(&outside.join("private.key"), &shared.join("key.txt"));
         let share =
             validate_local_share_mode(&shared, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let server = spawn_on_free_port(share).await;
+        let server = spawn_writable(share).await;
         let addr = server.listen_addr();
 
         let listing = http_get(addr, "/drop/").await;
@@ -2060,7 +2111,7 @@ mod tests {
         fs::write(root.join(".ssh").join("id"), "fake-test-secret").unwrap();
         let share =
             validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let server = spawn_on_free_port(share).await;
+        let server = spawn_writable(share).await;
         let addr = server.listen_addr();
         let listing = http_get(addr, "/drop/").await;
         assert!(
@@ -2102,7 +2153,7 @@ mod tests {
         fs::write(root.join("big.bin"), &big).unwrap();
         let share =
             validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
-        let server = spawn_on_free_port(share).await;
+        let server = spawn_writable(share).await;
         let addr = server.listen_addr();
         let response = http_exchange(addr, "GET", "/drop/big.bin", &[]).await;
         assert!(response.contains("Content-Length: 307200"));
@@ -2120,6 +2171,48 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains("partial"))
             .count();
         assert_eq!(leftovers, 0);
+        server.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn writable_shares_refuse_writes_without_the_local_opt_in() {
+        let root = temp_dir();
+        fs::write(root.join("note.txt"), "inside").unwrap();
+        let mut share =
+            validate_local_share_mode(&root, Some("drop"), DEFAULT_SHARE_PORT, false).unwrap();
+        let effective = effective_shares(std::slice::from_ref(&share), false);
+        assert!(effective[0].read_only);
+        assert!(!effective_shares(std::slice::from_ref(&share), true)[0].read_only);
+        let mut server = None;
+        for _ in 0..20 {
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            share.port = probe.local_addr().unwrap().port();
+            drop(probe);
+            if let Ok(spawned) = ShareServer::spawn_with_policy(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                std::slice::from_ref(&share),
+                ShareGate::open(),
+                false,
+            )
+            .await
+            {
+                server = Some(spawned);
+                break;
+            }
+        }
+        let server = server.expect("no free localhost port for share test");
+        let addr = server.listen_addr();
+        assert!(put_share_file(&format!("http://{addr}/drop/new.txt"), b"x")
+            .await
+            .is_err());
+        for (method, path) in [("MKCOL", "/drop/made"), ("DELETE", "/drop/note.txt")] {
+            let response = http_exchange(addr, method, path, &[]).await;
+            assert!(response.contains("read-only"), "{method}: {response}");
+        }
+        assert_eq!(http_get(addr, "/drop/note.txt").await, "inside");
+        assert!(!root.join("new.txt").exists());
+        assert!(!root.join("made").exists());
         server.stop();
         fs::remove_dir_all(root).unwrap();
     }

@@ -13,7 +13,8 @@ The coordinator stores share metadata (`label`, absolute path, port, enabled).
 It never stores file bytes. Other managed agents discover shares on the
 authenticated peer map. Operators and peers browse
 `http://<node>.<org>.blaktail:5647/<label>/`. Finder can mount the same URL
-with Go → Connect to Server. Write methods stay 403.
+with Go → Connect to Server. Write methods stay 403 unless the sharing device
+opts in locally (see Limits).
 
 ## Why this first
 
@@ -29,7 +30,14 @@ without inventing a new data-plane or storing files in the coordinator.
 
 ## Limits that stay explicit
 
-- Read-only. Writable shares need an auth model that does not exist yet.
+- Read-only by default. Writes (`PUT`, `MKCOL`, `DELETE`, `MOVE` on a share
+  marked writable with `share enable --writable` or `drive share`) are
+  accepted only while the agent on the sharing device runs with
+  `BLAKTAIL_ALLOW_WRITABLE_SHARES=1`. That is a local environment setting the
+  coordinator and console cannot change. There is still no per-user share
+  authentication: without a `drive` policy any peer that can reach the port
+  can write; with one, `rw` grants keyed by the caller's overlay address
+  decide, and local processes on the sharing device get its local grant.
 - One TCP port per node (default 5647). Several labels share that port.
 - Bind is overlay IPv4 only. No LAN and no `0.0.0.0`.
 - Path jail: the root is stored canonical at enable time and must still
@@ -46,6 +54,8 @@ without inventing a new data-plane or storing files in the coordinator.
 
 ## Follow-on
 
-Write/upload and per-share ACL selectors are later slices. They are not implied
-by this ADR. Read-only WebDAV (OPTIONS, PROPFIND Depth 0/1) is part of this
+Per-share ACL selectors (`drive` grants) and the locally opted-in write path
+described above have since landed; see [drive.md](../drive.md). Authenticated
+writes (per-user identity rather than overlay address) are not implied by this
+ADR. Read-only WebDAV (OPTIONS, PROPFIND Depth 0/1) is part of this
 record so Finder can mount the same overlay URL.
