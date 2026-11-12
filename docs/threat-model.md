@@ -28,6 +28,10 @@ The coordinator stores hashes of join keys and node tokens, not the secrets them
 Browser enrollment follows the same rule: SQLite stores hashes of the high-entropy
 device secret and the short display code. Approval creates a single-use grant bound
 to the waiting node name and WireGuard public key; the raw secret stays in the agent.
+Starting an enrollment is unauthenticated, so the coordinator accepts only a
+real WireGuard public key (base64 of 32 bytes), caps the body at 4 KiB and
+allows 10 starts a minute per source address (IPv6 per /64), on top of the
+1,000 pending enrollments cap.
 
 ## Trust boundaries
 

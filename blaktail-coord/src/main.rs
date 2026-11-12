@@ -302,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = axum_server::bind_rustls(bind, tls)
             .handle(api_handle)
-            .serve(api_router.into_make_service()) => result?,
+            .serve(api_router.into_make_service_with_connect_info::<SocketAddr>()) => result?,
         result = axum::serve(metrics_listener, metrics_router.into_make_service())
             .with_graceful_shutdown(async move {
                 if !*metrics_shutdown.borrow() {

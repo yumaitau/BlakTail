@@ -71,7 +71,7 @@ pub fn check_policy_document(document: &str) -> Result<PolicyCheckReport, String
 }
 
 use axum::{
-    extract::{MatchedPath, Path as UrlPath, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Path as UrlPath, Query, Request, State},
     http::{header::AUTHORIZATION, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -114,6 +114,11 @@ const MAX_NODE_KEY_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 const DEVICE_AUTH_TTL_SECS: i64 = 10 * 60;
 const DEVICE_AUTH_POLL_SECS: u64 = 2;
 const MAX_PENDING_DEVICE_AUTHS: i64 = 1_000;
+/// Unauthenticated device-authorization starts allowed per source address
+/// (IPv6 by /64) per window.
+const DEVICE_AUTH_STARTS_PER_SOURCE: u32 = 10;
+const DEVICE_AUTH_START_WINDOW_SECS: i64 = 60;
+const DEVICE_AUTH_MAX_BODY_BYTES: usize = 4 * 1024;
 const MAX_FRIENDLY_NAME_CHARS: usize = 64;
 const DEFAULT_CONSOLE_URL: &str = "https://console.invalid";
 const CONSOLE_ASSERTION_ISSUER: &str = "blaktail-console";
@@ -1378,8 +1383,20 @@ impl ApiRateLimiter {
             return false;
         }
         stamps.push(now);
+        // Keys can come from unauthenticated sources; drop idle ones so the
+        // map cannot grow without bound.
+        if map.len() > Self::MAX_KEYS {
+            map.retain(|_, stamps| {
+                stamps
+                    .last()
+                    .is_some_and(|last| now.saturating_sub(*last) < Self::IDLE_SECS)
+            });
+        }
         true
     }
+
+    const MAX_KEYS: usize = 10_000;
+    const IDLE_SECS: i64 = 60 * 60;
 }
 
 #[derive(Clone)]
@@ -1478,7 +1495,8 @@ pub fn app_with_relays_console_and_metrics(
         .route("/readyz", get(readiness))
         .route(
             "/v1/device-authorizations",
-            post(create_device_authorization),
+            post(create_device_authorization)
+                .layer(DefaultBodyLimit::max(DEVICE_AUTH_MAX_BODY_BYTES)),
         )
         .route(
             "/v1/device-authorizations/:device_code",
@@ -1855,8 +1873,34 @@ struct DeviceAuthorizationApprovalRow {
     approved_user: Option<String>,
 }
 
+/// Rate-limit key for an unauthenticated caller: the IPv4 address, or the
+/// IPv6 /64 (one site's worth of addresses). Without connection info (only
+/// in tests) every caller shares one bucket.
+fn source_rate_key(prefix: &str, peer: Option<SocketAddr>) -> String {
+    match peer.map(|peer| peer.ip()) {
+        Some(IpAddr::V4(ip)) => format!("{prefix}:{ip}"),
+        Some(IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
+            Some(v4) => format!("{prefix}:{v4}"),
+            None => {
+                let s = ip.segments();
+                format!("{prefix}:{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        None => format!("{prefix}:unknown"),
+    }
+}
+
+/// A WireGuard public key is the standard base64 of exactly 32 bytes.
+fn is_wireguard_public_key(value: &str) -> bool {
+    value.len() == 44
+        && base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .is_ok_and(|bytes| bytes.len() == 32)
+}
+
 async fn create_device_authorization(
     State(s): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(input): Json<CreateDeviceAuthorization>,
 ) -> Result<(StatusCode, Json<DeviceAuthorizationResponse>), ApiError> {
     let name = input.name.trim();
@@ -1866,8 +1910,21 @@ async fn create_device_authorization(
             "name and wg_public_key are required; name must be at most 128 characters".into(),
         ));
     }
+    if !is_wireguard_public_key(public_key) {
+        return Err(ApiError::BadRequest(
+            "wg_public_key must be a base64 WireGuard public key (32 bytes)".into(),
+        ));
+    }
 
     let created_at = now();
+    if !s.api_rate.allow(
+        &source_rate_key("device-auth", peer.map(|ConnectInfo(addr)| addr)),
+        created_at,
+        DEVICE_AUTH_STARTS_PER_SOURCE,
+        DEVICE_AUTH_START_WINDOW_SECS,
+    ) {
+        return Err(ApiError::TooManyRequests);
+    }
     let expires_at = created_at + DEVICE_AUTH_TTL_SECS;
     sqlx::query("DELETE FROM device_authorizations WHERE expires_at<=$1")
         .bind(created_at)
@@ -7499,7 +7556,7 @@ mod tests {
             &r,
             Method::POST,
             "/v1/device-authorizations",
-            serde_json::json!({"name":"ssh-node","wg_public_key":"browser-public-key"}),
+            serde_json::json!({"name":"ssh-node","wg_public_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}),
             None,
         )
         .await;
@@ -7557,7 +7614,7 @@ mod tests {
         assert_eq!(preview.name, "ssh-node");
         assert_eq!(
             preview.public_key_fingerprint,
-            &hash("browser-public-key")[..12]
+            &hash("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")[..12]
         );
         assert!(!preview.approved);
 
@@ -7615,7 +7672,7 @@ mod tests {
             serde_json::json!({
                 "join_key": started.device_code,
                 "name": "different-node",
-                "wg_public_key": "browser-public-key"
+                "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
             }),
             None,
         )
@@ -7628,7 +7685,7 @@ mod tests {
             serde_json::json!({
                 "join_key": started.device_code,
                 "name": "ssh-node",
-                "wg_public_key": "browser-public-key"
+                "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
             }),
             None,
         )
@@ -7656,7 +7713,7 @@ mod tests {
                 serde_json::json!({
                     "join_key": started.device_code,
                     "name": "ssh-node",
-                    "wg_public_key": "browser-public-key"
+                    "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
                 }),
                 None,
             )
@@ -7694,6 +7751,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_authorization_starts_are_validated_bounded_and_rate_limited() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let start = |key: &str, peer: Option<&str>, extra: usize| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/device-authorizations")
+                .header("content-type", "application/json");
+            if let Some(peer) = peer {
+                request = request.extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            }
+            let mut body = serde_json::json!({"name": "node", "wg_public_key": key});
+            if extra > 0 {
+                body["padding"] = serde_json::Value::String("x".repeat(extra));
+            }
+            let r = r.clone();
+            async move {
+                r.oneshot(request.body(Body::from(body.to_string())).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        let key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        for bad in [
+            "not-a-key",
+            // 31 and 33 bytes.
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            // URL-safe alphabet is not what WireGuard prints.
+            "_-EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        ] {
+            assert_eq!(
+                start(bad, Some("192.0.2.1:1000"), 0).await,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        // An oversized body is refused before it is parsed.
+        assert_eq!(
+            start(key, Some("192.0.2.2:1000"), DEVICE_AUTH_MAX_BODY_BYTES).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        for _ in 0..DEVICE_AUTH_STARTS_PER_SOURCE {
+            assert_eq!(
+                start(key, Some("192.0.2.3:1000"), 0).await,
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            start(key, Some("192.0.2.3:2000"), 0).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Another source is unaffected; IPv6 sources share their /64.
+        assert_eq!(
+            start(key, Some("192.0.2.4:1000"), 0).await,
+            StatusCode::CREATED
+        );
+        for _ in 0..DEVICE_AUTH_STARTS_PER_SOURCE {
+            assert_eq!(
+                start(key, Some("[2001:db8:1:2::1]:1000"), 0).await,
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            start(key, Some("[2001:db8:1:2::ffff]:1000"), 0).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            start(key, Some("[2001:db8:1:3::1]:1000"), 0).await,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
     async fn expired_browser_enrollment_cannot_be_polled_or_approved() {
         let store = Store::memory().await.unwrap();
         let r = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
@@ -7704,7 +7836,7 @@ mod tests {
                 &r,
                 Method::POST,
                 "/v1/device-authorizations",
-                serde_json::json!({"name":"late-node","wg_public_key":"late-key"}),
+                serde_json::json!({"name":"late-node","wg_public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}),
                 None,
             )
             .await,
