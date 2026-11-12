@@ -1,6 +1,7 @@
 use crate::{
-    append_audit, bump_control_revision, canonical_ipv4_route, conflict, console_session,
-    ipv4_route_is_within, ipv4_routes_overlap, now, ApiError, AppState, DeviceTag, Session,
+    append_audit, authorize_tag_assignment, bump_control_revision, canonical_ipv4_route, conflict,
+    console_session, ipv4_route_is_within, ipv4_routes_overlap, load_org_acl, now, ApiError,
+    AppState, DeviceTag, Session,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -182,6 +183,9 @@ async fn insert_peer(
             "expires_at must be in the future".into(),
         ));
     }
+    // Tags select policy; owned tags need the same authority as on devices.
+    let acl = load_org_acl(&state.store, org_id).await?;
+    authorize_tag_assignment(&acl, session, &tags)?;
     let mut tx = state.store.pool.begin().await?;
     let org_exists: Option<String> = sqlx::query_scalar("SELECT id FROM orgs WHERE id=$1")
         .bind(org_id.to_string())
@@ -190,6 +194,7 @@ async fn insert_peer(
     if org_exists.is_none() {
         return Err(ApiError::NotFound);
     }
+    ensure_allowed_ips_free(&mut tx, org_id, &allowed_ips).await?;
     let node_name_taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM nodes WHERE org_id=$1 AND name=$2 AND revoked_at IS NULL AND deleted_at IS NULL",
     )
@@ -432,6 +437,78 @@ async fn rotate_peer(
     .await?;
     tx.commit().await?;
     load_peer(state, org_id, peer_id).await
+}
+
+/// AllowedIPs pick which peer a destination is sent to, so a WireGuard-only
+/// peer must not claim a prefix another WireGuard-only peer, an approved
+/// subnet route or a network resource already carries.
+async fn ensure_allowed_ips_free(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    org_id: Uuid,
+    allowed_ips: &[String],
+) -> Result<(), ApiError> {
+    let at = now();
+    let peers = sqlx::query(
+        "SELECT name,allowed_ips_json FROM wireguard_only_peers
+         WHERE org_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>$2)",
+    )
+    .bind(org_id.to_string())
+    .bind(at)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in peers {
+        let name: String = row.try_get(0)?;
+        let routes: Vec<String> =
+            serde_json::from_str(&row.try_get::<String, _>(1)?).unwrap_or_default();
+        if let Some((mine, theirs)) = first_overlap(allowed_ips, &routes) {
+            return Err(ApiError::Conflict(format!(
+                "allowed IP {mine} overlaps {theirs} on wireguard-only peer {name}"
+            )));
+        }
+    }
+    let nodes = sqlx::query(
+        "SELECT name,approved_routes_json FROM nodes
+         WHERE org_id=$1 AND revoked_at IS NULL AND deleted_at IS NULL",
+    )
+    .bind(org_id.to_string())
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in nodes {
+        let name: String = row.try_get(0)?;
+        let routes: Vec<String> =
+            serde_json::from_str::<Vec<String>>(&row.try_get::<String, _>(1)?)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|route| !crate::resources::is_default_route(route))
+                .collect();
+        if let Some((mine, theirs)) = first_overlap(allowed_ips, &routes) {
+            return Err(ApiError::Conflict(format!(
+                "allowed IP {mine} overlaps route {theirs} approved on device {name}"
+            )));
+        }
+    }
+    crate::resources::ensure_routes_free(&mut **tx, org_id, allowed_ips).await
+}
+
+fn first_overlap<'a>(mine: &'a [String], theirs: &'a [String]) -> Option<(&'a str, &'a str)> {
+    mine.iter().find_map(|left| {
+        theirs
+            .iter()
+            .find(|right| valid_prefix(right) && prefixes_overlap(left, right))
+            .map(|right| (left.as_str(), right.as_str()))
+    })
+}
+
+/// Stored routes from other tables are re-checked before the panicking
+/// parsers in `prefixes_overlap` see them.
+fn valid_prefix(route: &str) -> bool {
+    match route.split_once('/') {
+        Some((address, prefix)) if route.contains(':') => {
+            address.parse::<Ipv6Addr>().is_ok() && prefix.parse::<u8>().is_ok_and(|p| p <= 128)
+        }
+        Some(_) => canonical_ipv4_route(route).is_ok(),
+        None => false,
+    }
 }
 
 fn row_to_peer(row: sqlx::any::AnyRow) -> Result<WireGuardOnlyPeer, ApiError> {

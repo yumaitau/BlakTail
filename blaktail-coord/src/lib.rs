@@ -11864,6 +11864,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wireguard_only_peers_cannot_claim_taken_prefixes_or_owned_tags() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&router, "wg-only-overlap-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let admin = signed_session(org.id, "admin-1", Role::Admin, now() + 60);
+        let node = register_test_node(&router, org.id, &owner, "router", "router-key", &[]).await;
+        sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2")
+            .bind(r#"["10.4.0.0/24","0.0.0.0/0"]"#)
+            .bind(node.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let everyone = serde_json::json!({"roles":["owner","admin","member"]});
+        let response = call(
+            &router,
+            Method::POST,
+            &format!("/v1/orgs/{}/networks", org.id),
+            serde_json::json!({"name":"Depot","cidr":"192.168.50.0/24","access":everyone}),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response = call(
+            &router,
+            Method::PUT,
+            &format!("/v1/orgs/{}/acl", org.id),
+            serde_json::json!({"tag_owners": {"store": ["owner"]}, "rules": []}),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut counter = 0;
+        let mut create = |allowed: &str, tags: serde_json::Value, token: &str| {
+            counter += 1;
+            let body = serde_json::json!({
+                "name": format!("peer-{counter}"),
+                "kind": "wireguard_only",
+                "wg_public_key": format!("peerPublicKeyExample{counter}+/="),
+                "endpoint": "203.0.113.10:51820",
+                "allowed_ips": [allowed],
+                "tags": tags,
+            });
+            let router = router.clone();
+            let uri = format!("/v1/orgs/{}/wireguard-only-peers", org.id);
+            let token = token.to_owned();
+            async move {
+                call(&router, Method::POST, &uri, body, Some(&token))
+                    .await
+                    .status()
+            }
+        };
+        assert_eq!(
+            create("10.8.0.0/24", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
+        // Another WireGuard-only peer, an approved subnet route and a network
+        // resource each already carry these prefixes.
+        for taken in [
+            "10.8.0.128/25",
+            "10.0.0.0/8",
+            "10.4.0.0/25",
+            "192.168.50.0/26",
+        ] {
+            assert_eq!(
+                create(taken, serde_json::json!([]), &admin).await,
+                StatusCode::CONFLICT,
+                "{taken}"
+            );
+        }
+        assert_eq!(
+            create("10.9.0.0/24", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
+        // Owned tags need the tag owner's authority, as on devices.
+        assert_eq!(
+            create("10.10.0.0/24", serde_json::json!(["store"]), &admin).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            create("10.10.0.0/24", serde_json::json!(["store"]), &owner).await,
+            StatusCode::CREATED
+        );
+        // A revoked peer's prefix is free again.
+        let peers: Vec<crate::wg_only::WireGuardOnlyPeer> = body(
+            call(
+                &router,
+                Method::GET,
+                &format!("/v1/orgs/{}/wireguard-only-peers", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let first = peers
+            .iter()
+            .find(|p| p.allowed_ips == ["10.8.0.0/24"])
+            .unwrap();
+        assert_eq!(
+            call(
+                &router,
+                Method::DELETE,
+                &format!("/v1/orgs/{}/wireguard-only-peers/{}", org.id, first.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            create("10.8.0.128/25", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
     async fn wireguard_only_peers_are_exported_revoked_and_rejected_for_members() {
         let store = Store::memory().await.unwrap();
         let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
