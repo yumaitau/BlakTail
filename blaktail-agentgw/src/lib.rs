@@ -62,6 +62,8 @@ pub struct NodeIdentity {
     pub coord: String,
     #[serde(default)]
     pub assigned_ip: String,
+    #[serde(default)]
+    pub assigned_ips: Vec<String>,
 }
 
 impl fmt::Debug for NodeIdentity {
@@ -74,25 +76,34 @@ impl fmt::Debug for NodeIdentity {
     }
 }
 
-/// The gateway must never listen publicly. Loopback, the BlakTail overlay
-/// (100.64.0.0/10, fd7a:115c:a1e0::/48) and this node's own overlay address
-/// are allowed; RFC 1918 / ULA only with an explicit lab flag; never the
-/// unspecified address.
-pub fn check_listen(
-    ip: IpAddr,
-    assigned: Option<IpAddr>,
-    allow_private: bool,
-) -> Result<(), String> {
+impl NodeIdentity {
+    /// This node's own overlay addresses (`assigned_ip` and `assigned_ips`).
+    pub fn overlay_addresses(&self) -> Vec<IpAddr> {
+        let mut out: Vec<IpAddr> = Vec::new();
+        for cidr in std::iter::once(&self.assigned_ip).chain(self.assigned_ips.iter()) {
+            let parsed = cidr.split('/').next().and_then(|ip| ip.trim().parse().ok());
+            if let Some(ip) = parsed {
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The gateway must never listen publicly. Loopback and this node's own
+/// overlay addresses are allowed; RFC 1918 / ULA only with an explicit lab
+/// flag; never the unspecified address. Other 100.64.0.0/10 addresses are
+/// refused: on a host behind carrier-grade NAT that range is the WAN, not
+/// the overlay.
+pub fn check_listen(ip: IpAddr, assigned: &[IpAddr], allow_private: bool) -> Result<(), String> {
     if ip.is_unspecified() {
         return Err(
             "refusing to listen on every interface; bind the node's overlay address".into(),
         );
     }
-    let overlay = match ip {
-        IpAddr::V4(v4) => v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64,
-        IpAddr::V6(v6) => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-    };
-    if ip.is_loopback() || overlay || Some(ip) == assigned {
+    if ip.is_loopback() || assigned.contains(&ip) {
         return Ok(());
     }
     let private = match ip {
@@ -964,14 +975,36 @@ mod tests {
     #[test]
     fn listen_address_is_never_public() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        assert!(check_listen(ip("0.0.0.0"), None, true).is_err());
-        assert!(check_listen(ip("::"), None, true).is_err());
-        assert!(check_listen(ip("203.0.113.9"), None, true).is_err());
-        assert!(check_listen(ip("192.168.1.5"), None, false).is_err());
-        assert!(check_listen(ip("192.168.1.5"), None, true).is_ok());
-        assert!(check_listen(ip("100.64.0.7"), None, false).is_ok());
-        assert!(check_listen(ip("127.0.0.1"), None, false).is_ok());
-        assert!(check_listen(ip("fd7a:115c:a1e0::5"), None, false).is_ok());
+        let own = [ip("100.64.0.7"), ip("fd7a:115c:a1e0::5")];
+        assert!(check_listen(ip("0.0.0.0"), &own, true).is_err());
+        assert!(check_listen(ip("::"), &own, true).is_err());
+        assert!(check_listen(ip("203.0.113.9"), &own, true).is_err());
+        assert!(check_listen(ip("192.168.1.5"), &own, false).is_err());
+        assert!(check_listen(ip("192.168.1.5"), &own, true).is_ok());
+        assert!(check_listen(ip("100.64.0.7"), &own, false).is_ok());
+        assert!(check_listen(ip("127.0.0.1"), &[], false).is_ok());
+        assert!(check_listen(ip("fd7a:115c:a1e0::5"), &own, false).is_ok());
+        // Another CGNAT / overlay-range address is not this node's overlay.
+        assert!(check_listen(ip("100.64.0.8"), &own, false).is_err());
+        assert!(check_listen(ip("100.100.1.1"), &[], false).is_err());
+        assert!(check_listen(ip("fd7a:115c:a1e0::9"), &own, false).is_err());
+    }
+
+    #[test]
+    fn overlay_addresses_come_from_the_state_file() {
+        let identity: NodeIdentity = serde_json::from_value(json!({
+            "node_id": Uuid::nil(), "node_token": "node-token-value", "coord": "https://coord",
+            "assigned_ip": "100.64.0.2/32",
+            "assigned_ips": ["100.64.0.2/32", "fd12:3456::2/128"],
+        }))
+        .unwrap();
+        assert_eq!(
+            identity.overlay_addresses(),
+            vec![
+                "100.64.0.2".parse::<IpAddr>().unwrap(),
+                "fd12:3456::2".parse().unwrap()
+            ]
+        );
     }
 
     #[test]

@@ -34,9 +34,11 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
    blaktail-agentgw --state-file /var/lib/blaktail/state.json --coord-ca /etc/blaktail/coord-ca.pem
    ```
 
-   It refuses `0.0.0.0`, `::` and any address that is not loopback or
-   BlakTail overlay (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). RFC 1918 / ULA
-   addresses need `--allow-private-listen` and are meant for labs only.
+   It refuses `0.0.0.0`, `::` and any address that is not loopback or one of
+   this node's own overlay addresses (`assigned_ip` / `assigned_ips` in the
+   state file). Other `100.64.0.0/10` addresses are refused, because behind
+   carrier-grade NAT that range is the host's WAN. RFC 1918 / ULA addresses
+   need `--allow-private-listen` and are meant for labs only.
 
 3. An owner or admin designates the device: Console → Agents → **Gateways** →
    *Designate*. Any enrolled device can claim the `agent-gateway`
