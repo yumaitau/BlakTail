@@ -1134,7 +1134,24 @@ pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
     win_host::restrict_path(&path, false)?;
     #[cfg(unix)]
     {
-        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Message(format!(
+                "{} must be a regular file",
+                path.display()
+            )));
+        }
+        // Mode 0600 alone would accept a key planted by another user.
+        let owner = metadata.uid();
+        let effective = unsafe { libc::geteuid() };
+        if owner != effective && owner != 0 {
+            return Err(Error::Message(format!(
+                "{} must be owned by this user or root (owner uid {owner})",
+                path.display()
+            )));
+        }
+        let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
             return Err(Error::Message(format!(
                 "{} must have mode 0600 (found {mode:04o})",
@@ -3765,6 +3782,18 @@ x"
         let _ = fs::remove_dir_all(&dir);
         ensure_private_key(&dir).unwrap();
         fs::set_permissions(dir.join("private.key"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(ensure_private_key(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn linked_key_file_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("blaktail-link-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_private_key(&dir).unwrap();
+        let elsewhere = dir.join("planted.key");
+        fs::rename(dir.join("private.key"), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("private.key")).unwrap();
         assert!(ensure_private_key(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
