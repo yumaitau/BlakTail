@@ -24,6 +24,8 @@ data:
   COORD_BASE_URL: https://blaktail-coord.blaktail.svc.cluster.local:8443
   NODE_EXTRA_CA_CERTS: /etc/blaktail/ca/ca.crt
   NEXT_TELEMETRY_DISABLED: "1"
+  # The ALB ingress appends the client address to X-Forwarded-For.
+  BLAKTAIL_TRUSTED_PROXY_HOPS: "1"
 ---
 apiVersion: v1
 kind: ConfigMap

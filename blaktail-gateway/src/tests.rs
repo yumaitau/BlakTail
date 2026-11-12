@@ -299,12 +299,15 @@ async fn fake_coordinator(fake: Arc<FakeCoordinator>) -> String {
     format!("http://127.0.0.1:{}", address.port())
 }
 
-async fn gateway(coord: String) -> (String, tempfile::TempDir) {
+async fn gateway(coord: String, peer_ips: &[String]) -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("state.json"),
-        serde_json::json!({"node_id": Uuid::nil(), "node_token": "node-token", "coord": "x"})
-            .to_string(),
+        serde_json::json!({
+            "node_id": Uuid::nil(), "node_token": "node-token", "coord": "x",
+            "peers": [{"allowed_ips": peer_ips}],
+        })
+        .to_string(),
     )
     .unwrap();
     let gateway = Gateway::new(Config {
@@ -323,6 +326,14 @@ async fn gateway(coord: String) -> (String, tempfile::TempDir) {
 }
 
 async fn lab(host_key_seed: u8) -> (Arc<FakeCoordinator>, String, tempfile::TempDir) {
+    lab_with_peers(host_key_seed, None).await
+}
+
+/// `peer_ips: None` puts the fake SSH target in the gateway node's peer map.
+async fn lab_with_peers(
+    host_key_seed: u8,
+    peer_ips: Option<Vec<String>>,
+) -> (Arc<FakeCoordinator>, String, tempfile::TempDir) {
     let ca = key(1);
     let host = key(2);
     let target = ssh_server(host, ca.public_key().clone(), "deploy").await;
@@ -335,7 +346,8 @@ async fn lab(host_key_seed: u8) -> (Arc<FakeCoordinator>, String, tempfile::Temp
         redeemed: Mutex::new(0),
     });
     let coord = fake_coordinator(fake.clone()).await;
-    let (url, dir) = gateway(coord).await;
+    let peer_ips = peer_ips.unwrap_or_else(|| vec![format!("{}/32", target.ip())]);
+    let (url, dir) = gateway(coord, &peer_ips).await;
     (fake, url, dir)
 }
 
@@ -441,4 +453,71 @@ async fn foreign_origins_cannot_upgrade() {
         .insert("origin", "https://evil.example".parse().unwrap());
     let error = tokio_tungstenite::connect_async(request).await.unwrap_err();
     assert!(error.to_string().contains("403"), "{error}");
+}
+
+#[tokio::test]
+async fn targets_outside_the_peer_map_are_never_dialled() {
+    // Only a routed subnet and a different peer host: the target is not a
+    // peer overlay address, so the gateway must refuse before connecting.
+    let (fake, url, _dir) =
+        lab_with_peers(2, Some(vec!["127.0.0.0/8".into(), "100.64.0.9/32".into()])).await;
+    let status = start(&url, "good-ticket").await;
+    assert!(status.contains("not a device"), "{status}");
+    let reports = fake.reports.lock().unwrap().clone();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["ended"], "error");
+}
+
+#[test]
+fn target_must_be_a_peer_host_address() {
+    let peers = vec![PeerAddresses {
+        allowed_ips: vec![
+            "100.64.0.7/32".into(),
+            "fd12:3456::7/128".into(),
+            "10.0.0.0/24".into(),
+            "0.0.0.0/0".into(),
+            "garbage".into(),
+        ],
+    }];
+    assert!(target_in_tailnet("100.64.0.7".parse().unwrap(), &peers));
+    assert!(target_in_tailnet("fd12:3456::7".parse().unwrap(), &peers));
+    assert!(!target_in_tailnet("10.0.0.5".parse().unwrap(), &peers));
+    assert!(!target_in_tailnet(
+        "169.254.169.254".parse().unwrap(),
+        &peers
+    ));
+    assert!(!target_in_tailnet("127.0.0.1".parse().unwrap(), &peers));
+    assert!(!target_in_tailnet("100.64.0.7".parse().unwrap(), &[]));
+}
+
+#[test]
+fn coordinator_http_is_only_for_exact_loopback_hosts() {
+    for good in [
+        "https://coord.example.org.au",
+        "http://localhost:8443",
+        "http://127.0.0.1:8443",
+        "http://[::1]:8443",
+    ] {
+        assert!(coordinator_url_allowed(good), "{good}");
+    }
+    for bad in [
+        "http://localhost.evil.example",
+        "http://127.0.0.1.evil.example",
+        "http://localhost@evil.example",
+        "http://coord.example.org.au",
+        "ftp://localhost",
+        "not a url",
+    ] {
+        assert!(!coordinator_url_allowed(bad), "{bad}");
+    }
+}
+
+#[test]
+fn plain_http_listens_only_on_loopback_unless_allowed() {
+    let any: SocketAddr = "0.0.0.0:8443".parse().unwrap();
+    let local: SocketAddr = "127.0.0.1:8443".parse().unwrap();
+    assert!(check_listen(any, false, false).is_err());
+    assert!(check_listen(any, true, false).is_ok());
+    assert!(check_listen(any, false, true).is_ok());
+    assert!(check_listen(local, false, false).is_ok());
 }

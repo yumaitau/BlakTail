@@ -285,6 +285,34 @@ async fn slow_handshakes_wrong_paths_and_excess_connections_are_refused() {
 }
 
 #[tokio::test]
+async fn connections_without_a_valid_register_are_closed() {
+    let relay = relay(WssServerConfig {
+        register_timeout: Duration::from_millis(400),
+        ..Default::default()
+    })
+    .await;
+    let url = format!("ws://127.0.0.1:{}/v1/relay", relay.ws.port());
+    let id = [7; ID_LEN];
+    // Keeps talking (pings and a forged REGISTER) but never authenticates.
+    let mut silent = ws_client(&url, &ClientOptions::default()).await;
+    let expires = crate::unix_now() + 300;
+    let forged = register_frame(&id, expires, &mint_token(b"wrong", &id, expires));
+    silent.send(Message::binary(forged)).await.unwrap();
+    silent
+        .send(Message::Ping(Default::default()))
+        .await
+        .unwrap();
+    assert!(closes(&mut silent).await);
+    // A registered connection outlives the deadline and still works.
+    let mut good = ws_client(&url, &ClientOptions::default()).await;
+    good.send(Message::binary(register(&id))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    good.send(Message::binary(ping_frame(&id))).await.unwrap();
+    assert_eq!(next_binary(&mut good).await[0], OBSERVED);
+    assert!(counter(&relay.metrics, "blaktail_relay_wss_rejected_total") >= 1);
+}
+
+#[tokio::test]
 async fn idle_connections_are_closed() {
     let relay = relay(WssServerConfig {
         idle_timeout: Duration::from_millis(300),
@@ -320,6 +348,7 @@ async fn relay_drops_frames_for_a_stream_whose_queue_is_full() {
             id: 7,
             remote: "127.0.0.1:9".parse().unwrap(),
             tx,
+            registered: Arc::default(),
         })
         .await
         .unwrap();

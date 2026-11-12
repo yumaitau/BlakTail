@@ -102,9 +102,9 @@ export async function getTopology(ctx: ConsoleContext): Promise<Topology> {
 export function editHref(edge: Pick<TopologyEdge, "edit">): string {
   switch (edge.edit.surface) {
     case "network_resource":
-      return edge.edit.id ? `/networks/${edge.edit.id}` : "/networks";
+      return edge.edit.id ? `/networks/${encodeURIComponent(edge.edit.id)}` : "/networks";
     case "device":
-      return edge.edit.id ? `/devices/${edge.edit.id}` : "/devices";
+      return edge.edit.id ? `/devices/${encodeURIComponent(edge.edit.id)}` : "/devices";
     default:
       return "/acls";
   }

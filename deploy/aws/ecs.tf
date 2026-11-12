@@ -69,6 +69,8 @@ resource "aws_ecs_task_definition" "console" {
       { name = "BETTER_AUTH_URL", value = local.better_auth_url },
       { name = "BETTER_AUTH_TRUSTED_ORIGINS", value = local.better_auth_url },
       { name = "COORD_BASE_URL", value = "https://${aws_lb.coord.dns_name}" },
+      # The console ALB appends the client address to X-Forwarded-For.
+      { name = "BLAKTAIL_TRUSTED_PROXY_HOPS", value = "1" },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.console_env.arn}:DATABASE_URL::" },

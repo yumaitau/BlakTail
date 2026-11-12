@@ -35,7 +35,7 @@ jobs:
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
     steps:
       - name: Checkout exact tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
@@ -60,6 +60,9 @@ jobs:
   linux:
     name: Linux ${{ matrix.target }}
     needs: preflight
+    # Signing, attestation and publishing run only with the protected `release`
+    # environment (required reviewers and tag rules are set in repository settings).
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -77,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout exact tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -113,14 +116,14 @@ jobs:
             "blaktail-config ${{ needs.preflight.outputs.version }}"
 
       - name: Attest Linux packages
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/blaktaild-${{ matrix.target }}.deb
             dist/blaktaild-${{ matrix.target }}.rpm
 
       - name: Upload Linux packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: agent-linux-${{ matrix.arch }}
           if-no-files-found: error
@@ -132,6 +135,9 @@ jobs:
   macos:
     name: macOS ${{ matrix.target }}
     needs: preflight
+    # Signing, attestation and publishing run only with the protected `release`
+    # environment (required reviewers and tag rules are set in repository settings).
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -147,7 +153,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout exact tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -220,12 +226,12 @@ jobs:
           spctl --assess --type install "$package"
 
       - name: Attest macOS package
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/blaktaild-${{ matrix.target }}.pkg
 
       - name: Upload macOS package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: agent-macos-${{ matrix.target }}
           if-no-files-found: error
@@ -244,6 +250,9 @@ jobs:
   publish:
     name: Publish complete immutable release
     needs: [preflight, linux, macos]
+    # Signing, attestation and publishing run only with the protected `release`
+    # environment (required reviewers and tag rules are set in repository settings).
+    environment: release
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
     permissions:
@@ -252,13 +261,13 @@ jobs:
       attestations: write
     steps:
       - name: Checkout exact tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Download every native package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: agent-*
           path: dist
@@ -283,12 +292,12 @@ jobs:
           sha256sum --check SHA256SUMS
 
       - name: Attest checksum manifest
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/SHA256SUMS
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign checksum manifest with Sigstore keyless signing
         shell: bash

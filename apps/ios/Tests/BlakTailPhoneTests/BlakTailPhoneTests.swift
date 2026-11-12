@@ -46,9 +46,10 @@ final class BlakTailPhoneTests: XCTestCase {
         XCTAssertNil(model.observedTransport)
     }
 
-    func testCallbackTokenFromFragment() throws {
-        let url = URL(string: "blaktail://auth/callback#token=abc%20def")!
-        XCTAssertEqual(try BrowserSignIn.token(from: url), "abc def")
+    func testCallbackCodeRequiresMatchingState() throws {
+        let url = URL(string: "blaktail://auth/callback?code=btc_fake&state=fake-state-0123456789")!
+        XCTAssertEqual(try BrowserSignIn.authorizationCode(from: url, expectedState: "fake-state-0123456789"), "btc_fake")
+        XCTAssertThrowsError(try BrowserSignIn.authorizationCode(from: url, expectedState: "other-state-0123456789"))
     }
 
     @MainActor

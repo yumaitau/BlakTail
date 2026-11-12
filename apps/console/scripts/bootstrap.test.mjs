@@ -1,5 +1,6 @@
 import { SQL } from "bun";
 import { createHmac } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { test } from "node:test";
@@ -9,6 +10,7 @@ import {
   claimBootstrap,
   hashSecret,
   initialiseBootstrap,
+  recoverOwner,
   signServiceAssertion,
 } from "./bootstrap.mjs";
 
@@ -409,6 +411,103 @@ test(
         () => claimBootstrap(sql, invalidClaim),
         /too many bootstrap claim attempts/u,
       );
+    } finally {
+      await sql.close({ timeout: 5 });
+    }
+  },
+);
+
+test(
+  "owner recovery removes SSO bindings, two-step and every linked session",
+  { skip: !TEST_DATABASE_URL },
+  async () => {
+    const sql = new SQL(TEST_DATABASE_URL, {
+      max: 1,
+      prepare: false,
+    });
+    try {
+      const all = readdirSync(new URL("../drizzle/", import.meta.url))
+        .filter((name) => name.endsWith(".sql"))
+        .sort();
+      await resetThrough(sql, all);
+      await sql`
+        INSERT INTO bootstrap_state (id, status, locked_at)
+        VALUES ('primary', 'locked', now())
+        ON CONFLICT (id) DO UPDATE SET status = 'locked', locked_at = now()
+      `;
+      await sql`
+        INSERT INTO organisation (id, name, coord_org_id)
+        VALUES ('recover-org', 'Recover Org', 'a1b6f0b4-6f53-4c4b-9a52-4a0b0c4b7f10')
+      `;
+      for (const id of ["recover-owner", "recover-linked", "bystander"]) {
+        await sql`
+          INSERT INTO "user" (id, name, email, email_verified, two_factor_enabled)
+          VALUES (${id}, ${id}, ${`${id}@example.test`}, true, true)
+        `;
+        await sql`
+          INSERT INTO session (id, expires_at, token, user_id)
+          VALUES (${`session-${id}`}, now() + interval '1 day', ${`token-${id}`}, ${id})
+        `;
+        await sql`
+          INSERT INTO two_factor (id, secret, backup_codes, user_id)
+          VALUES (${`tf-${id}`}, 'fake-secret', 'fake-codes', ${id})
+        `;
+      }
+      await sql`
+        INSERT INTO membership (id, organisation_id, user_id, role)
+        VALUES ('recover-membership', 'recover-org', 'recover-owner', 'owner')
+      `;
+      await sql`
+        INSERT INTO person (id, display_name) VALUES ('recover-person', 'Owner'),
+          ('bystander-person', 'Bystander')
+      `;
+      await sql`
+        INSERT INTO person_login_identity (id, person_id, user_id) VALUES
+          ('pli-owner', 'recover-person', 'recover-owner'),
+          ('pli-linked', 'recover-person', 'recover-linked'),
+          ('pli-bystander', 'bystander-person', 'bystander')
+      `;
+      await sql`
+        INSERT INTO identity_provider (id, organisation_id, issuer, client_id, client_secret, enabled)
+        VALUES ('recover-idp', 'recover-org', 'https://idp.example.test', 'client', 'fake-client-secret', true)
+      `;
+      await sql`
+        INSERT INTO external_identity (
+          id, organisation_id, provider_id, issuer, subject, user_id, last_authenticated_at
+        ) VALUES
+          ('ext-owner', 'recover-org', 'recover-idp', 'https://idp.example.test', 'attacker-sub', 'recover-owner', now()),
+          ('ext-bystander', 'recover-org', 'recover-idp', 'https://idp.example.test', 'bystander-sub', 'bystander', now())
+      `;
+
+      const result = await recoverOwner(sql, {
+        email: "recover-owner@example.test",
+        password: "fake-recovery-password",
+      });
+      assert.deepEqual(result, {
+        sessionsRevoked: 2,
+        linkedIdentitiesSignedOut: 2,
+        ssoBindingsRemoved: 1,
+        twoFactorSecretsRemoved: 1,
+      });
+      const sessions = await sql`SELECT user_id FROM session ORDER BY user_id`;
+      assert.deepEqual(sessions.map((row) => row.user_id), ["bystander"]);
+      const bindings = await sql`SELECT user_id FROM external_identity`;
+      assert.deepEqual(bindings.map((row) => row.user_id), ["bystander"]);
+      const [owner] = await sql`
+        SELECT two_factor_enabled FROM "user" WHERE id = 'recover-owner'
+      `;
+      assert.equal(owner.two_factor_enabled, false);
+      const secrets = await sql`SELECT user_id FROM two_factor ORDER BY user_id`;
+      assert.deepEqual(
+        secrets.map((row) => row.user_id),
+        ["bystander", "recover-linked"],
+      );
+      const [audit] = await sql`
+        SELECT details FROM console_audit_event WHERE action = 'owner.recovered'
+      `;
+      assert.equal(audit.details.sso_bindings_removed, 1);
+      assert.equal(audit.details.sessions_revoked_count, 2);
+      assert.equal(audit.details.two_factor_secrets_removed, 1);
     } finally {
       await sql.close({ timeout: 5 });
     }

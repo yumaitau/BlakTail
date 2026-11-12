@@ -15,7 +15,12 @@ all-features = true
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+    # Time-limited: sqlx 0.9.0 is the newest release and pins an older
+    # libsqlite3-sys, so the fix is not reachable yet. cargo-deny 0.20.2 has
+    # no expiry field, so the review date lives in the reason.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys fix needs a newer sqlx than 0.9.0 (latest); remove when sqlx ships it. Review by 2026-12-12." },
+]
 
 [licenses]
 confidence-threshold = 0.93

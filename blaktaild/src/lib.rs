@@ -31,6 +31,7 @@ pub mod flow_events;
 #[path = "../../blaktail-ios-wg/src/flow_report.rs"]
 pub mod flow_report;
 pub mod forward_filter;
+mod jail;
 pub mod pf_filter;
 pub mod pq;
 pub mod relay_client;
@@ -615,10 +616,7 @@ impl Coordinator {
 
     pub fn with_ca(base: &str, ca_pem: Option<&[u8]>) -> Result<Self, Error> {
         let base = base.trim_end_matches('/').to_owned();
-        if !(base.starts_with("https://")
-            || base.starts_with("http://127.0.0.1")
-            || base.starts_with("http://localhost"))
-        {
+        if !coordinator_url_allowed(&base) {
             return Err(Error::Message(
                 "coordinator must use HTTPS (HTTP is allowed only for localhost)".into(),
             ));
@@ -673,6 +671,8 @@ impl Coordinator {
         Ok(response.json().await?)
     }
     pub async fn device_authorization_approved(&self, device_code: &str) -> Result<bool, Error> {
+        // The device code is a bearer secret in the URL path, so transport
+        // and decode errors drop the URL before they reach a log or prompt.
         let response = self
             .client
             .get(format!(
@@ -680,7 +680,8 @@ impl Coordinator {
                 self.base
             ))
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         let status = response.status();
         if status == reqwest::StatusCode::GONE || status == reqwest::StatusCode::UNAUTHORIZED {
             let message = response
@@ -695,7 +696,8 @@ impl Coordinator {
                 "device authorization polling failed ({status})"
             )));
         }
-        let body: DeviceAuthorizationStatus = response.json().await?;
+        let body: DeviceAuthorizationStatus =
+            response.json().await.map_err(reqwest::Error::without_url)?;
         match (status, body.status.as_str()) {
             (reqwest::StatusCode::OK, "approved") => Ok(true),
             (reqwest::StatusCode::ACCEPTED, "pending") => Ok(false),
@@ -1080,6 +1082,23 @@ impl Coordinator {
     }
 }
 
+/// HTTPS anywhere, or plain HTTP only when the parsed host is exactly a
+/// loopback name (`localhost`, `127.0.0.1`, `[::1]`). A prefix test would
+/// let `http://localhost.example.com` or `http://localhost@example.com` by.
+pub fn coordinator_url_allowed(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => url.host_str().is_some_and(|host| !host.is_empty()),
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
+}
+
 /// Windows reports an ICMP port-unreachable for an earlier send as a
 /// `ConnectionReset` from the next receive on an unconnected UDP socket. It
 /// says nothing about this socket, so receive loops carry on. Linux and
@@ -1115,7 +1134,24 @@ pub fn ensure_private_key(dir: &Path) -> Result<(PathBuf, String), Error> {
     win_host::restrict_path(&path, false)?;
     #[cfg(unix)]
     {
-        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Message(format!(
+                "{} must be a regular file",
+                path.display()
+            )));
+        }
+        // Mode 0600 alone would accept a key planted by another user.
+        let owner = metadata.uid();
+        let effective = unsafe { libc::geteuid() };
+        if owner != effective && owner != 0 {
+            return Err(Error::Message(format!(
+                "{} must be owned by this user or root (owner uid {owner})",
+                path.display()
+            )));
+        }
+        let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
             return Err(Error::Message(format!(
                 "{} must have mode 0600 (found {mode:04o})",
@@ -1436,6 +1472,53 @@ fn is_ipv6_route(route: &str) -> bool {
 pub fn peer_key_hex(peer_key_b64: &str) -> Option<String> {
     let raw = STANDARD.decode(peer_key_b64.trim()).ok()?;
     Some(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+/// `ip/prefix` (or a bare address, read as a host route) with a prefix
+/// that fits the family. Anything else, including embedded newlines, is
+/// refused before it reaches a line-based configuration protocol.
+pub fn valid_cidr(value: &str) -> bool {
+    parse_cidr(value).is_ok() || value.parse::<std::net::IpAddr>().is_ok()
+}
+
+fn uapi_endpoint(endpoint: &str) -> Result<std::net::SocketAddr, Error> {
+    endpoint
+        .parse()
+        .map_err(|_| Error::Message("peer endpoint is not an address and port".into()))
+}
+
+/// One peer's WireGuard UAPI `set` lines. Every value is validated first:
+/// the key must be 32 bytes, the endpoint a socket address and each allowed
+/// IP a CIDR, so a coordinator string cannot add UAPI lines.
+pub fn uapi_peer_block(peer: &Peer, psk_hex: Option<&str>) -> Result<String, Error> {
+    let Some(key) = peer_key_hex(&peer.wg_public_key).filter(|hex| hex.len() == 64) else {
+        return Err(Error::Message(format!(
+            "peer {} has an invalid public key",
+            peer.name
+        )));
+    };
+    let mut block =
+        format!("public_key={key}\nreplace_allowed_ips=true\npersistent_keepalive_interval=25\n");
+    if let Some(psk) = psk_hex {
+        if psk.len() != 64 || !psk.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::Message(
+                "preshared key is not 32 bytes of hex".into(),
+            ));
+        }
+        block.push_str(&format!("preshared_key={psk}\n"));
+    }
+    if let Some(endpoint) = &peer.endpoint {
+        block.push_str(&format!("endpoint={}\n", uapi_endpoint(endpoint)?));
+    }
+    for ip in &peer.allowed_ips {
+        if !valid_cidr(ip) {
+            return Err(Error::Message(format!(
+                "peer {} has an invalid allowed IP",
+                peer.name
+            )));
+        }
+        block.push_str(&format!("allowed_ip={ip}\n"));
+    }
+    Ok(block)
 }
 /// Decides when a peer's direct path is considered dead (no handshake within
 /// this window after first observation) and how long we keep re-trying it.
@@ -2587,19 +2670,11 @@ impl MacOsNetwork {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         for peer in &self.peers {
-            request.push_str(&format!(
-                "public_key={}\nreplace_allowed_ips=true\npersistent_keepalive_interval=25\n",
-                peer.wg_public_key
-            ));
-            if let Some(psk) = psks.get(peer.wg_public_key.trim()) {
-                request.push_str(&format!("preshared_key={}\n", psk.to_hex().as_str()));
-            }
-            if let Some(endpoint) = &peer.endpoint {
-                request.push_str(&format!("endpoint={endpoint}\n"));
-            }
-            for ip in &peer.allowed_ips {
-                request.push_str(&format!("allowed_ip={ip}\n"));
-            }
+            let psk = psks.get(peer.wg_public_key.trim()).map(|psk| psk.to_hex());
+            request.push_str(&uapi_peer_block(
+                peer,
+                psk.as_ref().map(|hex| hex.as_str()),
+            )?);
         }
         request.push('\n');
         let request = zeroize::Zeroizing::new(request);
@@ -2782,9 +2857,10 @@ impl Network for MacOsNetwork {
         peer_key_b64: &str,
         endpoint: &str,
     ) -> Result<(), Error> {
-        let Some(hex) = peer_key_hex(peer_key_b64) else {
+        let Some(hex) = peer_key_hex(peer_key_b64).filter(|hex| hex.len() == 64) else {
             return Err(Error::Message("peer key is not valid base64".into()));
         };
+        let endpoint = uapi_endpoint(endpoint)?;
         let request = format!("set=1\npublic_key={hex}\nendpoint={endpoint}\n\n");
         self.uapi(&request)
     }
@@ -3171,6 +3247,110 @@ fn apply_org_dns_snapshot(state: &mut NodeState, incoming: Option<OrgDnsSnapshot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uapi_peer_block_refuses_line_injection() {
+        let key = STANDARD.encode([7u8; 32]);
+        let peer = |endpoint: Option<&str>, allowed: &[&str]| -> Peer {
+            serde_json::from_value(serde_json::json!({
+                "id": Uuid::nil(), "name": "peer", "wg_public_key": key,
+                "endpoint": endpoint, "allowed_ips": allowed
+            }))
+            .unwrap()
+        };
+        let good = uapi_peer_block(
+            &peer(Some("192.0.2.1:51820"), &["100.64.0.2/32", "fd00::/8"]),
+            Some(&"ab".repeat(32)),
+        )
+        .unwrap();
+        assert!(good.starts_with(&format!(
+            "public_key={}
+",
+            "07".repeat(32)
+        )));
+        assert!(good.contains(
+            "endpoint=192.0.2.1:51820
+"
+        ));
+        assert!(good.contains(
+            "allowed_ip=fd00::/8
+"
+        ));
+        assert_eq!(
+            good.lines()
+                .filter(|line| line.starts_with("public_key="))
+                .count(),
+            1
+        );
+        for bad in [
+            peer(
+                Some(
+                    "192.0.2.1:51820
+public_key=00",
+                ),
+                &[],
+            ),
+            peer(Some("evil.example:51820"), &[]),
+            peer(
+                None,
+                &["100.64.0.2/32
+allowed_ip=0.0.0.0/0"],
+            ),
+            peer(None, &["100.64.0.2/33"]),
+            peer(None, &["not-an-ip"]),
+        ] {
+            assert!(
+                uapi_peer_block(&bad, None).is_err(),
+                "{:?}",
+                bad.allowed_ips
+            );
+        }
+        let mut bad_key = peer(None, &[]);
+        bad_key.wg_public_key = format!(
+            "{key}
+private_key=00"
+        );
+        assert!(uapi_peer_block(&bad_key, None).is_err());
+        bad_key.wg_public_key = STANDARD.encode([7u8; 16]);
+        assert!(uapi_peer_block(&bad_key, None).is_err());
+        assert!(uapi_peer_block(
+            &peer(None, &[]),
+            Some(
+                "zz
+x"
+            )
+        )
+        .is_err());
+        assert!(valid_cidr("100.64.0.2") && valid_cidr("::/0") && !valid_cidr("1.2.3.4/x"));
+    }
+
+    #[test]
+    fn coordinator_http_is_only_for_exact_loopback_hosts() {
+        for allowed in [
+            "https://coord.example.com",
+            "http://localhost",
+            "http://localhost:3000",
+            "http://127.0.0.1:8080/",
+            "http://[::1]:3000",
+        ] {
+            assert!(coordinator_url_allowed(allowed), "{allowed}");
+            assert!(Coordinator::new(allowed).is_ok(), "{allowed}");
+        }
+        for refused in [
+            "http://localhost.evil.com",
+            "http://localhost.evil.com:3000",
+            "http://127.0.0.1.evil.com",
+            "http://localhost@evil.com",
+            "http://user:pw@localhost",
+            "http://coord.example.com",
+            "ftp://localhost",
+            "localhost:3000",
+            "",
+        ] {
+            assert!(!coordinator_url_allowed(refused), "{refused}");
+            assert!(Coordinator::new(refused).is_err(), "{refused}");
+        }
+    }
 
     #[test]
     fn ioreg_serial_is_parsed_from_platform_expert_output() {
@@ -3602,6 +3782,18 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         ensure_private_key(&dir).unwrap();
         fs::set_permissions(dir.join("private.key"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(ensure_private_key(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn linked_key_file_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("blaktail-link-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_private_key(&dir).unwrap();
+        let elsewhere = dir.join("planted.key");
+        fs::rename(dir.join("private.key"), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("private.key")).unwrap();
         assert!(ensure_private_key(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
     }

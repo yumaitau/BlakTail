@@ -4,14 +4,59 @@ import type { OrgRole } from "./roles";
 export type SignInPolicy = {
   /** Security changes need a sign-in at most this many minutes old. */
   stepUpMaxAgeMinutes: number | null;
-  /** Owners and admins with a password sign-in must have TOTP enabled. */
+  /** Owners and admins need a session that presented a second factor. */
   requireMfaForPrivileged: boolean;
+  /**
+   * Accept a single sign-on session as multi-factor, trusting the identity
+   * provider's own MFA. Off unless an owner turns it on.
+   */
+  trustIdpMfa: boolean;
 };
 
 export const DEFAULT_SIGN_IN_POLICY: SignInPolicy = {
   stepUpMaxAgeMinutes: null,
   requireMfaForPrivileged: false,
+  trustIdpMfa: false,
 };
+
+/**
+ * How a session was created, recorded once at creation. `password_mfa` is a
+ * password sign-in that also passed TOTP or a backup code; `sso` is an
+ * identity-provider sign-in. Sessions created before this was recorded have
+ * no method and never satisfy an MFA rule.
+ */
+export type SessionAuthMethod = "password" | "password_mfa" | "sso";
+
+const SESSION_AUTH_METHODS: readonly SessionAuthMethod[] = ["password", "password_mfa", "sso"];
+
+export function parseSessionAuthMethod(value: unknown): SessionAuthMethod | null {
+  return SESSION_AUTH_METHODS.includes(value as SessionAuthMethod)
+    ? (value as SessionAuthMethod)
+    : null;
+}
+
+const SECOND_FACTOR_PATHS = [
+  "/two-factor/verify-totp",
+  "/two-factor/verify-backup-code",
+  "/two-factor/verify-otp",
+];
+
+/**
+ * The method for a session Better Auth is about to create. A second-factor
+ * verification always records `password_mfa`; otherwise an explicit or
+ * carried-over value (the OIDC callback, or a session reissued from the
+ * current one) is kept; a bare password sign-in records `password`.
+ */
+export function sessionAuthMethodFor(
+  path: string | null | undefined,
+  existing: unknown,
+): SessionAuthMethod | null {
+  if (path && SECOND_FACTOR_PATHS.includes(path)) return "password_mfa";
+  const carried = parseSessionAuthMethod(existing);
+  if (carried) return carried;
+  if (path === "/sign-in/email") return "password";
+  return null;
+}
 
 export const STEP_UP_MIN_MINUTES = 5;
 export const STEP_UP_MAX_MINUTES = 1440;
@@ -48,32 +93,36 @@ export function stepUpRefusal(
 export type IdentityAssurance = { hasPassword: boolean; twoFactorEnabled: boolean };
 
 /**
- * MFA applies to password sign-ins of privileged roles. Single sign-on
- * identities authenticate at the organisation's identity provider, whose own
- * MFA policy applies; BlakTail cannot add a second factor to that flow.
- *
- * The role is merged across the person's linked identities, so `linked` (the
- * other identities with a membership in this organisation) counts too: a
- * single sign-on session is exempt only while no linked identity has a
- * password. Otherwise the person must use a sign-in with two-step
- * verification, so a weaker linked identity cannot borrow a privileged role.
+ * MFA for privileged roles is judged on the session making the request, not
+ * on whether the account has TOTP enrolled: a session satisfies it only if
+ * it presented a second factor at sign-in, or it is a single sign-on session
+ * and the organisation explicitly trusts its identity provider's MFA.
+ * Because each session is judged on how it signed in, a weaker linked
+ * identity cannot borrow a privileged role either. `identity` only picks the
+ * advice in the refusal.
  */
 export function mfaRefusal(
   policy: SignInPolicy,
   role: OrgRole,
+  session: { authMethod: SessionAuthMethod | null },
   identity: IdentityAssurance,
-  linked: readonly IdentityAssurance[] = [],
 ): string | null {
   if (!policy.requireMfaForPrivileged) return null;
   if (!MFA_PRIVILEGED_ROLES.includes(role)) return null;
-  if (identity.twoFactorEnabled) return null;
-  if (identity.hasPassword) {
-    return "This organisation requires two-step verification for owners and admins. Turn it on under Settings, Account security, then retry.";
+  if (session.authMethod === "password_mfa") return null;
+  if (session.authMethod === "sso") {
+    if (policy.trustIdpMfa) return null;
+    return identity.hasPassword && identity.twoFactorEnabled
+      ? "This organisation requires two-step verification for owners and admins and does not accept single sign-on as proof of it. Sign in with your password and two-step code, then retry."
+      : "This organisation requires two-step verification for owners and admins and does not accept single sign-on as proof of it. Ask an owner to trust identity-provider MFA, or sign in with a password and two-step verification.";
   }
-  if (linked.some((other) => other.hasPassword)) {
-    return "This organisation requires two-step verification for owners and admins, and your linked password sign-in needs it. Sign in with that password and two-step verification, then retry.";
+  if (session.authMethod === null) {
+    return "This organisation requires two-step verification for owners and admins, and this session predates how BlakTail records it. Sign out, sign in again, then retry.";
   }
-  return null;
+  if (identity.hasPassword && identity.twoFactorEnabled) {
+    return "This organisation requires two-step verification for owners and admins, and this session did not use it. Sign out, sign in again with your two-step code, then retry.";
+  }
+  return "This organisation requires two-step verification for owners and admins. Turn it on under Settings, Account security, then retry.";
 }
 
 /** Linking a new sign-in identity always needs a recent sign-in. */

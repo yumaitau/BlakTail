@@ -37,8 +37,8 @@ Version N to N+1 and failed migration rollback in disposable clone preserve devi
 - Migration helper `apply_sqlite_migrations_to(pool, target)` and an upgrade
   test from a schema-18 database.
 - Release engineering: Sigstore keyless `cosign sign-blob` of `SHA256SUMS` in
-  `agent-release.yml` (verified before upload and after re-download), optional
-  or required (`BLAKTAIL_REQUIRE_SIGNATURE=1`) verification in
+  `agent-release.yml` (verified before upload and after re-download), default-on
+  verification (opt-out `BLAKTAIL_INSECURE_SKIP_SIGNATURE=1`, with a warning) in
   `scripts/install-agent.sh`, `SOURCE_DATE_EPOCH`, `CARGO_INCREMENTAL=0` and
   `--remap-path-prefix` pinned for builds.
 - Docs: `docs/compatibility.md` (version matrix, expand/contract, rollback

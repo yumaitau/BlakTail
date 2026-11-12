@@ -30,8 +30,16 @@ folders, all on TCP port 5647.
 as `C:\Shared\Docs` are accepted.
 
 `blaktaild share enable|disable|send|list` still works. `drive share`
-publishes the folder as writable. A share created read-only stays read-only
+publishes the folder marked writable. A share created read-only stays read-only
 even when a grant says `rw`.
+
+Writes are off unless you opt in on the sharing device. The agent serves every
+share read-only until it runs with `BLAKTAIL_ALLOW_WRITABLE_SHARES=1` in its
+own environment (the systemd unit or launchd plist, or a machine-wide
+environment variable on Windows followed by a service restart). The
+coordinator, console and policy cannot set it. Peers may still see a share as
+writable in their catalog; the sharing device answers writes with 403. Files
+are written as the agent's user (root or SYSTEM).
 
 ## Browse
 
@@ -59,8 +67,14 @@ http://store.abcdef12.blaktail:5647/files/
 Finder or rclone can use either URL. `GET`, `HEAD`, `PROPFIND`, `PUT`,
 `MKCOL`, `DELETE`, and `MOVE` are supported on a writable share. `COPY`,
 `LOCK`, and `PROPPATCH` are refused. `PROPFIND` with `Depth: infinity` is
-refused. A `PUT` is limited to 8MB and is held in memory on the sharing
-device.
+refused. A `PUT` needs a `Content-Length`, is limited to 8MB, and is
+streamed to a randomly named temporary file next to the target before it
+replaces it. Dot-files are hidden and refused, and links or junctions inside
+a shared folder are neither listed nor followed.
+
+The folder browser only answers requests whose `Host` is `127.0.0.1`,
+`localhost` or `[::1]` on its own port, so a web page cannot rebind its name
+to the loopback address and drive it.
 
 If port 8080 is already taken, the agent logs the failure and keeps running.
 The overlay listener is unchanged.

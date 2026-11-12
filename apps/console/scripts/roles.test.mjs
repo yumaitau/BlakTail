@@ -17,7 +17,9 @@ import {
   linkFreshnessRefusal,
   mfaRefusal,
   normaliseDomain,
+  parseSessionAuthMethod,
   parseStepUpMinutes,
+  sessionAuthMethodFor,
   stepUpRefusal,
   txtRecordsProve,
 } from "../src/lib/auth-policy-core.ts";
@@ -140,7 +142,7 @@ describe("last-owner protection", () => {
 describe("step-up and MFA policy", () => {
   const signedIn = new Date("2026-10-02T00:00:00Z");
   const at = (minutes) => new Date(signedIn.getTime() + minutes * 60_000);
-  const policy = { stepUpMaxAgeMinutes: 15, requireMfaForPrivileged: true };
+  const policy = { stepUpMaxAgeMinutes: 15, requireMfaForPrivileged: true, trustIdpMfa: false };
 
   test("step-up allows a recent sign-in and refuses an old one", () => {
     expect(stepUpRefusal(policy, signedIn, at(14))).toBeNull();
@@ -149,28 +151,53 @@ describe("step-up and MFA policy", () => {
     expect(stepUpRefusal(policy, at(5), signedIn)).not.toBeNull();
   });
 
-  test("MFA is required for privileged password identities only", () => {
-    const password = { hasPassword: true, twoFactorEnabled: false };
-    expect(mfaRefusal(policy, "owner", password)).toContain("two-step");
-    expect(mfaRefusal(policy, "admin", password)).toContain("two-step");
-    expect(mfaRefusal(policy, "network_admin", password)).toBeNull();
-    expect(mfaRefusal(policy, "owner", { hasPassword: true, twoFactorEnabled: true })).toBeNull();
-    expect(mfaRefusal(policy, "owner", { hasPassword: false, twoFactorEnabled: false })).toBeNull();
-    expect(mfaRefusal({ ...policy, requireMfaForPrivileged: false }, "owner", password)).toBeNull();
+  test("MFA is judged on the session, for privileged roles only", () => {
+    const enrolled = { hasPassword: true, twoFactorEnabled: true };
+    const bare = { hasPassword: true, twoFactorEnabled: false };
+    const mfa = { authMethod: "password_mfa" };
+    const passwordOnly = { authMethod: "password" };
+    expect(mfaRefusal(policy, "owner", mfa, enrolled)).toBeNull();
+    expect(mfaRefusal(policy, "owner", passwordOnly, bare)).toContain("Turn it on");
+    expect(mfaRefusal(policy, "admin", passwordOnly, bare)).toContain("two-step");
+    expect(mfaRefusal(policy, "network_admin", passwordOnly, bare)).toBeNull();
+    expect(mfaRefusal({ ...policy, requireMfaForPrivileged: false }, "owner", passwordOnly, bare)).toBeNull();
+    // Enrolling TOTP is not enough: this session must have presented it.
+    expect(mfaRefusal(policy, "owner", passwordOnly, enrolled)).toContain("did not use it");
+    // Sessions from before the method was recorded never pass.
+    expect(mfaRefusal(policy, "owner", { authMethod: null }, enrolled)).toContain("sign in again");
   });
 
-  test("MFA counts every linked identity behind the merged role", () => {
-    const sso = { hasPassword: false, twoFactorEnabled: false };
-    const password = { hasPassword: true, twoFactorEnabled: false };
-    const strong = { hasPassword: true, twoFactorEnabled: true };
-    // Single sign-on is exempt only while no linked identity has a password.
-    expect(mfaRefusal(policy, "owner", sso, [sso])).toBeNull();
-    expect(mfaRefusal(policy, "owner", sso, [strong])).toContain("linked password");
-    expect(mfaRefusal(policy, "admin", sso, [password])).toContain("linked password");
-    // The TOTP-protected sign-in itself is always enough.
-    expect(mfaRefusal(policy, "owner", strong, [sso, password])).toBeNull();
-    expect(mfaRefusal(policy, "owner", password, [strong])).toContain("two-step");
-    expect(mfaRefusal(policy, "network_admin", sso, [strong])).toBeNull();
+  test("single sign-on counts as MFA only when the organisation trusts the provider", () => {
+    const sso = { authMethod: "sso" };
+    const ssoOnly = { hasPassword: false, twoFactorEnabled: false };
+    const enrolled = { hasPassword: true, twoFactorEnabled: true };
+    // An SSO session of an account with TOTP enrolled never presented TOTP.
+    expect(mfaRefusal(policy, "owner", sso, enrolled)).toContain("single sign-on");
+    expect(mfaRefusal(policy, "admin", sso, ssoOnly)).toContain("trust identity-provider MFA");
+    expect(policy.trustIdpMfa).toBe(false);
+    const trusting = { ...policy, trustIdpMfa: true };
+    expect(mfaRefusal(trusting, "owner", sso, ssoOnly)).toBeNull();
+    expect(mfaRefusal(trusting, "owner", sso, enrolled)).toBeNull();
+    // Trusting the provider does not excuse a password session.
+    expect(mfaRefusal(trusting, "owner", { authMethod: "password" }, enrolled)).not.toBeNull();
+    expect(mfaRefusal(policy, "network_admin", sso, ssoOnly)).toBeNull();
+  });
+
+  test("session creation records how the session signed in", () => {
+    expect(sessionAuthMethodFor("/sign-in/email", undefined)).toBe("password");
+    expect(sessionAuthMethodFor("/two-factor/verify-totp", undefined)).toBe("password_mfa");
+    expect(sessionAuthMethodFor("/two-factor/verify-backup-code", undefined)).toBe("password_mfa");
+    // Confirming TOTP from a password session upgrades the reissued session.
+    expect(sessionAuthMethodFor("/two-factor/verify-totp", "password")).toBe("password_mfa");
+    // The OIDC callback passes its own method; reissued sessions carry theirs.
+    expect(sessionAuthMethodFor(undefined, "sso")).toBe("sso");
+    expect(sessionAuthMethodFor("/change-password", "password_mfa")).toBe("password_mfa");
+    expect(sessionAuthMethodFor("/two-factor/disable", "sso")).toBe("sso");
+    // Unknown paths and junk record nothing, which never satisfies MFA.
+    expect(sessionAuthMethodFor("/sign-in/social", undefined)).toBeNull();
+    expect(sessionAuthMethodFor(undefined, "admin")).toBeNull();
+    expect(parseSessionAuthMethod("password_mfa")).toBe("password_mfa");
+    expect(parseSessionAuthMethod("PASSWORD_MFA")).toBeNull();
   });
 
   test("linking an identity needs a fresh sign-in", () => {
@@ -230,6 +257,7 @@ describe("coordinator writes", () => {
   test("only coord.ts signs coordinator requests, so every write passes the MFA gate", () => {
     const src = new URL("../src/", import.meta.url);
     const signers = readdirSync(src, { recursive: true })
+      .map((name) => String(name).replaceAll("\\", "/"))
       .filter((name) => /\.tsx?$/.test(name))
       .filter((name) => /signCoordAssertion\(/.test(readFileSync(new URL(name, src), "utf8")));
     expect(signers.sort()).toEqual(["lib/coord-assertion.ts", "lib/coord.ts"]);

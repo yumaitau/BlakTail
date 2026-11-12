@@ -34,9 +34,11 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
    blaktail-agentgw --state-file /var/lib/blaktail/state.json --coord-ca /etc/blaktail/coord-ca.pem
    ```
 
-   It refuses `0.0.0.0`, `::` and any address that is not loopback or
-   BlakTail overlay (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). RFC 1918 / ULA
-   addresses need `--allow-private-listen` and are meant for labs only.
+   It refuses `0.0.0.0`, `::` and any address that is not loopback or one of
+   this node's own overlay addresses (`assigned_ip` / `assigned_ips` in the
+   state file). Other `100.64.0.0/10` addresses are refused, because behind
+   carrier-grade NAT that range is the host's WAN. RFC 1918 / ULA addresses
+   need `--allow-private-listen` and are meant for labs only.
 
 3. An owner or admin designates the device: Console → Agents → **Gateways** →
    *Designate*. Any enrolled device can claim the `agent-gateway`
@@ -85,8 +87,9 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
   prompt/completion tokens). No per-request record.
 - **Metadata only**: adds a per-request record (time, model, provider,
   calling device, status, latency, token counts) kept for 90 days.
-- **Full**: also stores the (already redacted) request body and the response
-  text, sealed with the coordinator secret. Only an **owner** can turn it on,
+- **Full**: also stores the request body and the response text, both passed
+  through the key's redaction patterns first, sealed with the coordinator
+  secret. Only an **owner** can turn it on,
   must acknowledge the Indigenous Cultural and Intellectual Property warning,
   and must set retention to 1–30 days. Content is purged at expiry, and
   immediately when the key leaves full logging or is revoked. Only owners can
@@ -150,7 +153,10 @@ No `/api/v1` automation endpoints exist for the agent network yet.
   private-service CA key), never returned after creation and never logged.
   They leave the coordinator only inside a grant to an authenticated gateway
   node, which holds them in memory for one request. Agent keys are stored as
-  SHA-256 hashes. The gateway wraps keys, node token and credentials in a type
+  SHA-256 hashes. Changing a provider's base URL (after normalisation, so a
+  trailing slash does not count) while it holds a credential is refused unless
+  the same update supplies a new credential or clears it, so an admin cannot
+  redirect a stored credential to a host they control. The gateway wraps keys, node token and credentials in a type
   whose debug output is `[redacted]`, and tests capture all logs and assert
   none of them appear.
 - **Fail closed.** No coordinator, no request (`503 gateway_unavailable`).
@@ -180,7 +186,8 @@ No `/api/v1` automation endpoints exist for the agent network yet.
   credential never returned/stored in clear/audited, full-logging owner + ICIP
   acknowledgement + ≤30 days, content sealed and purged on mode change,
   usage recorded once by the reserving gateway, cross-organisation isolation,
-  member/network-admin/auditor rejection, provider URL validation.
+  member/network-admin/auditor rejection, provider URL validation, base URL
+  change needs the credential again.
 - `cargo test -p blaktail-agentgw` — a real in-memory coordinator, the gateway
   and a local axum mock upstream: non-streaming and byte-for-byte SSE
   passthrough with usage metered, redaction before forwarding, bad key and

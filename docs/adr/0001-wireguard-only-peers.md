@@ -37,7 +37,10 @@ peers without a later gateway design.
 - An unmanaged endpoint cannot enforce BlakTail ACL for traffic that originates
   behind it. Policy is applied on the managed side only.
 - Default routes, overlapping prefixes, foreign organisation ranges, and
-  multicast remain privileged and fail closed in this slice.
+  multicast remain privileged and fail closed in this slice. A new peer's
+  AllowedIPs may not overlap another live WireGuard-only peer, a route
+  approved on a device or a network resource, and owned tags need the tag
+  owner's authority, as they do on devices.
 - Configuration export is a versioned public bundle: public keys, endpoints,
   AllowedIPs, revision, checksum. No node tokens, join keys, or private keys.
 

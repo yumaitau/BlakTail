@@ -25,6 +25,9 @@ browser ──wss (console origin)──▶ onshore gateway ──WireGuard (its
      deleted or credential-expired;
    - the access policy pairs the gateway with the device, lets the gateway
      reach TCP 22, and an **SSH rule lets the gateway log in as that OS user**;
+   - an **SSH rule lets the person log in to the device as that OS user**
+     (see [Write the policy](#2-write-the-policy)); the same check runs again
+     at redeem and on every report;
    - the device's agent proved it installed the organisation SSH CA
      (`remote-ssh-ca` capability) and reported a host key with no pending
      change;
@@ -100,7 +103,12 @@ blaktail-gateway \
 
 `deploy/docker/gateway.Dockerfile` builds an image with both binaries. Without
 `--tls-cert`/`--tls-key` the gateway serves plain HTTP and must sit behind a
-TLS proxy. Browsers must send an `Origin` in `--allowed-origin`.
+TLS proxy: it then refuses to start on a non-loopback `--listen` address unless
+`--allow-plain-http` (`BLAKTAIL_GATEWAY_ALLOW_PLAIN_HTTP=true`) is set. A plain
+`http://` coordinator URL is accepted only for `localhost` or a loopback IP.
+Browsers must send an `Origin` in `--allowed-origin`. The gateway dials only a
+target address that is a peer's host address in its own `blaktaild` peer map,
+so a session can never reach the gateway host, its LAN or a metadata service.
 
 Then an owner opens **Remote → Remote access**, chooses the gateway device and
 enters its `wss://` address. Saving creates the organisation's SSH user CA
@@ -117,8 +125,25 @@ Give the gateway a tag and allow it explicitly, for example:
 }
 ```
 
-A browser session can never reach a port or account that an ordinary device
-with the gateway's tags could not.
+The person opening the session needs an SSH rule of their own for the device
+and OS user. People act from the console, not from a device, so they carry no
+device tags or posture: select them by role (`src_roles`) or by a group of
+user ids or emails (`src_groups`). For example, to let admins in as `deploy`:
+
+```json
+{ "action": "allow", "src_roles": ["admin", "network_admin"], "dst_tags": ["store"], "users": ["deploy"] }
+```
+
+A `check` rule compares its period against when the person asked for the
+session. A browser session can never reach a port or account that an ordinary
+device with the gateway's tags could not, nor one the person's own SSH rules
+do not grant.
+
+**Upgrading:** before this check, a rule that named only the gateway (as in
+the first example) was enough for anyone with **use remote sessions**.
+Organisations relying on that must add person rules like the one above, or
+browser SSH is refused with `no SSH rule lets you log in to this device as
+<user>` and live sessions end on their next report.
 
 ### 3. Opt devices in
 

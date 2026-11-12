@@ -543,7 +543,7 @@ export async function recoverOwner(sql, input) {
     throw new Error("owner password must contain 10-128 characters");
   }
   const passwordHash = await hashPassword(input.password);
-  await sql.begin("isolation level serializable", async (transaction) => {
+  return await sql.begin("isolation level serializable", async (transaction) => {
     const [state] = await transaction`
       SELECT status FROM bootstrap_state WHERE id = ${STATE_ID} FOR UPDATE
     `;
@@ -563,7 +563,45 @@ export async function recoverOwner(sql, input) {
       ON CONFLICT (issuer, account_id) DO UPDATE
       SET password = EXCLUDED.password, updated_at = now()
     `;
-    await transaction`DELETE FROM session WHERE user_id = ${owner.id}`;
+    // Whoever took the account may have bound their own identity-provider
+    // login, enrolled their own TOTP, or signed in through a linked identity.
+    // Recovery removes all three so the rotated password is the only way in.
+    const linked = await transaction`
+      SELECT other.user_id
+      FROM person_login_identity mine
+      JOIN person_login_identity other ON other.person_id = mine.person_id
+      WHERE mine.user_id = ${owner.id}
+    `;
+    const linkedUserIds = [
+      ...new Set([owner.id, ...linked.map((row) => row.user_id)]),
+    ];
+    let sessionsRevoked = 0;
+    let pendingSsoLinks = 0;
+    for (const userId of linkedUserIds) {
+      const sessions = await transaction`
+        DELETE FROM session WHERE user_id = ${userId} RETURNING id
+      `;
+      const pending = await transaction`
+        DELETE FROM oidc_login_state WHERE link_user_id = ${userId} RETURNING id
+      `;
+      sessionsRevoked += sessions.length;
+      pendingSsoLinks += pending.length;
+    }
+    const ssoBindings = await transaction`
+      DELETE FROM external_identity WHERE user_id = ${owner.id}
+      RETURNING id
+    `;
+    const ssoAccounts = await transaction`
+      DELETE FROM account WHERE user_id = ${owner.id} AND provider_id = 'oidc'
+      RETURNING id
+    `;
+    const twoFactor = await transaction`
+      DELETE FROM two_factor WHERE user_id = ${owner.id} RETURNING id
+    `;
+    await transaction`
+      UPDATE "user" SET two_factor_enabled = false, updated_at = now()
+      WHERE id = ${owner.id}
+    `;
     await appendAudit(transaction, {
       organisationId: owner.organisation_id,
       actorUserId: owner.id,
@@ -574,8 +612,23 @@ export async function recoverOwner(sql, input) {
       result: "success",
       targetType: "user",
       targetId: owner.id,
-      details: { sessions_revoked: true },
+      details: {
+        sessions_revoked: true,
+        sessions_revoked_count: sessionsRevoked,
+        linked_identities_signed_out: linkedUserIds.length,
+        sso_bindings_removed: ssoBindings.length,
+        sso_accounts_removed: ssoAccounts.length,
+        pending_sso_links_removed: pendingSsoLinks,
+        two_factor_reset: true,
+        two_factor_secrets_removed: twoFactor.length,
+      },
     });
+    return {
+      sessionsRevoked,
+      linkedIdentitiesSignedOut: linkedUserIds.length,
+      ssoBindingsRemoved: ssoBindings.length,
+      twoFactorSecretsRemoved: twoFactor.length,
+    };
   });
 }
 
@@ -640,14 +693,16 @@ async function runCommand(command, flags) {
     }
     if (command === "recover-owner") {
       assertOnlyFlags(flags, ["--email", "--password-file"]);
-      await recoverOwner(sql, {
+      const recovered = await recoverOwner(sql, {
         email: normaliseEmail(requiredFlag(flags, "--email")),
         password: await readProtectedSecret(
           requiredFlag(flags, "--password-file"),
           "--password-file",
         ),
       });
-      process.stdout.write('{"status":"owner_recovered","sessionsRevoked":true}\n');
+      process.stdout.write(
+        `${JSON.stringify({ status: "owner_recovered", sessionsRevoked: true, ...recovered })}\n`,
+      );
       return;
     }
     throw new Error("usage: bootstrap.mjs init|claim|status|recover-owner [flags]");

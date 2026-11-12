@@ -1,5 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { contentSecurityPolicy, securityHeaders } from "@/lib/security-headers";
+import {
+  CLIENT_IP_HEADER,
+  trustedClientAddress,
+  trustedProxyHops,
+} from "@/lib/client-ip-core";
 
 /**
  * Adds a per-request CSP nonce and the security headers to every response.
@@ -22,6 +27,14 @@ export function proxy(request: NextRequest) {
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
+  // Better Auth rate limits and records sessions by this header only; a
+  // client-sent value is always replaced.
+  requestHeaders.delete(CLIENT_IP_HEADER);
+  const clientAddress = trustedClientAddress(
+    request.headers,
+    trustedProxyHops(process.env.BLAKTAIL_TRUSTED_PROXY_HOPS),
+  );
+  if (clientAddress) requestHeaders.set(CLIENT_IP_HEADER, clientAddress);
   requestHeaders.set("Content-Security-Policy", contentSecurityPolicy(options));
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });

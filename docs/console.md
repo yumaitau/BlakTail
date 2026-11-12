@@ -221,6 +221,33 @@ and does not issue or replace a Better Auth session. The desktop session endpoin
 also returns the full workspace list and accepts `X-BlakTail-Organisation` for an
 explicit, membership-checked selection.
 
+### Desktop and mobile sign-in
+
+The Mac, iPhone and Android apps never receive the browser session. They use
+PKCE (RFC 7636, S256 only):
+
+1. The app opens `/desktop/auth?redirect_uri=blaktail://auth/callback&state=…&code_challenge=…&code_challenge_method=S256`.
+   `redirect_uri` must be exactly `blaktail://auth/callback`; `state` is 16–256
+   URL-safe characters; the challenge is base64url(SHA-256(verifier)).
+2. The person signs in if needed and presses **Allow**. Nothing is issued without
+   that press. The page sends a same-origin JSON `POST /api/desktop/auth/authorize`;
+   the console stores a single-use code (hashed, 60 seconds, bound to the user,
+   the approving browser session and the challenge) and the page opens
+   `blaktail://auth/callback?code=btc_…&state=…`. **Cancel** opens
+   `blaktail://auth/callback?error=access_denied&state=…`.
+3. The app checks `state`, then `POST /api/desktop/auth/token` with JSON
+   `{ "code": …, "code_verifier": … }`. A wrong verifier burns the code. The
+   response is `{ "token": "btd_…", "token_type": "Bearer", "expires_at": … }`.
+4. The app sends `Authorization: Bearer btd_…` to `/api/desktop/*`. Each request
+   re-resolves identity suspension, memberships and roles like a browser request.
+   Browser session tokens are refused as Bearer.
+
+A desktop credential is stored hashed (`desktop_credential`) and ends at the
+first of: app sign-out (`DELETE /api/desktop/auth/token` with the Bearer),
+30 days, or the end of the browser session that approved it (sign-out in that
+browser, revoking sessions, password change that signs other sessions out, or
+session expiry). The apps then ask the person to sign in again.
+
 Lost sole-owner credentials have no web reset. From a trusted host, create a new
 protected password file and run:
 
@@ -230,8 +257,13 @@ bun --filter @blaktail/console bootstrap -- recover-owner \
   --password-file ./new-owner-password
 ```
 
-Recovery requires the exact sole-owner email, rotates that credential, revokes all
-existing sessions, and writes an audit event.
+Recovery requires the exact sole-owner email, rotates that credential, removes the
+owner's single sign-on bindings (`external_identity` rows and OIDC account rows)
+and pending SSO links, turns off two-step verification and deletes its secret and
+backup codes, revokes the sessions of the owner and of every login identity linked
+to the same person, and writes an audit event with each count. Sign in with the new
+password, turn two-step verification back on, then review **Settings, Ways to sign
+in** and unlink anything you do not recognise.
 
 ## Linked login identities and network accounts
 
@@ -273,6 +305,18 @@ recovery process. Deleting an identity cascades only its own network accounts an
 memberships; unrelated linked identities remain. Provider-specific
 reauthentication must preserve provider MFA when OIDC linking is enabled.
 
+Every single sign-on start sets a ten-minute, HttpOnly, `SameSite=Lax` binding
+cookie (Secure on HTTPS, scoped to `/api/oidc/callback`) and stores only its
+SHA-256 with the state row; the callback refuses a missing or foreign cookie and
+clears it, so a callback URL from another browser cannot be completed. A plain
+sign-in never links, whatever session the browser already has. Linking an
+identity-provider sign-in happens only from **Settings, Link single sign-on**: a
+same-origin form post by a signed-in user, whose state row records that user and
+session. The callback links only back into that same user and session, within the
+link freshness window. `/api/oidc/start` (30 a minute) and `/api/oidc/discover`
+(60 a minute) are rate limited per client address, and each start deletes expired
+pending attempts.
+
 The browser `GET /api/me` and desktop `GET /api/desktop/me` responses list all
 live organisations and network accounts. The workspace cookie selects only which
 organisation-scoped ACL, key, audit, invitation, and enrolment pages are shown; it
@@ -297,8 +341,11 @@ performs a fresh membership/role lookup before a coordinator assertion is signed
    Unknown role strings are rejected with `401`. Roles and the permission each
    action needs are in [roles.md](roles.md).
 5. Organisations can require a recent sign-in for security changes and
-   two-step verification for password owners and admins. Password sign-ins of
-   identities with TOTP enabled show a code step after the password.
+   two-step verification for owners and admins. Password sign-ins of
+   identities with TOTP enabled show a code step after the password. The MFA
+   rule is judged on how the current session signed in (recorded in
+   `session.auth_method`); single sign-on sessions qualify only when an owner
+   turns on **Accept single sign-on as two-step verification**.
 
 For headless Linux enrollment, `blaktaild up` prints `/enroll?code=...`. The
 page preserves that destination through sign-in, displays the requested node name
