@@ -460,6 +460,21 @@ async fn list_models(
     Json(json!({"object": "list", "data": data})).into_response()
 }
 
+/// Replaces every match of the key's patterns in one string with
+/// `[REDACTED]`; returns the number of matches. Also used for model output
+/// before it is stored under full logging.
+pub fn redact_text(text: &mut String, patterns: &[Regex]) -> usize {
+    let mut count = 0;
+    for pattern in patterns {
+        let matches = pattern.find_iter(text).count();
+        if matches > 0 {
+            count += matches;
+            *text = pattern.replace_all(text, "[REDACTED]").into_owned();
+        }
+    }
+    count
+}
+
 /// Replaces matches with `[REDACTED]` in every string anywhere in the
 /// request (messages, names, tool calls and their arguments, tool and
 /// function descriptions, prompts, unknown fields) except the top-level
@@ -467,15 +482,7 @@ async fn list_models(
 pub fn redact(body: &mut Value, patterns: &[Regex]) -> usize {
     fn walk(value: &mut Value, patterns: &[Regex], count: &mut usize) {
         match value {
-            Value::String(text) => {
-                for pattern in patterns {
-                    let matches = pattern.find_iter(text).count();
-                    if matches > 0 {
-                        *count += matches;
-                        *text = pattern.replace_all(text, "[REDACTED]").into_owned();
-                    }
-                }
-            }
+            Value::String(text) => *count += redact_text(text, patterns),
             Value::Array(items) => {
                 for item in items {
                     walk(item, patterns, count);
@@ -754,6 +761,7 @@ async fn chat_completions(
             request_chars,
             logged_request,
             full,
+            patterns,
         };
         let body = response.bytes_stream().map(move |chunk| {
             let _keep_alive = &finisher;
@@ -816,7 +824,11 @@ async fn chat_completions(
             completion_tokens,
             usage_estimated: estimated,
             latency_ms: Some(elapsed(started)),
-            response_content: full.then(|| answer.chars().take(MAX_LOGGED_CHARS).collect()),
+            response_content: full.then(|| {
+                let mut answer = answer;
+                redact_text(&mut answer, &patterns);
+                answer.chars().take(MAX_LOGGED_CHARS).collect()
+            }),
             request_content: logged_request,
         },
     );
@@ -910,6 +922,8 @@ struct Finisher {
     request_chars: usize,
     logged_request: Option<String>,
     full: bool,
+    /// The key's redaction patterns, applied to logged model output too.
+    patterns: Vec<Regex>,
 }
 
 impl Drop for Finisher {
@@ -936,7 +950,11 @@ impl Drop for Finisher {
             usage_estimated: estimated,
             latency_ms: Some(elapsed(self.started)),
             request_content: self.logged_request.take(),
-            response_content: self.full.then_some(tap.text),
+            response_content: self.full.then(|| {
+                let mut text = tap.text;
+                redact_text(&mut text, &self.patterns);
+                text
+            }),
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             record(self.gw.clone(), report);

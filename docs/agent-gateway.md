@@ -87,8 +87,9 @@ ICIP conditions are requirements, summarised under [Guarantees and limits](#guar
   prompt/completion tokens). No per-request record.
 - **Metadata only**: adds a per-request record (time, model, provider,
   calling device, status, latency, token counts) kept for 90 days.
-- **Full**: also stores the (already redacted) request body and the response
-  text, sealed with the coordinator secret. Only an **owner** can turn it on,
+- **Full**: also stores the request body and the response text, both passed
+  through the key's redaction patterns first, sealed with the coordinator
+  secret. Only an **owner** can turn it on,
   must acknowledge the Indigenous Cultural and Intellectual Property warning,
   and must set retention to 1–30 days. Content is purged at expiry, and
   immediately when the key leaves full logging or is revoked. Only owners can
