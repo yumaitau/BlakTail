@@ -31,9 +31,28 @@ resource "aws_lb_listener" "console_http" {
   port              = 80
   protocol          = "HTTP"
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.console.arn
+  # With a certificate, plain HTTP only redirects to HTTPS so session cookies
+  # and sign-in forms never cross the network in clear text. Without one
+  # (dev), it forwards as before.
+  dynamic "default_action" {
+    for_each = var.console_acm_certificate_arn == "" ? [] : [1]
+    content {
+      type = "redirect"
+
+      redirect {
+        port        = "443"
+        protocol    = "HTTPS"
+        status_code = "HTTP_301"
+      }
+    }
+  }
+
+  dynamic "default_action" {
+    for_each = var.console_acm_certificate_arn == "" ? [1] : []
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.console.arn
+    }
   }
 }
 
