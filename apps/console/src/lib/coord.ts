@@ -4,6 +4,7 @@ import { requireWriteAssurance } from "./auth-policy";
 import { CoordError } from "./errors";
 import { coordError, errorText, rememberResponseRole } from "./server-errors";
 import { signCoordAssertion } from "./coord-assertion";
+import { idSegment } from "./coord-path-core";
 import { can, permissionReason, roleLabel } from "./roles";
 import {
   organisationContext,
@@ -315,7 +316,7 @@ export async function revokeNode(
   if (denied) {
     throw new Error(denied);
   }
-  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}`, {
+  const res = await coordFetch(`/v1/orgs/${ctx.coordOrgId}/nodes/${idSegment(nodeId)}`, {
     method: "DELETE",
     ctx,
   });
@@ -333,7 +334,7 @@ export async function tombstoneNode(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/tombstone`,
+    `/v1/orgs/${ctx.coordOrgId}/nodes/${idSegment(nodeId)}/tombstone`,
     {
       method: "POST",
       ctx,
@@ -425,7 +426,7 @@ export async function disableWebhook(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/webhooks/${destinationId}`,
+    `/v1/orgs/${ctx.coordOrgId}/webhooks/${idSegment(destinationId)}`,
     {
       method: "DELETE",
       ctx,
@@ -445,7 +446,7 @@ export async function listWebhookDeliveries(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/webhooks/${destinationId}/deliveries`,
+    `/v1/orgs/${ctx.coordOrgId}/webhooks/${idSegment(destinationId)}/deliveries`,
     {
       method: "GET",
       ctx,
@@ -500,7 +501,7 @@ export async function replayWebhookDelivery(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/webhooks/deliveries/${deliveryId}/replay`,
+    `/v1/orgs/${ctx.coordOrgId}/webhooks/deliveries/${idSegment(deliveryId)}/replay`,
     {
       method: "POST",
       ctx,
@@ -520,7 +521,7 @@ export async function revokeApiClient(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/api-clients/${clientId}`,
+    `/v1/orgs/${ctx.coordOrgId}/api-clients/${idSegment(clientId)}`,
     {
       method: "DELETE",
       ctx,
@@ -541,7 +542,7 @@ export async function updateNodeFriendlyName(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/friendly-name`,
+    `/v1/orgs/${ctx.coordOrgId}/nodes/${idSegment(nodeId)}/friendly-name`,
     {
       method: "PUT",
       ctx,
@@ -563,7 +564,7 @@ export async function approveNodeRoutes(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/nodes/${nodeId}/routes`,
+    `/v1/orgs/${ctx.coordOrgId}/nodes/${idSegment(nodeId)}/routes`,
     {
       method: "PUT",
       ctx,
@@ -821,7 +822,7 @@ export async function rotateWgOnlyPeer(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${peerId}/rotate`,
+    `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${idSegment(peerId)}/rotate`,
     {
       method: "POST",
       ctx,
@@ -843,7 +844,7 @@ export async function revokeWgOnlyPeer(
     throw new Error(denied);
   }
   const res = await coordFetch(
-    `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${peerId}`,
+    `/v1/orgs/${ctx.coordOrgId}/wireguard-only-peers/${idSegment(peerId)}`,
     { method: "DELETE", ctx },
   );
   if (!res.ok) {
