@@ -4,7 +4,26 @@ import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
 import { startOidcLogin } from "@/lib/oidc";
 import { bindingCookie } from "@/lib/oidc-flow-core";
-import { assertTrustedOrigin } from "@/lib/request-security";
+import {
+  RequestSecurityError,
+  assertTrustedOrigin,
+  consumeRateLimit,
+  requestRateLimitIdentity,
+} from "@/lib/request-security";
+
+/** Unauthenticated, so bounded per client before any provider fetch or row. */
+async function limitStarts(request: Request) {
+  await consumeRateLimit(`oidc:start:${requestRateLimitIdentity(request)}`, 60, 30);
+}
+
+function tooMany(error: unknown) {
+  return error instanceof RequestSecurityError && error.status === 429
+    ? NextResponse.json(
+        { error: error.message },
+        { status: 429, headers: { "retry-after": String(error.retryAfter ?? 60) } },
+      )
+    : null;
+}
 
 function secureCookies(request: Request): boolean {
   return (process.env.BETTER_AUTH_URL ?? request.url).startsWith("https://");
@@ -32,9 +51,12 @@ export async function GET(request: Request) {
     );
   }
   try {
+    await limitStarts(request);
     const started = await startOidcLogin(organisationId, redirectTo);
     return redirectWithBinding(request, started.location, started.binding);
   } catch (error) {
+    const limited = tooMany(error);
+    if (limited) return limited;
     const message = errorText(error, "Single sign-on couldn't start.", "oidc start");
     return NextResponse.redirect(
       new URL(`/sign-in?error=${encodeURIComponent(message)}`, url.origin),
@@ -69,12 +91,15 @@ export async function POST(request: Request) {
     return settings("Choose an organisation to link.");
   }
   try {
+    await limitStarts(request);
     const started = await startOidcLogin(organisationId, "/settings", {
       userId: session.user.id,
       sessionId: session.session.id,
     });
     return redirectWithBinding(request, started.location, started.binding, 303);
   } catch (error) {
+    const limited = tooMany(error);
+    if (limited) return limited;
     return settings(errorText(error, "Single sign-on linking couldn't start.", "oidc link start"));
   }
 }

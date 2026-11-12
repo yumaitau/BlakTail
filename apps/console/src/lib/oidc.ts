@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { auth } from "./auth";
 import { getSignInPolicy, jitDomainCheck } from "./auth-policy";
 import { linkFreshnessRefusal } from "./auth-policy-core";
@@ -227,6 +227,8 @@ export async function startOidcLogin(
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(createHash("sha256").update(verifier).digest());
   const nonce = base64url(randomBytes(24));
+  // Abandoned attempts would otherwise accumulate forever.
+  await pruneExpiredOidcStates();
   const state = crypto.randomUUID();
   const binding = newBindingSecret();
   await db().insert(oidcLoginState).values({
@@ -251,6 +253,14 @@ export async function startOidcLogin(
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
   return { location: url.toString(), binding: binding.secret };
+}
+
+export async function pruneExpiredOidcStates(now: Date = new Date()): Promise<number> {
+  const removed = await db()
+    .delete(oidcLoginState)
+    .where(lt(oidcLoginState.expiresAt, now))
+    .returning({ id: oidcLoginState.id });
+  return removed.length;
 }
 
 export async function organisationHasSso(organisationId: string): Promise<boolean> {

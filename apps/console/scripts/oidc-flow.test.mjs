@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   OIDC_BINDING_COOKIE_PATH,
   bindingCookie,
@@ -77,6 +78,29 @@ describe("oidc linking", () => {
     expect(
       "refusal" in oidcLinkDecision({ linkUserId: null, linkSessionId: owner.sessionId }, owner),
     ).toBe(true);
+  });
+});
+
+describe("oidc unauthenticated endpoints", () => {
+  const read = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+
+  test("start and discover are rate limited before doing any work", () => {
+    const start = read("app/api/oidc/start/route.ts");
+    for (const handler of ["GET", "POST"]) {
+      const body = start.slice(start.indexOf(`export async function ${handler}`));
+      expect(body.indexOf("limitStarts(request)")).toBeGreaterThan(-1);
+      expect(body.indexOf("limitStarts(request)")).toBeLessThan(body.indexOf("startOidcLogin("));
+    }
+    const discover = read("app/api/oidc/discover/route.ts");
+    expect(discover.indexOf("consumeRateLimit(")).toBeGreaterThan(-1);
+    expect(discover.indexOf("consumeRateLimit(")).toBeLessThan(discover.indexOf("discoverSso(email)"));
+  });
+
+  test("starting a sign-in prunes expired state rows", () => {
+    const oidc = read("lib/oidc.ts");
+    const start = oidc.slice(oidc.indexOf("export async function startOidcLogin"));
+    expect(start.indexOf("pruneExpiredOidcStates()")).toBeGreaterThan(-1);
+    expect(start.indexOf("pruneExpiredOidcStates()")).toBeLessThan(start.indexOf(".insert(oidcLoginState)"));
   });
 });
 

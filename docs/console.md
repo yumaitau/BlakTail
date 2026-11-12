@@ -286,7 +286,9 @@ sign-in never links, whatever session the browser already has. Linking an
 identity-provider sign-in happens only from **Settings, Link single sign-on**: a
 same-origin form post by a signed-in user, whose state row records that user and
 session. The callback links only back into that same user and session, within the
-link freshness window.
+link freshness window. `/api/oidc/start` (30 a minute) and `/api/oidc/discover`
+(60 a minute) are rate limited per client address, and each start deletes expired
+pending attempts.
 
 The browser `GET /api/me` and desktop `GET /api/desktop/me` responses list all
 live organisations and network accounts. The workspace cookie selects only which
