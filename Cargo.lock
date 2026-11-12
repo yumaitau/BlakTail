@@ -590,6 +590,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wintun",
  "x25519-dalek",
+ "x509-parser",
  "zeroize",
 ]
 

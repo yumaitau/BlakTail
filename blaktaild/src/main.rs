@@ -22,7 +22,7 @@ use std::{
     io::Read as _,
     path::PathBuf,
     process,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -155,6 +155,10 @@ enum Command {
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
+        /// SHA-256 fingerprint copied from the console's Services page. When
+        /// given, a CA with any other fingerprint is refused.
+        #[arg(long)]
+        fingerprint: Option<String>,
     },
     /// Stop the local tunnel while retaining enrollment for a later resume.
     Pause,
@@ -2125,10 +2129,22 @@ async fn run(cli: Cli, operator_config: AgentConfig) -> Result<(), blaktaild::Er
                 println!("renamed {} to {}", from, share.label);
             }
         },
-        Command::TrustServiceCa { output, yes } => {
+        Command::TrustServiceCa {
+            output,
+            yes,
+            fingerprint,
+        } => {
             let state = read_state(state_dir)?;
             let coordinator = coordinator_client(&state.coord, cli.coord_ca.as_deref())?;
-            trust_service_ca(&coordinator, &state, output, yes).await?;
+            trust_service_ca(
+                &coordinator,
+                &state,
+                state_dir,
+                output,
+                yes,
+                fingerprint.as_deref(),
+            )
+            .await?;
         }
         Command::Pause => {
             let state = read_state(state_dir)?;
@@ -2205,23 +2221,29 @@ fn print_writable_note() {
 async fn trust_service_ca(
     coordinator: &Coordinator,
     state: &blaktaild::NodeState,
+    state_dir: &std::path::Path,
     output: Option<PathBuf>,
     yes: bool,
+    pinned: Option<&str>,
 ) -> Result<(), blaktaild::Error> {
     let ca = coordinator.service_ca(state).await?;
-    let fingerprint = services::pem_fingerprint(&ca.cert_pem)?;
-    if !fingerprint.eq_ignore_ascii_case(&ca.fingerprint_sha256) {
-        return Err(blaktaild::Error::Message(
-            "service CA fingerprint does not match what the coordinator reported; not trusting it"
-                .into(),
-        ));
-    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let checked = check_trusted_ca(&ca, &state.dns_name, pinned, now)?;
     println!(
-        "BlakTail private service CA\nnames: *.{} only (name-constrained)\nSHA-256: {fingerprint}\nexpires: {} (unix)",
-        ca.namespace, ca.not_after
+        "BlakTail private service CA\nnames: {} only (critical name constraint read from the certificate)\nSHA-256: {}\nexpires: {} (unix, from the certificate)",
+        checked
+            .permitted
+            .iter()
+            .map(|name| format!("*.{name}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        checked.fingerprint,
+        checked.not_after
     );
     if let Some(path) = output {
-        fs::write(&path, ca.cert_pem.as_bytes())?;
+        fs::write(&path, checked.pem.as_bytes())?;
         println!("written to {}", path.display());
         return Ok(());
     }
@@ -2233,13 +2255,54 @@ async fn trust_service_ca(
             return Err(blaktaild::Error::Message("not installed".into()));
         }
     }
-    install_ca(&ca.namespace, &ca.cert_pem)?;
+    install_ca(state_dir, &ca.namespace, &checked.pem)?;
     println!("installed; browsers that use their own trust store (for example Firefox) need it imported separately");
     Ok(())
 }
 
+/// Everything `trust-service-ca` requires before it shows or installs a CA.
+/// The coordinator's fingerprint is only a consistency check; the binding
+/// checks are the node's own namespace, the certificate's critical name
+/// constraint and, when given, the fingerprint the operator copied.
+fn check_trusted_ca(
+    ca: &services::ServiceCa,
+    dns_name: &str,
+    pinned: Option<&str>,
+    now: i64,
+) -> Result<services::CheckedServiceCa, blaktaild::Error> {
+    let expected = dns_domain(dns_name).map(|domain| format!("svc.{domain}"));
+    if expected.as_deref() != Some(ca.namespace.as_str()) {
+        return Err(blaktaild::Error::Message(
+            "service CA namespace is not this network's svc. namespace; not trusting it".into(),
+        ));
+    }
+    let checked = services::check_service_ca(&ca.cert_pem, &ca.namespace, now)?;
+    if !checked
+        .fingerprint
+        .eq_ignore_ascii_case(&ca.fingerprint_sha256)
+    {
+        return Err(blaktaild::Error::Message(
+            "service CA fingerprint does not match what the coordinator reported; not trusting it"
+                .into(),
+        ));
+    }
+    if let Some(pinned) = pinned {
+        let pinned = pinned.replace(':', "").to_ascii_lowercase();
+        if pinned != checked.fingerprint {
+            return Err(blaktaild::Error::Message(
+                "service CA fingerprint does not match --fingerprint; not trusting it".into(),
+            ));
+        }
+    }
+    Ok(checked)
+}
+
 #[cfg(target_os = "linux")]
-fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
+fn install_ca(
+    _state_dir: &std::path::Path,
+    namespace: &str,
+    pem: &str,
+) -> Result<(), blaktaild::Error> {
     let file = format!("blaktail-{namespace}.crt");
     let run = |program: &str, args: &[&str]| -> Result<(), blaktaild::Error> {
         let status = process::Command::new(program).args(args).status()?;
@@ -2268,9 +2331,28 @@ fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
-    let path = std::env::temp_dir().join(format!("blaktail-{namespace}.pem"));
-    fs::write(&path, pem)?;
+fn install_ca(
+    state_dir: &std::path::Path,
+    namespace: &str,
+    pem: &str,
+) -> Result<(), blaktaild::Error> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    // A private directory under the state directory, not a predictable
+    // name in the shared temporary directory.
+    let directory = state_dir.join(format!("trust-ca-{:016x}", rand::random::<u64>()));
+    fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    let path = directory.join(format!("blaktail-{namespace}.pem"));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(pem.as_bytes()));
+    if let Err(error) = written {
+        let _ = fs::remove_dir_all(&directory);
+        return Err(error.into());
+    }
     // macOS asks for an administrator's approval before changing trust.
     let status = process::Command::new("security")
         .args([
@@ -2283,7 +2365,7 @@ fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
         ])
         .arg(&path)
         .status();
-    let _ = fs::remove_file(&path);
+    let _ = fs::remove_dir_all(&directory);
     if status?.success() {
         Ok(())
     } else {
@@ -2294,9 +2376,14 @@ fn install_ca(namespace: &str, pem: &str) -> Result<(), blaktaild::Error> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn install_ca(_namespace: &str, _pem: &str) -> Result<(), blaktaild::Error> {
+fn install_ca(
+    _state_dir: &std::path::Path,
+    _namespace: &str,
+    _pem: &str,
+) -> Result<(), blaktaild::Error> {
     Err(blaktaild::Error::Message(
-        "trust installation is supported on Linux and macOS; use --output".into(),
+        "this agent installs the service CA only on Linux and macOS; on Windows use --output and import the file yourself"
+            .into(),
     ))
 }
 
@@ -2344,6 +2431,35 @@ fn credential_status(expires_at: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_ca_must_match_this_network_and_any_pinned_fingerprint() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        params.name_constraints = Some(rcgen::NameConstraints {
+            permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(
+                "svc.12345678.blaktail".into(),
+            )],
+            excluded_subtrees: Vec::new(),
+        });
+        let cert_pem = params.self_signed(&key).unwrap().pem();
+        let fingerprint = services::pem_fingerprint(&cert_pem).unwrap();
+        let ca = services::ServiceCa {
+            namespace: "svc.12345678.blaktail".into(),
+            cert_pem,
+            fingerprint_sha256: fingerprint.to_ascii_uppercase(),
+            not_after: 0,
+        };
+        let dns = "laptop.12345678.blaktail";
+        assert!(check_trusted_ca(&ca, dns, None, 0).is_ok());
+        assert!(check_trusted_ca(&ca, dns, Some(&fingerprint), 0).is_ok());
+        assert!(check_trusted_ca(&ca, dns, Some(&"0".repeat(64)), 0).is_err());
+        assert!(check_trusted_ca(&ca, "laptop.99999999.blaktail", None, 0).is_err());
+        let mut lying = ca;
+        lying.fingerprint_sha256 = "0".repeat(64);
+        assert!(check_trusted_ca(&lying, dns, None, 0).is_err());
+    }
 
     #[test]
     fn join_key_is_never_a_command_line_argument() {

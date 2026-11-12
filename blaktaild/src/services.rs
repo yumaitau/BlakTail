@@ -818,15 +818,136 @@ pub fn listen_port(state: &NodeState) -> u16 {
         .unwrap_or(DEFAULT_LISTEN_PORT)
 }
 
-/// SHA-256 fingerprint (lowercase hex) of the first certificate in `pem`.
-pub fn pem_fingerprint(pem: &str) -> Result<String, Error> {
+/// SHA-256 fingerprint (lowercase hex) of a DER certificate.
+pub fn der_fingerprint(der: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let der = CertificateDer::from_pem_slice(pem.as_bytes())
-        .map_err(|_| Error::Message("service CA is not a PEM certificate".into()))?;
-    Ok(Sha256::digest(der.as_ref())
+    Sha256::digest(der)
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .collect()
+}
+
+/// SHA-256 fingerprint (lowercase hex) of the only certificate in `pem`.
+pub fn pem_fingerprint(pem: &str) -> Result<String, Error> {
+    Ok(der_fingerprint(&single_pem_certificate(pem)?))
+}
+
+fn ca_error(message: &str) -> Error {
+    Error::Message(format!("service CA refused: {message}"))
+}
+
+/// The DER of the one certificate in `pem`. Anything else in the text (a
+/// second certificate, a key, any other PEM section) is refused, so what is
+/// checked is exactly what gets installed.
+fn single_pem_certificate(pem: &str) -> Result<Vec<u8>, Error> {
+    if pem.matches("-----BEGIN ").count() != 1 {
+        return Err(ca_error("expected exactly one PEM certificate"));
+    }
+    let certificates = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ca_error("not a PEM certificate"))?;
+    match certificates.as_slice() {
+        [only] => Ok(only.as_ref().to_vec()),
+        _ => Err(ca_error("expected exactly one PEM certificate")),
+    }
+}
+
+/// `svc.abcdef12.blaktail`-style name: 3 or more lowercase DNS labels.
+pub fn valid_service_namespace(namespace: &str) -> bool {
+    let labels = namespace.split('.').collect::<Vec<_>>();
+    namespace.len() <= 253
+        && labels.len() >= 3
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+/// A service CA that passed `check_service_ca`, with what was read from the
+/// certificate itself.
+#[derive(Debug)]
+pub struct CheckedServiceCa {
+    pub fingerprint: String,
+    /// DNS subtrees the certificate's critical name constraint permits.
+    pub permitted: Vec<String>,
+    pub not_after: i64,
+    /// The single certificate, re-encoded; this is what is installed.
+    pub pem: String,
+}
+
+/// Refuse anything but one CA certificate whose critical name constraint
+/// permits only `namespace` (DNS) and that has not expired.
+pub fn check_service_ca(pem: &str, namespace: &str, now: i64) -> Result<CheckedServiceCa, Error> {
+    use x509_parser::extensions::GeneralName;
+    if !valid_service_namespace(namespace) {
+        return Err(ca_error("the namespace is not a DNS name"));
+    }
+    let der = single_pem_certificate(pem)?;
+    let (rest, certificate) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|_| ca_error("the certificate does not parse"))?;
+    if !rest.is_empty() {
+        return Err(ca_error("trailing data after the certificate"));
+    }
+    let is_ca = certificate
+        .basic_constraints()
+        .map_err(|_| ca_error("invalid basic constraints"))?
+        .is_some_and(|extension| extension.value.ca);
+    if !is_ca {
+        return Err(ca_error("the certificate is not a CA"));
+    }
+    let constraints = certificate
+        .name_constraints()
+        .map_err(|_| ca_error("invalid name constraints"))?
+        .ok_or_else(|| ca_error("the CA has no name constraint"))?;
+    if !constraints.critical {
+        return Err(ca_error("the name constraint is not critical"));
+    }
+    let mut permitted = Vec::new();
+    for subtree in constraints
+        .value
+        .permitted_subtrees
+        .as_deref()
+        .unwrap_or_default()
+    {
+        match &subtree.base {
+            GeneralName::DNSName(name) => {
+                permitted.push(name.trim_start_matches('.').to_ascii_lowercase())
+            }
+            _ => return Err(ca_error("the name constraint permits more than DNS names")),
+        }
+    }
+    if permitted.as_slice() != [namespace.to_owned()] {
+        return Err(ca_error(&format!(
+            "the name constraint does not permit only {namespace}"
+        )));
+    }
+    let not_after = certificate.validity().not_after.timestamp();
+    if not_after <= now {
+        return Err(ca_error("the certificate has expired"));
+    }
+    Ok(CheckedServiceCa {
+        fingerprint: der_fingerprint(&der),
+        permitted,
+        not_after,
+        pem: der_to_pem(&der),
+    })
+}
+
+fn der_to_pem(der: &[u8]) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap_or_default());
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 #[cfg(test)]
