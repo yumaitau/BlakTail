@@ -1,6 +1,7 @@
 import { cookies, headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { escapeHtml, validDesktopRedirectUri } from "@/lib/desktop-auth-core";
 
 /**
  * Completes desktop ASWebAuthenticationSession sign-in.
@@ -8,14 +9,15 @@ import { auth } from "@/lib/auth";
  *   blaktail://auth/callback#token=…
  *
  * Custom URL schemes are returned via a tiny HTML bounce because some stacks reject
- * non-http(s) Location headers.
+ * non-http(s) Location headers. The bounce is a meta refresh and a link only (no
+ * inline script), and the only accepted callback is exactly blaktail://auth/callback.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const redirectURI = url.searchParams.get("redirect_uri");
-  if (!redirectURI || !redirectURI.startsWith("blaktail://")) {
+  const redirectURI = validDesktopRedirectUri(url.searchParams.get("redirect_uri"));
+  if (!redirectURI) {
     return NextResponse.json(
-      { error: "redirect_uri must be a blaktail:// callback." },
+      { error: "redirect_uri must be blaktail://auth/callback." },
       { status: 400 },
     );
   }
@@ -30,11 +32,7 @@ export async function GET(request: Request) {
   }
 
   const token = session.session.token;
-  const destination = `${redirectURI.split("#")[0]}#token=${encodeURIComponent(token)}`;
-  const safe = destination
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;");
+  const safe = escapeHtml(`${redirectURI}#token=${encodeURIComponent(token)}`);
   const html = `<!doctype html>
 <html lang="en-AU">
   <head>
@@ -43,8 +41,7 @@ export async function GET(request: Request) {
     <title>Returning to BlakTail</title>
   </head>
   <body>
-    <p>Returning to the BlakTail app…</p>
-    <script>window.location.href = ${JSON.stringify(destination)};</script>
+    <p>Returning to the BlakTail app… <a href="${safe}">Open the app</a> if nothing happens.</p>
   </body>
 </html>`;
   return new NextResponse(html, {
