@@ -6,6 +6,7 @@ import { twoFactor } from "better-auth/plugins/two-factor";
 import { db } from "./db/client";
 import * as schema from "./db/schema";
 import { writeConsoleAudit } from "./console-audit";
+import { CLIENT_IP_HEADER } from "./client-ip-core";
 
 const betterAuthSecret = process.env.BETTER_AUTH_SECRET;
 if (!betterAuthSecret || Buffer.byteLength(betterAuthSecret) < 32) {
@@ -42,6 +43,16 @@ export const auth = betterAuth({
       "/sign-up/email": { window: 60, max: 3 },
       "/two-factor/*": { window: 60, max: 10 },
       "/change-password": { window: 60, max: 5 },
+    },
+  },
+  advanced: {
+    ipAddress: {
+      // Never the raw X-Forwarded-For: its left side is client-controlled.
+      // src/proxy.ts derives this header from BLAKTAIL_TRUSTED_PROXY_HOPS and
+      // drops any client-sent copy. Without trusted proxies it is absent and
+      // Better Auth falls back to one shared bucket per path.
+      ipAddressHeaders: [CLIENT_IP_HEADER],
+      disableIpTracking: false,
     },
   },
   session: {

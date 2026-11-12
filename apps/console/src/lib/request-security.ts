@@ -2,6 +2,11 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import { rawSqlClient } from "./db/client";
+import {
+  UNTRUSTED_CLIENT_KEY,
+  trustedClientAddress,
+  trustedProxyHops,
+} from "./client-ip-core";
 
 export class RequestSecurityError extends Error {
   constructor(
@@ -52,10 +57,18 @@ export function assertTrustedOrigin(request: Request): void {
   }
 }
 
+/**
+ * Rate-limit key for the client. The left of `X-Forwarded-For` is whatever
+ * the client sent, so only the hop written by a trusted proxy counts
+ * (`BLAKTAIL_TRUSTED_PROXY_HOPS`); otherwise every request shares one key.
+ */
 export function requestRateLimitIdentity(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || request.headers.get("x-real-ip") || "unknown";
-  return createHash("sha256").update(address.slice(0, 128)).digest("hex");
+  const address =
+    trustedClientAddress(
+      request.headers,
+      trustedProxyHops(process.env.BLAKTAIL_TRUSTED_PROXY_HOPS),
+    ) ?? UNTRUSTED_CLIENT_KEY;
+  return createHash("sha256").update(address).digest("hex");
 }
 
 export async function consumeRateLimit(

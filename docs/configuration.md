@@ -256,7 +256,19 @@ Lists are comma-separated. Boolean values accept `true`/`false`, `yes`/`no`, or
 | `BETTER_AUTH_TRUSTED_ORIGINS` | `console.trusted_origins` | Comma-separated exact origins |
 | `COORD_BASE_URL` | `console.coordinator_url` | HTTPS except loopback |
 | `NODE_EXTRA_CA_CERTS` | `console.coordinator_ca_file` | Optional CA path |
+| `BLAKTAIL_TRUSTED_PROXY_HOPS` | (console process environment only) | 0-10, default 0; see below the table |
 | `BETTER_AUTH_SECRET` / `BETTER_AUTH_SECRET_FILE` | `console.auth_secret` | Secret pair |
+
+`BLAKTAIL_TRUSTED_PROXY_HOPS` is the number of reverse proxies in front of the
+console that append to `X-Forwarded-For`. Sign-in and invitation rate limits key
+on the entry that many hops from the right; everything to its left is
+client-supplied and ignored. The default 0 ignores `X-Forwarded-For` and
+`X-Real-IP` entirely, so every client shares one bucket per path (safe, but one
+client can slow others). Set 1 behind a single AWS ALB (the `deploy/aws` and
+`deploy/eks` manifests do), and only when the console port is reachable solely
+through those proxies; a client that can reach the port directly could otherwise
+choose its own key. Better Auth reads the same derived address, never the raw
+header. It is not yet in the `blaktail-config` file schema.
 
 Run `blaktail-config schema` for the same machine-readable environment map.
 
