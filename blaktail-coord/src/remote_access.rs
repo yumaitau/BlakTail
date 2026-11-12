@@ -17,7 +17,7 @@ use crate::policy_explain::device_subject;
 use crate::posture::{PostureContext, CAP_SSH_USERS};
 use crate::{
     append_audit, bearer, bump_control_revision, console_session, hash, load_acl_row, now, secret,
-    specs_cover, valid_ssh_os_user, Acl, ApiError, AppState, DeviceTag, Role, Session,
+    specs_cover, valid_ssh_os_user, Acl, ApiError, AppState, DeviceTag, Role, Session, Subject,
 };
 use axum::{
     extract::{Path as UrlPath, State},
@@ -875,10 +875,24 @@ struct Path {
     host_key: Option<String>,
 }
 
+/// The person behind a browser session, as an SSH rule source. They act from
+/// the console rather than from an enrolled device, so they carry no device
+/// tags or posture: rules must select them by role, user id, email or group.
+/// `authenticated_at` is when they last presented a console assertion for
+/// this session, which `check` rules compare against their period.
+fn person_subject(person: &Session, authenticated_at: i64) -> Subject {
+    Subject {
+        email: person.email.clone(),
+        authenticated_at: Some(authenticated_at),
+        ..Subject::new(person.role, Vec::new()).with_user(person.user_id.clone())
+    }
+}
+
 /// Re-runs the coordinator's own policy compiler for gateway → target. The
 /// result matches what both agents enforce, so a browser session can never
 /// reach a port or OS user that an ordinary device on the gateway's tags
-/// could not.
+/// could not. SSH also needs an `ssh` rule for (person, target, OS user), so
+/// the gateway's own grant is never enough on its own.
 async fn check_path(
     s: &AppState,
     org_id: Uuid,
@@ -886,6 +900,7 @@ async fn check_path(
     target_id: Uuid,
     kind: SessionKind,
     os_user: &str,
+    person: &Subject,
 ) -> Result<Result<Path, Denial>, ApiError> {
     let org = org_id.to_string();
     let Some(target) = node_status(&s.store.pool, &org, target_id).await? else {
@@ -943,6 +958,11 @@ async fn check_path(
         if !acl.allows_ssh(&gateway_subject, &target_subject, os_user) {
             return Ok(Err(Denial::new(format!(
                 "no SSH rule lets the gateway log in to this device as {os_user}"
+            ))));
+        }
+        if !acl.allows_ssh(person, &target_subject, os_user) {
+            return Ok(Err(Denial::new(format!(
+                "no SSH rule lets you log in to this device as {os_user}"
             ))));
         }
         if !target.has(CAP_REMOTE_SSH) {
@@ -1085,6 +1105,7 @@ async fn create_session(
         input.target_node_id,
         input.kind,
         &os_user,
+        &person_subject(&session, now()),
     )
     .await?
     {
@@ -1561,6 +1582,7 @@ async fn redeem_ticket(
         row.target_node_id,
         row.kind,
         &row.os_user,
+        &person_subject(&row.actor, row.created_at),
     )
     .await
     {
@@ -1742,6 +1764,7 @@ async fn report_session(
             row.target_node_id,
             row.kind,
             &row.os_user,
+            &person_subject(&row.actor, row.created_at),
         )
         .await
         {
