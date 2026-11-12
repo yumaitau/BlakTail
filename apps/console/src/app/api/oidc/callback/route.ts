@@ -6,7 +6,11 @@ import {
   completeOidcLogin,
   establishConsoleSession,
 } from "@/lib/oidc";
-import { OIDC_BINDING_COOKIE, bindingCookie } from "@/lib/oidc-flow-core";
+import {
+  OIDC_BINDING_COOKIE,
+  bindingCookie,
+  sameOriginRedirect,
+} from "@/lib/oidc-flow-core";
 import { ACTIVE_ORGANISATION_COOKIE, activeOrganisationCookieOptions } from "@/lib/session";
 
 function clearBinding(request: NextRequest, response: NextResponse): NextResponse {
@@ -49,10 +53,9 @@ export async function GET(request: NextRequest) {
         : null,
     });
     const sessionCookie = await establishConsoleSession(completed.userId);
-    const redirectTo = completed.redirectTo.startsWith("/")
-      ? completed.redirectTo
-      : "/control-center";
-    const response = NextResponse.redirect(new URL(redirectTo, url.origin));
+    const response = NextResponse.redirect(
+      sameOriginRedirect(completed.redirectTo, url.origin),
+    );
     response.cookies.set({
       name: sessionCookie.name,
       value: sessionCookie.value,

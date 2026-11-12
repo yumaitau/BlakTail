@@ -6,6 +6,8 @@ import {
   hashBindingSecret,
   newBindingSecret,
   oidcLinkDecision,
+  safeRedirectPath,
+  sameOriginRedirect,
 } from "../src/lib/oidc-flow-core.ts";
 
 describe("oidc browser binding", () => {
@@ -75,5 +77,37 @@ describe("oidc linking", () => {
     expect(
       "refusal" in oidcLinkDecision({ linkUserId: null, linkSessionId: owner.sessionId }, owner),
     ).toBe(true);
+  });
+});
+
+describe("oidc post-sign-in redirect", () => {
+  const origin = "https://console.example.org.au";
+
+  test("keeps same-origin paths", () => {
+    expect(safeRedirectPath("/control-center")).toBe("/control-center");
+    expect(safeRedirectPath("/enroll?code=ABC-123")).toBe("/enroll?code=ABC-123");
+    expect(safeRedirectPath("/settings#identities")).toBe("/settings#identities");
+    expect(sameOriginRedirect("/devices?x=1", origin).href).toBe(`${origin}/devices?x=1`);
+  });
+
+  test("refuses protocol-relative, backslash, control-character and absolute targets", () => {
+    for (const hostile of [
+      "//evil.example",
+      "/\\evil.example",
+      "\\\\evil.example",
+      "/\t/evil.example",
+      "/\n/evil.example",
+      "/\r\n/evil.example",
+      "/\u0000/evil.example",
+      "https://evil.example/",
+      "javascript:alert(1)",
+      "evil.example",
+      "",
+      null,
+      undefined,
+    ]) {
+      expect(safeRedirectPath(hostile)).toBe("/control-center");
+      expect(sameOriginRedirect(hostile, origin).origin).toBe(origin);
+    }
   });
 });

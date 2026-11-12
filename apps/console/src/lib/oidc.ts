@@ -11,6 +11,7 @@ import {
   bindingMatches,
   newBindingSecret,
   oidcLinkDecision,
+  safeRedirectPath,
 } from "./oidc-flow-core";
 import {
   OidcTokenError,
@@ -234,7 +235,7 @@ export async function startOidcLogin(
     providerId: provider.id,
     codeVerifier: verifier,
     nonce,
-    redirectTo: redirectTo.startsWith("/") ? redirectTo : "/control-center",
+    redirectTo: safeRedirectPath(redirectTo),
     bindingHash: binding.hash,
     linkUserId: link?.userId ?? null,
     linkSessionId: link?.sessionId ?? null,

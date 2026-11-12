@@ -42,6 +42,33 @@ export function bindingCookie(value: string, secure: boolean) {
   };
 }
 
+export const DEFAULT_SIGN_IN_REDIRECT = "/control-center";
+
+/**
+ * A post-sign-in destination is a same-origin path only. `//host` and
+ * `/\host` are protocol-relative to browsers, and URL parsers strip tabs and
+ * newlines, so `/\t/host` would become `//host`: control characters and
+ * backslashes are refused outright.
+ */
+export function safeRedirectPath(
+  value: string | null | undefined,
+  fallback: string = DEFAULT_SIGN_IN_REDIRECT,
+): string {
+  if (typeof value !== "string" || value.length > 2048) return fallback;
+  if (/[\u0000-\u001f\u007f\\]/.test(value)) return fallback;
+  return /^\/(?!\/)/.test(value) ? value : fallback;
+}
+
+/** Resolve against `origin` and refuse anything that lands elsewhere. */
+export function sameOriginRedirect(
+  value: string | null | undefined,
+  origin: string,
+  fallback: string = DEFAULT_SIGN_IN_REDIRECT,
+): URL {
+  const target = new URL(safeRedirectPath(value, fallback), origin);
+  return target.origin === new URL(origin).origin ? target : new URL(fallback, origin);
+}
+
 export type PendingLink = {
   linkUserId: string | null;
   linkSessionId: string | null;
