@@ -1,6 +1,7 @@
 # BlakTail coordination server. TLS terminates inside the binary (rustls),
 # so a load balancer can pass traffic through untouched.
-FROM rust:1.98-slim-bookworm AS build
+# rust:1.98-slim-bookworm (index digest; refresh: docker buildx imagetools inspect rust:1.98-slim-bookworm)
+FROM rust@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY config ./config
@@ -15,7 +16,9 @@ COPY blaktaild ./blaktaild
 COPY blaktail-ios-wg ./blaktail-ios-wg
 RUN cargo build --release -p blaktail-coord -p blaktail-config
 
-FROM debian:bookworm-slim
+# debian:bookworm-slim (index digest; refresh: docker buildx imagetools inspect debian:bookworm-slim)
+
+FROM debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
