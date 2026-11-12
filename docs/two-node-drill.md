@@ -29,6 +29,6 @@ For development, set `BLAKTAILD` to a locally built Linux binary instead of
 acceptance.
 
 After recording results, revoke both disposable nodes with `blaktaild down` or the
-console, stop their agent processes, and destroy the VMs. This drill is intentionally
-manual until a verified self-hosted runner with nested-virtualisation/NAT capability
-is available; ordinary hosted CI is not equivalent to the required topology.
+console, stop their agent processes, and destroy the VMs. This drill is manual. It
+is not run from GitHub Actions, because this repository is public and hosted CI does
+not provide the required two-NAT topology.
