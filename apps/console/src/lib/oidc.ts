@@ -320,6 +320,8 @@ export type CompletedOidcLogin = {
   userId: string;
   organisationId: string;
   redirectTo: string;
+  /** True when this finished an explicit link into the current session. */
+  linked: boolean;
 };
 
 export async function completeOidcLogin(input: {
@@ -567,6 +569,7 @@ export async function completeOidcLogin(input: {
     userId: outcome.userId,
     organisationId: login.organisationId,
     redirectTo: login.redirectTo,
+    linked: Boolean(linkingUserId),
   };
 }
 

@@ -52,10 +52,15 @@ export async function GET(request: NextRequest) {
           }
         : null,
     });
-    const sessionCookie = await establishConsoleSession(completed.userId);
     const response = NextResponse.redirect(
       sameOriginRedirect(completed.redirectTo, url.origin),
     );
+    if (completed.linked) {
+      // The session that asked for the link keeps going unchanged, including
+      // how it signed in; linking is not a sign-in.
+      return clearBinding(request, response);
+    }
+    const sessionCookie = await establishConsoleSession(completed.userId);
     response.cookies.set({
       name: sessionCookie.name,
       value: sessionCookie.value,
