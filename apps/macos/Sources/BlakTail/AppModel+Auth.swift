@@ -26,6 +26,10 @@ extension AppModel {
     }
 
     func signOut() {
+        if let token = try? keychain.load(), !token.isEmpty, let base = consoleBaseURL {
+            let client = ConsoleClient(sessionToken: token, baseURL: base)
+            Task { try? await client.revokeCredential() }
+        }
         try? keychain.delete()
         session = nil
         devices = []

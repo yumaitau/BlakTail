@@ -11,7 +11,7 @@ extension PhoneModel {
                 lastError = "Set a valid onshore console URL first."
                 return
             }
-            let token = try await browserSignIn.signIn(consoleBaseURL: base)
+            let token = try await browserSignIn.signIn(consoleBaseURL: base, urlSession: urlSession)
             try keychain.save(token)
             let desktop = try await ConsoleClient(
                 sessionToken: token,
@@ -30,6 +30,10 @@ extension PhoneModel {
     }
 
     public func signOut() {
+        if let token = try? keychain.load(), !token.isEmpty, let base = consoleBaseURL {
+            let client = ConsoleClient(sessionToken: token, baseURL: base, urlSession: urlSession)
+            Task { try? await client.revokeCredential() }
+        }
         try? keychain.delete()
         session = nil
         devices = []
