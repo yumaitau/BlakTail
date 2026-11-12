@@ -37,6 +37,11 @@ struct Cli {
     tls_cert: Option<PathBuf>,
     #[arg(long, env = "BLAKTAIL_GATEWAY_TLS_KEY", requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+    /// Serve plain HTTP on a non-loopback address. Only for a gateway behind
+    /// a TLS-terminating proxy on a private network; tickets and RDP
+    /// passwords cross this hop.
+    #[arg(long, env = "BLAKTAIL_GATEWAY_ALLOW_PLAIN_HTTP")]
+    allow_plain_http: bool,
 }
 
 #[tokio::main]
@@ -49,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = Cli::parse();
+    blaktail_gateway::check_listen(cli.listen, cli.tls_cert.is_some(), cli.allow_plain_http)?;
     let coord_ca_pem = match &cli.coord_ca {
         Some(path) => Some(std::fs::read(path)?),
         None => None,

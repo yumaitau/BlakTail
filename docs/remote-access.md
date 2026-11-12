@@ -100,7 +100,12 @@ blaktail-gateway \
 
 `deploy/docker/gateway.Dockerfile` builds an image with both binaries. Without
 `--tls-cert`/`--tls-key` the gateway serves plain HTTP and must sit behind a
-TLS proxy. Browsers must send an `Origin` in `--allowed-origin`.
+TLS proxy: it then refuses to start on a non-loopback `--listen` address unless
+`--allow-plain-http` (`BLAKTAIL_GATEWAY_ALLOW_PLAIN_HTTP=true`) is set. A plain
+`http://` coordinator URL is accepted only for `localhost` or a loopback IP.
+Browsers must send an `Origin` in `--allowed-origin`. The gateway dials only a
+target address that is a peer's host address in its own `blaktaild` peer map,
+so a session can never reach the gateway host, its LAN or a metadata service.
 
 Then an owner opens **Remote → Remote access**, chooses the gateway device and
 enters its `wss://` address. Saving creates the organisation's SSH user CA
