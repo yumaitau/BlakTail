@@ -506,6 +506,29 @@ pub(crate) struct Http {
     client: reqwest::Client,
 }
 
+/// Reads a response body, failing as soon as it passes `cap` bytes. A
+/// missing or false Content-Length cannot make the coordinator buffer more.
+async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, AdapterError> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > cap as u64)
+    {
+        return Err(AdapterError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AdapterError::Unreachable)?
+    {
+        if body.len() + chunk.len() > cap {
+            return Err(AdapterError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 impl Http {
     /// Builds a client that connects only to the checked addresses of the
     /// given URLs and never follows redirects.
@@ -556,20 +579,7 @@ impl Http {
             if !(200..300).contains(&status) {
                 return Err(AdapterError::Status(status));
             }
-            if response
-                .content_length()
-                .is_some_and(|len| len as usize > MAX_BODY_BYTES)
-            {
-                return Err(AdapterError::TooLarge);
-            }
-            let body = response
-                .bytes()
-                .await
-                .map_err(|_| AdapterError::Unreachable)?;
-            if body.len() > MAX_BODY_BYTES {
-                return Err(AdapterError::TooLarge);
-            }
-            return Ok(body.to_vec());
+            return read_capped(response, MAX_BODY_BYTES).await;
         }
     }
 

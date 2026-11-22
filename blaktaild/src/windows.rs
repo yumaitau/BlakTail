@@ -584,6 +584,14 @@ fn decode_key(peer_key_b64: &str) -> Result<[u8; 32], Error> {
 }
 
 fn add_peer(raw: *mut c_void, public: &[u8; 32], peer: &Peer) -> Result<(), Error> {
+    // The engine takes a comma-joined list; refuse anything but CIDRs so a
+    // coordinator string cannot smuggle extra entries.
+    if !peer.allowed_ips.iter().all(|ip| crate::valid_cidr(ip)) {
+        return Err(Error::Message(format!(
+            "peer {} has an invalid allowed IP",
+            peer.name
+        )));
+    }
     let allowed = std::ffi::CString::new(peer.allowed_ips.join(","))
         .map_err(|_| Error::Message("peer allowed IPs contain a null".into()))?;
     let code = unsafe {

@@ -2370,14 +2370,27 @@ fn redacted_log_tail(path: Option<&Path>, maximum: usize) -> Result<Vec<String>,
 fn redact_log_line(line: &str) -> String {
     let mut redacted = line.chars().take(512).collect::<String>();
     let patterns = [
+        // BlakTail credentials (join, node, agent, owner, ... keys) anywhere.
+        (r"\bbt[a-z]{1,3}_[A-Za-z0-9_-]{8,}", "<redacted-token>"),
         (r"(?i)bearer\s+[a-z0-9._~+/=-]+", "Bearer <redacted>"),
+        // JSON fields: "client_secret":"…" or "password": "…".
+        (
+            r#"(?i)("[^"]*(?:password|secret|token|cookie|authorization|join[_-]?key|private[_-]?key|api[_-]?key|credential|database_url|device_code)[^"]*"\s*:\s*)"(?:[^"\\]|\\.)*""#,
+            r#"$1"<redacted>""#,
+        ),
         (
             r"(?i)(password|secret|token|cookie|authorization|join[_-]?key|private[_-]?key|database_url)(\s*[:=]\s*)[^\s,;]+",
             "$1$2<redacted>",
         ),
         (r"(?i)postgres(?:ql)?://[^\s,;]+", "<redacted-database-url>"),
+        // Query parameters that carry codes, keys, tokens or signatures.
         (
-            r"(?i)([?&](?:code|device_code|join_key)=)[^&\s]+",
+            r"(?i)([?&][^=&\s]*(?:code|token|key|secret|password|signature|sig|ticket|state|auth)[^=&\s]*=)[^&\s#]+",
+            "$1<redacted>",
+        ),
+        // Secrets in URL paths, e.g. /v1/device-authorizations/<code>/poll.
+        (
+            r"(?i)(/(?:device-authorizations|invitations|invites|join|tickets|tokens)/)[^/\s?#]+",
             "$1<redacted>",
         ),
         (
@@ -2393,6 +2406,8 @@ fn redact_log_line(line: &str) -> String {
             r"(?i)(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}|(?:[0-9a-f]{1,4}:){1,7}:|:(?::[0-9a-f]{1,4}){1,7}",
             "<redacted-ip>",
         ),
+        // Any other long opaque path segment (after IDs are replaced).
+        (r"(/)[A-Za-z0-9_-]{32,}", "$1<redacted>"),
     ];
     for (pattern, replacement) in patterns {
         let regex = Regex::new(pattern).expect("redaction pattern is valid");
@@ -2962,6 +2977,53 @@ mod tests {
         assert!(!bundle.contains("postgres://owner:password"));
         assert!(!bundle.contains("ABCD-EFGH"));
         assert!(!bundle.contains("base64-material"));
+    }
+
+    #[test]
+    fn log_redaction_covers_json_bare_tokens_paths_and_queries() {
+        // Obviously fake values, built at runtime so scanners stay quiet.
+        let join = format!("btk_{}", "FAKEfake0123456789".repeat(3));
+        let node = format!("btn_{}", "FAKEfake0123456789".repeat(3));
+        let code = "FAKE-DEVICE-CODE-0000";
+        let lines = [
+            r#"{"client_secret":"fake-json-secret-1","user":"x"}"#.to_owned(),
+            r#"{"password": "fake json secret 2", "node_token" : "fake-3"}"#.to_owned(),
+            r#"{"api_key":"fake-esc\"aped-4"}"#.to_owned(),
+            format!("enrolled with {join} and then {node}"),
+            format!("GET /v1/device-authorizations/{code}/poll 200"),
+            "GET /v1/session?ticket=fake-ticket-5&cols=80 200".to_owned(),
+            "redirect https://idp.example/cb?state=fake-state-6&x_signature=fake-sig-7".to_owned(),
+            format!("GET /static/{} 200", "f".repeat(40)),
+        ];
+        let output: Vec<String> = lines.iter().map(|line| redact_log_line(line)).collect();
+        let joined = output.join("\n");
+        for secret in [
+            "fake-json-secret-1",
+            "fake json secret 2",
+            "fake-3",
+            "aped-4",
+            join.as_str(),
+            node.as_str(),
+            code,
+            "fake-ticket-5",
+            "fake-state-6",
+            "fake-sig-7",
+            "ffffffffffffffffffffffffffffffffffffffff",
+        ] {
+            assert!(!joined.contains(secret), "{secret} survived:\n{joined}");
+        }
+        assert!(
+            output[0].contains(r#""client_secret":"<redacted>""#),
+            "{}",
+            output[0]
+        );
+        assert!(output[0].contains(r#""user":"x""#), "{}", output[0]);
+        assert!(
+            output[4].contains("/v1/device-authorizations/<redacted>/poll"),
+            "{}",
+            output[4]
+        );
+        assert!(output[5].contains("cols=80"), "{}", output[5]);
     }
 
     #[test]

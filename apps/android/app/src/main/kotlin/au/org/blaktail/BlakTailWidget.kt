@@ -3,6 +3,7 @@ package au.org.blaktail
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,18 +11,9 @@ import android.net.VpnService
 import android.util.Base64
 import android.widget.RemoteViews
 
+/** Exported only for APPWIDGET_UPDATE; the toggle goes to [WidgetToggleReceiver]. */
 class BlakTailWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
-        update(context, manager, ids)
-    }
-
-    override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == ACTION_TOGGLE) {
-            toggle(context)
-        }
-        super.onReceive(context, intent)
-        val manager = AppWidgetManager.getInstance(context)
-        val ids = manager.getAppWidgetIds(ComponentName(context, BlakTailWidget::class.java))
         update(context, manager, ids)
     }
 
@@ -66,7 +58,8 @@ class BlakTailWidget : AppWidgetProvider() {
             val toggle = PendingIntent.getBroadcast(
                 context,
                 0,
-                Intent(context, BlakTailWidget::class.java).setAction(ACTION_TOGGLE),
+                // Explicit, non-exported receiver: other apps cannot send the toggle.
+                Intent(context, WidgetToggleReceiver::class.java).setAction(ACTION_TOGGLE),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             views.setOnClickPendingIntent(R.id.widget_toggle, toggle)
@@ -80,7 +73,7 @@ class BlakTailWidget : AppWidgetProvider() {
             ids.forEach { manager.updateAppWidget(it, views) }
         }
 
-        private fun toggle(context: Context) {
+        internal fun toggle(context: Context) {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val running = prefs.getBoolean(KEY_RUNNING, false)
             if (running) {
@@ -102,14 +95,28 @@ class BlakTailWidget : AppWidgetProvider() {
     }
 }
 
+/**
+ * Not exported. Reached only through the widget's immutable, explicit
+ * PendingIntent, so another app cannot start or stop the tunnel.
+ */
+class WidgetToggleReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != BlakTailWidget.ACTION_TOGGLE) return
+        BlakTailWidget.toggle(context)
+        BlakTailWidget.refresh(context)
+    }
+}
+
 fun TunnelService.Companion.launchIntent(context: Context): Intent? {
     val prefs = context.getSharedPreferences(BlakTailWidget.PREFS, Context.MODE_PRIVATE)
     val address = prefs.getString("address", null) ?: return null
-    val key = prefs.getString("privateKey", null) ?: return null
+    val key = Secrets.read(prefs, "privateKey") ?: return null
     val peers = ArrayList(prefs.getStringSet("peers", emptySet()) ?: emptySet())
     return Intent(context, TunnelService::class.java).apply {
         putExtra(TunnelService.EXTRA_ADDRESS, address)
         putExtra(TunnelService.EXTRA_PRIVATE_KEY, Base64.decode(key, Base64.NO_WRAP))
         putStringArrayListExtra(TunnelService.EXTRA_PEERS, peers)
+        // Same as MainActivity: start with the stored grants, not unfiltered.
+        putExtra(TunnelService.EXTRA_POLICY, prefs.getString("policy", null))
     }
 }

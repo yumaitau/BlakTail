@@ -132,12 +132,14 @@ capability rotation, extension restart) is recorded.
 
 1. Set the onshore console URL in Settings (Australian-hosted HTTPS only;
    `http://127.0.0.1` is allowed for a local proof).
-2. **Sign in** opens `ASWebAuthenticationSession` against `/desktop/auth`.
-3. After sign-in, the console redirects to `blaktail://auth/callback#token=…`.
-   The token is stored in Keychain (`au.org.blaktail.ios` /
-   `better-auth.session_token`).
-4. **Sign out** deletes that Keychain item. It does not revoke this iPhone or
-   other endpoints.
+2. **Sign in** opens `ASWebAuthenticationSession` against `/desktop/auth` with a
+   PKCE S256 challenge and `state` (see [Desktop and mobile sign-in](console.md#desktop-and-mobile-sign-in)).
+3. After the person presses **Allow**, the console redirects to
+   `blaktail://auth/callback?code=…&state=…` and the app exchanges the code for a
+   desktop credential, stored in Keychain (`au.org.blaktail.ios` /
+   `better-auth.session_token`, the account name kept for compatibility).
+4. **Sign out** revokes that credential on the console and deletes the Keychain
+   item. It does not revoke this iPhone or other endpoints.
 
 About BlakTail shows the shared project mission:
 

@@ -71,7 +71,7 @@ pub fn check_policy_document(document: &str) -> Result<PolicyCheckReport, String
 }
 
 use axum::{
-    extract::{MatchedPath, Path as UrlPath, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Path as UrlPath, Query, Request, State},
     http::{header::AUTHORIZATION, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -114,6 +114,11 @@ const MAX_NODE_KEY_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 const DEVICE_AUTH_TTL_SECS: i64 = 10 * 60;
 const DEVICE_AUTH_POLL_SECS: u64 = 2;
 const MAX_PENDING_DEVICE_AUTHS: i64 = 1_000;
+/// Unauthenticated device-authorization starts allowed per source address
+/// (IPv6 by /64) per window.
+const DEVICE_AUTH_STARTS_PER_SOURCE: u32 = 10;
+const DEVICE_AUTH_START_WINDOW_SECS: i64 = 60;
+const DEVICE_AUTH_MAX_BODY_BYTES: usize = 4 * 1024;
 const MAX_FRIENDLY_NAME_CHARS: usize = 64;
 const DEFAULT_CONSOLE_URL: &str = "https://console.invalid";
 const CONSOLE_ASSERTION_ISSUER: &str = "blaktail-console";
@@ -1378,8 +1383,20 @@ impl ApiRateLimiter {
             return false;
         }
         stamps.push(now);
+        // Keys can come from unauthenticated sources; drop idle ones so the
+        // map cannot grow without bound.
+        if map.len() > Self::MAX_KEYS {
+            map.retain(|_, stamps| {
+                stamps
+                    .last()
+                    .is_some_and(|last| now.saturating_sub(*last) < Self::IDLE_SECS)
+            });
+        }
         true
     }
+
+    const MAX_KEYS: usize = 10_000;
+    const IDLE_SECS: i64 = 60 * 60;
 }
 
 #[derive(Clone)]
@@ -1396,6 +1413,8 @@ pub(crate) struct AppState {
     console_url: Arc<String>,
     api_rate: ApiRateLimiter,
     control_views: Arc<Mutex<ControlViewMap>>,
+    /// Expiry of the relay capability last handed to each node.
+    relay_issued: Arc<Mutex<HashMap<Uuid, u64>>>,
 }
 pub fn app(store: Store, region: String, auth_hmac_secret: impl Into<Vec<u8>>) -> Router {
     app_with_relays_and_console(
@@ -1468,6 +1487,7 @@ pub fn app_with_relays_console_and_metrics(
         console_url: Arc::new(console_url.trim_end_matches('/').to_owned()),
         api_rate: ApiRateLimiter::default(),
         control_views: Arc::new(Mutex::new(HashMap::new())),
+        relay_issued: Arc::new(Mutex::new(HashMap::new())),
     };
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::spawn(webhooks::delivery_loop(state.clone()));
@@ -1478,7 +1498,8 @@ pub fn app_with_relays_console_and_metrics(
         .route("/readyz", get(readiness))
         .route(
             "/v1/device-authorizations",
-            post(create_device_authorization),
+            post(create_device_authorization)
+                .layer(DefaultBodyLimit::max(DEVICE_AUTH_MAX_BODY_BYTES)),
         )
         .route(
             "/v1/device-authorizations/:device_code",
@@ -1600,6 +1621,24 @@ struct MetricsState {
     store: Store,
     metrics: Arc<CoordMetrics>,
     diagnostics_token: Arc<[u8]>,
+}
+
+/// Diagnostics without a token are only acceptable on loopback. Config
+/// validation already enforces this; the listener checks again so a missing
+/// or empty token can never serve metrics on another interface.
+pub fn check_diagnostics_exposure(
+    bind: SocketAddr,
+    diagnostics_token: Option<&[u8]>,
+) -> Result<(), String> {
+    if bind.ip().is_loopback() {
+        return Ok(());
+    }
+    match diagnostics_token {
+        Some(token) if token.len() >= 32 => Ok(()),
+        _ => Err(format!(
+            "metrics bind {bind} is not loopback, so coordinator.diagnostics_token (at least 32 bytes) is required"
+        )),
+    }
 }
 
 pub fn metrics_app(store: Store, metrics: Arc<CoordMetrics>) -> Router {
@@ -1855,8 +1894,34 @@ struct DeviceAuthorizationApprovalRow {
     approved_user: Option<String>,
 }
 
+/// Rate-limit key for an unauthenticated caller: the IPv4 address, or the
+/// IPv6 /64 (one site's worth of addresses). Without connection info (only
+/// in tests) every caller shares one bucket.
+fn source_rate_key(prefix: &str, peer: Option<SocketAddr>) -> String {
+    match peer.map(|peer| peer.ip()) {
+        Some(IpAddr::V4(ip)) => format!("{prefix}:{ip}"),
+        Some(IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
+            Some(v4) => format!("{prefix}:{v4}"),
+            None => {
+                let s = ip.segments();
+                format!("{prefix}:{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        None => format!("{prefix}:unknown"),
+    }
+}
+
+/// A WireGuard public key is the standard base64 of exactly 32 bytes.
+fn is_wireguard_public_key(value: &str) -> bool {
+    value.len() == 44
+        && base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .is_ok_and(|bytes| bytes.len() == 32)
+}
+
 async fn create_device_authorization(
     State(s): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(input): Json<CreateDeviceAuthorization>,
 ) -> Result<(StatusCode, Json<DeviceAuthorizationResponse>), ApiError> {
     let name = input.name.trim();
@@ -1866,8 +1931,21 @@ async fn create_device_authorization(
             "name and wg_public_key are required; name must be at most 128 characters".into(),
         ));
     }
+    if !is_wireguard_public_key(public_key) {
+        return Err(ApiError::BadRequest(
+            "wg_public_key must be a base64 WireGuard public key (32 bytes)".into(),
+        ));
+    }
 
     let created_at = now();
+    if !s.api_rate.allow(
+        &source_rate_key("device-auth", peer.map(|ConnectInfo(addr)| addr)),
+        created_at,
+        DEVICE_AUTH_STARTS_PER_SOURCE,
+        DEVICE_AUTH_START_WINDOW_SECS,
+    ) {
+        return Err(ApiError::TooManyRequests);
+    }
     let expires_at = created_at + DEVICE_AUTH_TTL_SECS;
     sqlx::query("DELETE FROM device_authorizations WHERE expires_at<=$1")
         .bind(created_at)
@@ -3811,7 +3889,10 @@ async fn list_updates(
             .fetch_optional(&s.store.pool)
             .await?
             .ok_or(ApiError::CorruptData)?;
-        let changed = selection.since == 0 || revision > selection.since || expired;
+        let changed = selection.since == 0
+            || revision > selection.since
+            || expired
+            || relay_refresh_due(&s, node_id);
         if changed || started.elapsed() >= Duration::from_secs(wait) {
             if !changed {
                 return Ok(StatusCode::NO_CONTENT.into_response());
@@ -3967,18 +4048,48 @@ async fn update_relay_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Capability token TTL for relay registration (7 days, refreshed each poll).
-const RELAY_TOKEN_TTL_SECS: u64 = 604_800;
+/// Capability token TTL for relay registration. The relay cannot see
+/// revocation, so this bounds how long a revoked or suspended node keeps
+/// relay access. It also bounds how long relayed tunnels survive a
+/// coordinator outage (existing tunnels are meant to survive one), which is
+/// why it is a day rather than an hour.
+const RELAY_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+/// Idle long-polls answer 204 and carry no token, so a node whose token is
+/// older than this gets a snapshot (with a fresh token) instead.
+const RELAY_TOKEN_REFRESH_SECS: u64 = 60 * 60;
 const RELAY_ENDPOINT_FRESH_SECS: i64 = 180;
 fn relay_credentials(state: &AppState, node_id: Uuid) -> (String, u64) {
     if state.relays.is_empty() || state.relay_auth_secret.is_empty() {
         return (String::new(), 0);
     }
     let expires_at = (now() as u64) + RELAY_TOKEN_TTL_SECS;
+    let mut issued = state
+        .relay_issued
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if issued.len() >= MAX_CONTROL_VIEWS && !issued.contains_key(&node_id) {
+        issued.clear();
+    }
+    issued.insert(node_id, expires_at);
+    drop(issued);
     (
         relay_capability(&state.relay_auth_secret, node_id, expires_at),
         expires_at,
     )
+}
+/// Whether the node's relay token (as far as this process knows) is old
+/// enough to re-mint. Unknown nodes, such as after a restart, are due.
+fn relay_refresh_due(state: &AppState, node_id: Uuid) -> bool {
+    if state.relays.is_empty() || state.relay_auth_secret.is_empty() {
+        return false;
+    }
+    let issued = state
+        .relay_issued
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    issued.get(&node_id).is_none_or(|expires_at| {
+        expires_at.saturating_sub(now() as u64) <= RELAY_TOKEN_TTL_SECS - RELAY_TOKEN_REFRESH_SECS
+    })
 }
 /// HMAC-SHA256 capability binding a node id to an expiry, hex-encoded. Must
 /// match blaktail-relay's REGISTER verification (id || expiry_be, big-endian).
@@ -7499,7 +7610,7 @@ mod tests {
             &r,
             Method::POST,
             "/v1/device-authorizations",
-            serde_json::json!({"name":"ssh-node","wg_public_key":"browser-public-key"}),
+            serde_json::json!({"name":"ssh-node","wg_public_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}),
             None,
         )
         .await;
@@ -7557,7 +7668,7 @@ mod tests {
         assert_eq!(preview.name, "ssh-node");
         assert_eq!(
             preview.public_key_fingerprint,
-            &hash("browser-public-key")[..12]
+            &hash("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")[..12]
         );
         assert!(!preview.approved);
 
@@ -7615,7 +7726,7 @@ mod tests {
             serde_json::json!({
                 "join_key": started.device_code,
                 "name": "different-node",
-                "wg_public_key": "browser-public-key"
+                "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
             }),
             None,
         )
@@ -7628,7 +7739,7 @@ mod tests {
             serde_json::json!({
                 "join_key": started.device_code,
                 "name": "ssh-node",
-                "wg_public_key": "browser-public-key"
+                "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
             }),
             None,
         )
@@ -7656,7 +7767,7 @@ mod tests {
                 serde_json::json!({
                     "join_key": started.device_code,
                     "name": "ssh-node",
-                    "wg_public_key": "browser-public-key"
+                    "wg_public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
                 }),
                 None,
             )
@@ -7694,6 +7805,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_authorization_starts_are_validated_bounded_and_rate_limited() {
+        let store = Store::memory().await.unwrap();
+        let r = app(store, "ap-southeast-2".into(), TEST_SECRET);
+        let start = |key: &str, peer: Option<&str>, extra: usize| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/device-authorizations")
+                .header("content-type", "application/json");
+            if let Some(peer) = peer {
+                request = request.extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            }
+            let mut body = serde_json::json!({"name": "node", "wg_public_key": key});
+            if extra > 0 {
+                body["padding"] = serde_json::Value::String("x".repeat(extra));
+            }
+            let r = r.clone();
+            async move {
+                r.oneshot(request.body(Body::from(body.to_string())).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        let key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        for bad in [
+            "not-a-key",
+            // 31 and 33 bytes.
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            // URL-safe alphabet is not what WireGuard prints.
+            "_-EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        ] {
+            assert_eq!(
+                start(bad, Some("192.0.2.1:1000"), 0).await,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        // An oversized body is refused before it is parsed.
+        assert_eq!(
+            start(key, Some("192.0.2.2:1000"), DEVICE_AUTH_MAX_BODY_BYTES).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        for _ in 0..DEVICE_AUTH_STARTS_PER_SOURCE {
+            assert_eq!(
+                start(key, Some("192.0.2.3:1000"), 0).await,
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            start(key, Some("192.0.2.3:2000"), 0).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Another source is unaffected; IPv6 sources share their /64.
+        assert_eq!(
+            start(key, Some("192.0.2.4:1000"), 0).await,
+            StatusCode::CREATED
+        );
+        for _ in 0..DEVICE_AUTH_STARTS_PER_SOURCE {
+            assert_eq!(
+                start(key, Some("[2001:db8:1:2::1]:1000"), 0).await,
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            start(key, Some("[2001:db8:1:2::ffff]:1000"), 0).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            start(key, Some("[2001:db8:1:3::1]:1000"), 0).await,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
     async fn expired_browser_enrollment_cannot_be_polled_or_approved() {
         let store = Store::memory().await.unwrap();
         let r = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
@@ -7704,7 +7890,7 @@ mod tests {
                 &r,
                 Method::POST,
                 "/v1/device-authorizations",
-                serde_json::json!({"name":"late-node","wg_public_key":"late-key"}),
+                serde_json::json!({"name":"late-node","wg_public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}),
                 None,
             )
             .await,
@@ -7742,6 +7928,72 @@ mod tests {
             .await
             .status(),
             StatusCode::GONE
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_long_polls_still_refresh_short_lived_relay_tokens() {
+        let store = Store::memory().await.unwrap();
+        let relays = || vec!["relay.example.org:3478".to_owned()];
+        let first = app_with_relays(
+            store.clone(),
+            "ap-southeast-2".into(),
+            TEST_SECRET,
+            TEST_RELAY_SECRET,
+            relays(),
+        );
+        let org = create_test_org(&first, "relay-refresh-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let node = register_test_node(&first, org.id, &owner, "idle", "idle-key", &[]).await;
+        assert!(node.relay_expires_at <= now() as u64 + 24 * 60 * 60);
+        assert!(node.relay_expires_at > now() as u64 + 23 * 60 * 60);
+        let poll = |router: &Router, since: i64| {
+            let router = router.clone();
+            let uri = format!(
+                "/v1/nodes/{}/updates?since={since}&wait=0&version=2",
+                node.id
+            );
+            let token = node.node_token.clone();
+            async move {
+                call(
+                    &router,
+                    Method::GET,
+                    &uri,
+                    serde_json::Value::Null,
+                    Some(&token),
+                )
+                .await
+            }
+        };
+        let snapshot = poll(&first, 0).await;
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        let snapshot: serde_json::Value = body(snapshot).await;
+        let revision = snapshot["revision"].as_i64().unwrap();
+        // Nothing changed and the token is fresh: no snapshot.
+        assert_eq!(
+            poll(&first, revision).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        // A coordinator that has not issued this node a token (for example
+        // after a restart) answers an idle poll with a snapshot carrying one.
+        let restarted = app_with_relays(
+            store.clone(),
+            "ap-southeast-2".into(),
+            TEST_SECRET,
+            TEST_RELAY_SECRET,
+            relays(),
+        );
+        let refreshed = poll(&restarted, revision).await;
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let refreshed: serde_json::Value = body(refreshed).await;
+        let expires_at = refreshed["relay_expires_at"].as_u64().unwrap();
+        assert_eq!(
+            refreshed["relay_token"],
+            relay_capability(TEST_RELAY_SECRET, node.id, expires_at)
+        );
+        assert_eq!(
+            poll(&restarted, revision).await.status(),
+            StatusCode::NO_CONTENT
         );
     }
 
@@ -8079,6 +8331,21 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+    }
+
+    #[test]
+    fn diagnostics_need_a_token_off_loopback() {
+        let token = b"coordinator-diagnostics-token-at-least-32-bytes";
+        for bind in ["127.0.0.1:9701", "[::1]:9701"] {
+            assert!(check_diagnostics_exposure(bind.parse().unwrap(), None).is_ok());
+        }
+        for bind in ["0.0.0.0:9701", "10.0.0.5:9701", "[::]:9701"] {
+            let bind = bind.parse().unwrap();
+            assert!(check_diagnostics_exposure(bind, None).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(b"")).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(b"short")).is_err());
+            assert!(check_diagnostics_exposure(bind, Some(token)).is_ok());
+        }
     }
 
     #[tokio::test]
@@ -10794,7 +11061,8 @@ mod tests {
         assert_ne!(access_token, created.token);
         assert!(access_token.starts_with("bto_"));
         assert_eq!(token["token_type"], "Bearer");
-        assert_eq!(token["scope"], "devices:read status:read");
+        // Only the requested subset is granted, not the client's full scope.
+        assert_eq!(token["scope"], "status:read");
         assert_eq!(token["organisation_id"], org.id.to_string());
         assert_eq!(token["expires_in"].as_i64().unwrap(), 3600);
         let stored_hash: String =
@@ -10852,6 +11120,33 @@ mod tests {
             .to_string();
         assert_ne!(second_access, access_token);
         assert!(second_access.starts_with("bto_"));
+        // No scope requested: the client's full scope.
+        assert_eq!(via_basic_token["scope"], "devices:read status:read");
+        let devices = |token: &str| {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/devices")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-blaktail-organisation", org.id.to_string())
+                .body(Body::from("null"))
+                .unwrap()
+        };
+        assert_eq!(
+            r.clone()
+                .oneshot(devices(&access_token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            r.clone()
+                .oneshot(devices(&second_access))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
 
         let denied = r
             .clone()
@@ -11701,6 +11996,124 @@ mod tests {
             }
         }
         assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn wireguard_only_peers_cannot_claim_taken_prefixes_or_owned_tags() {
+        let store = Store::memory().await.unwrap();
+        let router = app(store.clone(), "ap-southeast-2".into(), TEST_SECRET);
+        let org = create_test_org(&router, "wg-only-overlap-org").await;
+        let owner = signed_session(org.id, "owner-1", Role::Owner, now() + 60);
+        let admin = signed_session(org.id, "admin-1", Role::Admin, now() + 60);
+        let node = register_test_node(&router, org.id, &owner, "router", "router-key", &[]).await;
+        sqlx::query("UPDATE nodes SET approved_routes_json=$1 WHERE id=$2")
+            .bind(r#"["10.4.0.0/24","0.0.0.0/0"]"#)
+            .bind(node.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let everyone = serde_json::json!({"roles":["owner","admin","member"]});
+        let response = call(
+            &router,
+            Method::POST,
+            &format!("/v1/orgs/{}/networks", org.id),
+            serde_json::json!({"name":"Depot","cidr":"192.168.50.0/24","access":everyone}),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response = call(
+            &router,
+            Method::PUT,
+            &format!("/v1/orgs/{}/acl", org.id),
+            serde_json::json!({"tag_owners": {"store": ["owner"]}, "rules": []}),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut counter = 0;
+        let mut create = |allowed: &str, tags: serde_json::Value, token: &str| {
+            counter += 1;
+            let body = serde_json::json!({
+                "name": format!("peer-{counter}"),
+                "kind": "wireguard_only",
+                "wg_public_key": format!("peerPublicKeyExample{counter}+/="),
+                "endpoint": "203.0.113.10:51820",
+                "allowed_ips": [allowed],
+                "tags": tags,
+            });
+            let router = router.clone();
+            let uri = format!("/v1/orgs/{}/wireguard-only-peers", org.id);
+            let token = token.to_owned();
+            async move {
+                call(&router, Method::POST, &uri, body, Some(&token))
+                    .await
+                    .status()
+            }
+        };
+        assert_eq!(
+            create("10.8.0.0/24", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
+        // Another WireGuard-only peer, an approved subnet route and a network
+        // resource each already carry these prefixes.
+        for taken in [
+            "10.8.0.128/25",
+            "10.0.0.0/8",
+            "10.4.0.0/25",
+            "192.168.50.0/26",
+        ] {
+            assert_eq!(
+                create(taken, serde_json::json!([]), &admin).await,
+                StatusCode::CONFLICT,
+                "{taken}"
+            );
+        }
+        assert_eq!(
+            create("10.9.0.0/24", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
+        // Owned tags need the tag owner's authority, as on devices.
+        assert_eq!(
+            create("10.10.0.0/24", serde_json::json!(["store"]), &admin).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            create("10.10.0.0/24", serde_json::json!(["store"]), &owner).await,
+            StatusCode::CREATED
+        );
+        // A revoked peer's prefix is free again.
+        let peers: Vec<crate::wg_only::WireGuardOnlyPeer> = body(
+            call(
+                &router,
+                Method::GET,
+                &format!("/v1/orgs/{}/wireguard-only-peers", org.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await,
+        )
+        .await;
+        let first = peers
+            .iter()
+            .find(|p| p.allowed_ips == ["10.8.0.0/24"])
+            .unwrap();
+        assert_eq!(
+            call(
+                &router,
+                Method::DELETE,
+                &format!("/v1/orgs/{}/wireguard-only-peers/{}", org.id, first.id),
+                serde_json::Value::Null,
+                Some(&owner),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            create("10.8.0.128/25", serde_json::json!([]), &admin).await,
+            StatusCode::CREATED
+        );
     }
 
     #[tokio::test]

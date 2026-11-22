@@ -67,7 +67,9 @@ fn policy() -> serde_json::Value {
             {"action":"allow","src_groups":["crew"],"dst_groups":["crew"],"dst_ports":["22","3389"],"protocols":["tcp"]}
         ],
         "ssh": [
-            {"action":"allow","src_groups":["crew"],"dst_groups":["crew"],"users":["deploy"]}
+            {"action":"allow","src_groups":["crew"],"dst_groups":["crew"],"users":["deploy"]},
+            // People open browser sessions from the console, not a device.
+            {"action":"allow","src_roles":["admin","network_admin"],"dst_groups":["crew"],"users":["deploy"]}
         ]
     })
 }
@@ -666,6 +668,93 @@ async fn sessions_follow_policy_and_device_opt_in() {
             "{user:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn ssh_sessions_need_a_rule_for_the_person_not_just_the_gateway() {
+    let lab = lab("remote-person").await;
+    // The gateway (a device owned by owner-1) may log in as deploy or backup;
+    // of the people, only admin-1 has a rule of their own, and only for deploy.
+    let person_policy = |people: serde_json::Value| {
+        serde_json::json!({
+            "defaults": "deny",
+            "groups": {"crew": ["owner-1"], "ops": people},
+            "rules": [
+                {"action":"allow","src_groups":["crew"],"dst_groups":["crew"],"dst_ports":["22"],"protocols":["tcp"]}
+            ],
+            "ssh": [
+                {"action":"allow","src_groups":["crew"],"dst_groups":["crew"],"users":["deploy","backup"]},
+                {"action":"allow","src_groups":["ops"],"dst_groups":["crew"],"users":["deploy"]}
+            ]
+        })
+    };
+    let put_policy = |policy: serde_json::Value| async {
+        let response = send(
+            &lab.router,
+            Method::PUT,
+            &format!("/v1/orgs/{}/acl", lab.org.id),
+            policy,
+            &lab.owner,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    };
+    put_policy(person_policy(serde_json::json!(["admin-1"]))).await;
+
+    // A person with no SSH rule is refused even though the gateway has one.
+    let response = lab
+        .open(&lab.as_role("admin-2", Role::Admin), "deploy")
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(json(response).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("no SSH rule lets you"));
+    // The wrong OS user for the person is refused.
+    let response = lab
+        .open(&lab.as_role("admin-1", Role::Admin), "backup")
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(json(response).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("no SSH rule lets you"));
+    // With a rule, the person gets a ticket.
+    let response = lab
+        .open(&lab.as_role("admin-1", Role::Admin), "deploy")
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let ticket = json(response).await["ticket"].as_str().unwrap().to_owned();
+
+    // Redeem re-checks the person: dropping their rule after issue refuses it.
+    put_policy(person_policy(serde_json::json!(["someone-else"]))).await;
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, &ticket).await.status(),
+        StatusCode::CONFLICT
+    );
+
+    // A live session ends once the person loses their rule.
+    put_policy(person_policy(serde_json::json!(["admin-1"]))).await;
+    let response = lab
+        .open(&lab.as_role("admin-1", Role::Admin), "deploy")
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let issued = json(response).await;
+    let session_id: Uuid = issued["session_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        lab.redeem_as(&lab.gateway, issued["ticket"].as_str().unwrap())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        lab.report(session_id, serde_json::json!({})).await.action,
+        "continue"
+    );
+    put_policy(person_policy(serde_json::json!(["someone-else"]))).await;
+    let decision = lab.report(session_id, serde_json::json!({})).await;
+    assert_eq!(decision.action, "terminate");
+    assert!(decision.reason.unwrap().contains("no SSH rule lets you"));
 }
 
 // ---------------------------------------------------------------------------

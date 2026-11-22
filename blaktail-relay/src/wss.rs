@@ -8,6 +8,7 @@
 //! Limits: frames above [`crate::MAX_SEND_FRAME`] close the connection; each
 //! connection has a bounded outbound queue (excess frames are dropped, as
 //! UDP would); handshakes must finish within [`HANDSHAKE_TIMEOUT`]; a
+//! connection without a valid REGISTER after [`REGISTER_TIMEOUT`] is closed; a
 //! connection silent for [`IDLE_TIMEOUT`] is closed, and the server pings
 //! every [`KEEPALIVE`], below the 60 s idle timeout of AWS ALB.
 
@@ -17,7 +18,7 @@ use std::{
     fmt, io,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc,
     },
     time::Duration,
@@ -42,6 +43,9 @@ pub const DEFAULT_PATH: &str = "/v1/relay";
 pub const KEEPALIVE: Duration = Duration::from_secs(20);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A connection must hold a valid REGISTER this soon after the upgrade, or
+/// it is closed: an unauthenticated socket must not keep a slot.
+pub const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Outbound frames buffered per connection before frames are dropped.
 pub const QUEUE_FRAMES: usize = 64;
@@ -92,6 +96,8 @@ pub struct WssServerConfig {
     pub tls: Option<Arc<rustls::ServerConfig>>,
     pub max_connections: usize,
     pub handshake_timeout: Duration,
+    /// See [`REGISTER_TIMEOUT`].
+    pub register_timeout: Duration,
     pub idle_timeout: Duration,
     pub keepalive: Duration,
 }
@@ -103,6 +109,7 @@ impl Default for WssServerConfig {
             tls: None,
             max_connections: MAX_CONNECTIONS,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            register_timeout: REGISTER_TIMEOUT,
             idle_timeout: IDLE_TIMEOUT,
             keepalive: KEEPALIVE,
         }
@@ -199,13 +206,22 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
     metrics: &Metrics,
 ) {
     let (tx, mut outbound) = mpsc::channel::<Vec<u8>>(QUEUE_FRAMES);
+    let registered = Arc::new(AtomicBool::new(false));
     if hub
-        .send(StreamEvent::Open { id, remote, tx })
+        .send(StreamEvent::Open {
+            id,
+            remote,
+            tx,
+            registered: registered.clone(),
+        })
         .await
         .is_err()
     {
         return;
     }
+    let register_deadline = tokio::time::sleep(config.register_timeout);
+    tokio::pin!(register_deadline);
+    let mut awaiting_register = true;
     metrics.wss_connections.fetch_add(1, Relaxed);
     let (mut sink, mut stream) = ws.split();
     let mut keepalive = tokio::time::interval(config.keepalive);
@@ -242,6 +258,13 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 }
             }
             _ = &mut idle => break,
+            _ = &mut register_deadline, if awaiting_register => {
+                if !registered.load(Relaxed) {
+                    metrics.wss_rejected.fetch_add(1, Relaxed);
+                    break;
+                }
+                awaiting_register = false;
+            }
         }
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;

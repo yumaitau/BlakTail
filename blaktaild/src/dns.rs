@@ -18,9 +18,12 @@ use std::{
     io::Write,
     path::PathBuf,
 };
-use tokio::{net::UdpSocket, task::AbortHandle};
+use tokio::{net::UdpSocket, sync::Semaphore, task::AbortHandle};
 
 const SPLIT_FORWARD_TIMEOUT: Duration = Duration::from_millis(800);
+/// Split-DNS forwards in flight at once; further forwards are dropped (the
+/// client retries) instead of queueing behind a slow resolver.
+const MAX_FORWARDS: usize = 64;
 
 const DNS_PORT: u16 = 53;
 const DNS_HEADER_LEN: usize = 12;
@@ -87,11 +90,12 @@ impl MagicDns {
     }
 
     async fn spawn_at(bind: SocketAddr, state: &NodeState, domain: String) -> Result<Self, Error> {
-        let socket = UdpSocket::bind(bind).await?;
+        let socket = Arc::new(UdpSocket::bind(bind).await?);
         let listen_addr = socket.local_addr()?;
         let bind_ip = listen_addr.ip();
         let records = Arc::new(Mutex::new(records_from_state(state, &domain)));
         let task_records = records.clone();
+        let forwards = Arc::new(Semaphore::new(MAX_FORWARDS));
         let task = tokio::spawn(async move {
             let mut request = [0u8; 1_232];
             loop {
@@ -110,9 +114,18 @@ impl MagicDns {
                         let _ = socket.send_to(&response, source).await;
                     }
                     Some(DnsAction::Forward(resolvers)) => {
-                        if let Some(response) = forward_query(&query, &resolvers).await {
-                            let _ = socket.send_to(&response, source).await;
-                        }
+                        // A slow upstream must not stall local answers, so
+                        // each forward runs on its own task, capped.
+                        let Ok(permit) = forwards.clone().try_acquire_owned() else {
+                            continue;
+                        };
+                        let socket = socket.clone();
+                        tokio::spawn(async move {
+                            if let Some(response) = forward_query(&query, &resolvers).await {
+                                let _ = socket.send_to(&response, source).await;
+                            }
+                            drop(permit);
+                        });
                     }
                     None => {}
                 }
@@ -542,14 +555,19 @@ async fn forward_query(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>
         let Ok(upstream) = UdpSocket::bind(bind).await else {
             continue;
         };
-        if upstream.send_to(query, *resolver).await.is_err() {
+        // A connected socket only receives datagrams from the resolver.
+        if upstream.connect(*resolver).await.is_err() || upstream.send(query).await.is_err() {
             continue;
         }
         let mut response = [0u8; 1_232];
-        if let Ok(Ok((length, _))) =
-            tokio::time::timeout(SPLIT_FORWARD_TIMEOUT, upstream.recv_from(&mut response)).await
+        let deadline = tokio::time::Instant::now() + SPLIT_FORWARD_TIMEOUT;
+        while let Ok(Ok(length)) =
+            tokio::time::timeout_at(deadline, upstream.recv(&mut response)).await
         {
-            return Some(response[..length].to_vec());
+            // Ignore anything that is not an answer to this query's ID.
+            if length >= 12 && query.len() >= 2 && response[..2] == query[..2] {
+                return Some(response[..length].to_vec());
+            }
         }
     }
     None
@@ -1808,6 +1826,69 @@ mod tests {
         assert_eq!(response[3] & 0x0f, 5);
         assert_eq!(length, query("example.com", 1).len());
         dns.stop();
+    }
+
+    #[tokio::test]
+    async fn slow_split_forward_does_not_stall_local_answers() {
+        // Receives and never answers.
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent_addr = silent.local_addr().unwrap();
+        let mut state = state();
+        state.org_dns = Some(crate::OrgDnsSnapshot {
+            revision: 5,
+            managed: true,
+            records: vec![],
+            search_domains: vec![],
+            split: vec![crate::OrgDnsSplit {
+                suffix: "internal.example".into(),
+                resolvers: vec![silent_addr.to_string()],
+            }],
+            global_resolvers: vec![],
+            zones: vec![],
+        });
+        let dns = MagicDns::spawn_at(
+            "127.0.0.1:0".parse().unwrap(),
+            &state,
+            "12345678.blaktail".into(),
+        )
+        .await
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client
+            .send_to(&query("split.internal.example", 1), dns.listen_addr())
+            .await
+            .unwrap();
+        client
+            .send_to(&query("example.com", 1), dns.listen_addr())
+            .await
+            .unwrap();
+        let mut response = [0u8; 512];
+        tokio::time::timeout(Duration::from_millis(400), client.recv(&mut response))
+            .await
+            .expect("a local answer waited behind the split forward")
+            .unwrap();
+        assert_eq!(response[3] & 0x0f, 5);
+        dns.stop();
+        drop(silent);
+    }
+
+    #[tokio::test]
+    async fn forward_ignores_replies_that_do_not_match_the_query() {
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut packet = [0u8; 1_232];
+            let Ok((length, source)) = upstream.recv_from(&mut packet).await else {
+                return;
+            };
+            let mut wrong = packet[..length].to_vec();
+            wrong[0] ^= 0xff;
+            let _ = upstream.send_to(&wrong, source).await;
+            let _ = upstream.send_to(&packet[..length], source).await;
+        });
+        let sent = query("split.internal.example", 1);
+        let received = forward_query(&sent, &[upstream_addr]).await.unwrap();
+        assert_eq!(received[..2], sent[..2]);
     }
 
     fn snapshot(revision: i64, resolvers: &[&str]) -> crate::OrgDnsSnapshot {

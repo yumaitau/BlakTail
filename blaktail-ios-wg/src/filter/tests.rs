@@ -851,6 +851,68 @@ fn tunnel_drops_denied_packets_between_decrypt_and_tunnel_write() {
     }
 }
 
+#[test]
+fn deny_until_policy_fails_closed_until_a_policy_is_installed() {
+    use x25519_dalek::{PublicKey, StaticSecret};
+    let alice_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let bob_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let alice = unsafe { crate::blaktail_tunnel_create(alice_secret.to_bytes().as_ptr()) };
+    let bob = unsafe { crate::blaktail_tunnel_create(bob_secret.to_bytes().as_ptr()) };
+    let to_bob = std::ffi::CString::new("100.64.0.2/32").unwrap();
+    let to_alice = std::ffi::CString::new("100.64.0.1/32").unwrap();
+    unsafe {
+        crate::blaktail_tunnel_add_peer(
+            alice,
+            PublicKey::from(&bob_secret).as_bytes().as_ptr(),
+            to_bob.as_ptr(),
+            0,
+        );
+        crate::blaktail_tunnel_add_peer(
+            bob,
+            PublicKey::from(&alice_secret).as_bytes().as_ptr(),
+            to_alice.as_ptr(),
+            0,
+        );
+    }
+    assert_eq!(
+        unsafe { blaktail_tunnel_deny_until_policy(std::ptr::null_mut()) },
+        RESULT_ERR
+    );
+    assert_eq!(
+        unsafe { blaktail_tunnel_deny_until_policy(bob) },
+        RESULT_DONE
+    );
+    handshake(alice, bob);
+
+    // No policy yet: an unsolicited inbound flow is dropped.
+    let ssh = ipv4(LOCAL, PEER, TCP, &tcp(40_000, 22, 0x02));
+    let (code, plain) = send(alice, bob, &ssh);
+    assert_eq!(code, RESULT_DONE);
+    assert!(plain.is_empty());
+
+    // Replies to Bob's own flows still pass.
+    let out = ipv4(PEER, LOCAL, UDP, &udp(6000, 7000));
+    assert_eq!(send(bob, alice, &out).0, 2);
+    let reply = ipv4(LOCAL, PEER, UDP, &udp(7000, 6000));
+    assert_eq!(send(alice, bob, &reply).0, 2);
+
+    // The coordinator's grants replace the default.
+    let policy = br#"[{"id":"alice","allowed_ips":["100.64.0.1/32"],"ingress":{"tcp":["22"]}}]"#;
+    assert_eq!(
+        unsafe { blaktail_tunnel_set_policy(bob, policy.as_ptr(), policy.len()) },
+        RESULT_DONE
+    );
+    let ssh = ipv4(LOCAL, PEER, TCP, &tcp(40_001, 22, 0x02));
+    let (code, plain) = send(alice, bob, &ssh);
+    assert_eq!(code, 2);
+    assert_eq!(plain, ssh);
+
+    unsafe {
+        crate::blaktail_tunnel_free(alice);
+        crate::blaktail_tunnel_free(bob);
+    }
+}
+
 /// Relayed traffic takes the same decrypt -> filter -> tunnel path as direct
 /// traffic: the relay only unwraps the ciphertext, it never bypasses policy.
 #[test]

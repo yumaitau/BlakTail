@@ -63,6 +63,43 @@ case "$release_root" in
   https://*) ;;
   *) die "BLAKTAIL_RELEASE_BASE_URL must use HTTPS" ;;
 esac
+
+# The Sigstore signature over SHA256SUMS is verified by default. Skipping it
+# leaves only the checksum file, which comes from the same place as the
+# package and so proves nothing about who published it.
+skip_signature=0
+case "${BLAKTAIL_INSECURE_SKIP_SIGNATURE:-0}" in
+  0 | "") ;;
+  1) skip_signature=1 ;;
+  *) die "BLAKTAIL_INSECURE_SKIP_SIGNATURE must be 0 or 1" ;;
+esac
+# BLAKTAIL_REQUIRE_SIGNATURE=1 is the old opt-in; verification is now the default.
+if [ "$skip_signature" = 1 ] && [ "${BLAKTAIL_REQUIRE_SIGNATURE:-0}" = 1 ]; then
+  die "BLAKTAIL_REQUIRE_SIGNATURE=1 and BLAKTAIL_INSECURE_SKIP_SIGNATURE=1 conflict"
+fi
+if [ "$skip_signature" = 1 ]; then
+  printf '%s\n' \
+    "install-agent: WARNING: BLAKTAIL_INSECURE_SKIP_SIGNATURE=1 is set." \
+    "install-agent: WARNING: the release signature will NOT be checked; anyone who can" \
+    "install-agent: WARNING: change the release files can make this host run their code." >&2
+else
+  command -v cosign >/dev/null 2>&1 || die "cosign is required to verify the release signature (install cosign, or set BLAKTAIL_INSECURE_SKIP_SIGNATURE=1 to skip this check)"
+  if [ "$tag" = latest ]; then
+    # The signing identity names the exact tag, so resolve "latest" first.
+    resolved=$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      --head --output /dev/null --write-out '%{url_effective}' "$release_root/latest") || \
+      die "could not resolve the latest release; set BLAKTAIL_VERSION"
+    tag=${resolved##*/}
+    case "$tag" in
+      v[0-9]*) ;;
+      *) die "could not resolve the latest release; set BLAKTAIL_VERSION" ;;
+    esac
+    case "${tag#v}" in
+      *[!0-9A-Za-z.+~-]*) die "latest release has an invalid tag" ;;
+    esac
+  fi
+fi
+
 if [ "$tag" = latest ]; then
   download_root="$release_root/latest/download"
 else
@@ -84,11 +121,9 @@ curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$download_root/SHA256SUMS" --output "$work/SHA256SUMS"
 
 # Sigstore keyless signature over SHA256SUMS, bound to the release workflow at
-# this tag. Verified whenever cosign is installed; required with
-# BLAKTAIL_REQUIRE_SIGNATURE=1.
-if command -v cosign >/dev/null 2>&1 || [ "${BLAKTAIL_REQUIRE_SIGNATURE:-0}" = 1 ]; then
-  command -v cosign >/dev/null 2>&1 || die "BLAKTAIL_REQUIRE_SIGNATURE=1 needs cosign on PATH"
-  [ "$tag" != latest ] || die "signature verification needs a pinned BLAKTAIL_VERSION"
+# this tag. Required unless BLAKTAIL_INSECURE_SKIP_SIGNATURE=1.
+if [ "$skip_signature" = 0 ]; then
+  [ "$tag" != latest ] || die "signature verification needs a pinned release tag"
   curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
     "$download_root/SHA256SUMS.sigstore.json" --output "$work/SHA256SUMS.sigstore.json"
   cosign verify-blob \

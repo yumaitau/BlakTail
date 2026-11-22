@@ -40,17 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let identity: NodeIdentity = serde_json::from_slice(&std::fs::read(&cli.state_file)?)
         .map_err(|_| "state file is not a blaktaild enrollment")?;
-    let assigned: Option<IpAddr> = identity
-        .assigned_ip
-        .split('/')
-        .next()
-        .and_then(|ip| ip.parse().ok());
+    let own = identity.overlay_addresses();
+    let assigned: Option<IpAddr> = own.first().copied();
     let listen = match (cli.listen, assigned) {
         (Some(listen), _) => listen,
         (None, Some(ip)) => SocketAddr::new(ip, DEFAULT_PORT),
         (None, None) => return Err("no overlay address in the state file; pass --listen".into()),
     };
-    check_listen(listen.ip(), assigned, cli.allow_private_listen)?;
+    check_listen(listen.ip(), &own, cli.allow_private_listen)?;
     let coord_ca_pem = cli.coord_ca.map(std::fs::read).transpose()?;
     let gateway = Gateway::new(GatewayConfig {
         coordinator_url: identity.coord.clone(),

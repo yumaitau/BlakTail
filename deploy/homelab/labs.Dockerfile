@@ -2,7 +2,8 @@
 # upgrade and concurrency proofs: coordinator and Linux agent built from the
 # working tree, plus the network tools the labs drive (iptables in both nft
 # and legacy modes, tcpdump, OpenSSH, dig, netcat, Python).
-FROM rust:1.98-slim-bookworm AS build
+# rust:1.98-slim-bookworm (index digest; refresh: docker buildx imagetools inspect rust:1.98-slim-bookworm)
+FROM rust@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=labs-registry,target=/usr/local/cargo/registry \
@@ -15,7 +16,9 @@ RUN --mount=type=cache,id=labs-registry,target=/usr/local/cargo/registry \
  && mkdir -p /out \
  && cp target/release/blaktail-coord target/release/blaktaild /out/
 
-FROM debian:bookworm-slim
+# debian:bookworm-slim (index digest; refresh: docker buildx imagetools inspect debian:bookworm-slim)
+
+FROM debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates conntrack curl dnsutils iproute2 iptables iputils-ping netcat-openbsd \

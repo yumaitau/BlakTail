@@ -54,6 +54,31 @@ describe("OIDC ID token verification", () => {
     expect(claims.sub).toBe("user-1");
   });
 
+  test("accepts a P-256 ES256 JWS and rejects DER, tampered and mismatched keys", () => {
+    const ec = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const ecJwk = ec.publicKey.export({ format: "jwk" });
+    const expected = { issuer: valid.iss, audience: valid.aud, nonce: valid.nonce, nowSeconds: now };
+    const sign = (claims, dsaEncoding) => {
+      const header = base64url(JSON.stringify({ alg: "ES256", kid: "ec", typ: "JWT" }));
+      const signingInput = `${header}.${base64url(JSON.stringify(claims))}`;
+      const signature = createSign("SHA256")
+        .update(signingInput)
+        .end()
+        .sign({ key: ec.privateKey, dsaEncoding });
+      return `${signingInput}.${base64url(signature)}`;
+    };
+    const token = sign(valid, "ieee-p1363");
+    expect(verifySignedJwt(token, ecJwk, expected).sub).toBe("user-1");
+    // DER is not the JWS encoding.
+    expect(() => verifySignedJwt(sign(valid, "der"), ecJwk, expected)).toThrow("signature");
+    const [head, , signature] = token.split(".");
+    const forged = `${head}.${base64url(JSON.stringify({ ...valid, sub: "user-2" }))}.${signature}`;
+    expect(() => verifySignedJwt(forged, ecJwk, expected)).toThrow("signature");
+    // An ES256 header with an RSA key, or RS256 with an EC key, is refused.
+    expect(() => verifySignedJwt(token, jwk, expected)).toThrow("algorithm");
+    expect(() => verifySignedJwt(signRs256(privateKey, valid).token, ecJwk, expected)).toThrow("algorithm");
+  });
+
   test("rejects the wrong issuer, audience, nonce, and expiry", () => {
     const cases = [
       [{ ...valid, iss: "https://other.example" }, "issuer"],

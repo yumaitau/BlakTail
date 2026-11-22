@@ -25,7 +25,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -75,6 +75,69 @@ pub struct Gateway {
 struct NodeCredential {
     node_id: Uuid,
     node_token: String,
+    /// The node's current peer map, written by `blaktaild`.
+    #[serde(default)]
+    peers: Vec<PeerAddresses>,
+}
+
+#[derive(Deserialize)]
+struct PeerAddresses {
+    #[serde(default)]
+    allowed_ips: Vec<String>,
+}
+
+/// Coordinator URLs must be HTTPS. Plain HTTP is allowed only when the host
+/// is exactly `localhost` or a loopback IP (so `http://localhost.example`
+/// or `http://127.0.0.1.example` are refused).
+pub fn coordinator_url_allowed(coord: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(coord) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }),
+        _ => false,
+    }
+}
+
+/// Plain HTTP carries session tickets and RDP passwords, so without TLS the
+/// gateway listens only on loopback (behind a local TLS proxy) unless the
+/// operator explicitly opts in.
+pub fn check_listen(listen: SocketAddr, tls: bool, allow_plain_http: bool) -> Result<(), String> {
+    if tls || allow_plain_http || listen.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to serve plain HTTP on {listen}: set --tls-cert/--tls-key, listen on loopback \
+         behind a TLS proxy, or pass --allow-plain-http"
+    ))
+}
+
+/// A session may only dial a host address of a peer in this node's current
+/// peer map: never the gateway host itself, its LAN, or a metadata service.
+fn target_in_tailnet(target: IpAddr, peers: &[PeerAddresses]) -> bool {
+    peers
+        .iter()
+        .flat_map(|peer| peer.allowed_ips.iter())
+        .filter_map(|cidr| {
+            let (address, length) = cidr.split_once('/').unwrap_or((cidr.as_str(), ""));
+            let address: IpAddr = address.trim().parse().ok()?;
+            let host_length = if address.is_ipv4() { 32 } else { 128 };
+            let length: u8 = if length.is_empty() {
+                host_length
+            } else {
+                length.trim().parse().ok()?
+            };
+            (length == host_length).then_some(address)
+        })
+        .any(|address| address == target)
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
@@ -167,8 +230,7 @@ fn unix_now() -> i64 {
 impl Gateway {
     pub fn new(config: Config) -> Result<Self, Error> {
         let coord = config.coord.trim_end_matches('/').to_owned();
-        let local = coord.starts_with("http://127.0.0.1") || coord.starts_with("http://localhost");
-        if !coord.starts_with("https://") && !local {
+        if !coordinator_url_allowed(&coord) {
             return Err(Error::Message(
                 "coordinator must use HTTPS (HTTP is allowed only for localhost)".into(),
             ));
@@ -382,7 +444,19 @@ impl Gateway {
         )
         .await;
         let mut live = Live::new(&redeemed);
+        let in_tailnet = match (redeemed.target_address.parse::<IpAddr>(), self.credential()) {
+            (Ok(target), Ok(node)) => target_in_tailnet(target, &node.peers),
+            _ => false,
+        };
         let reason = match redeemed.kind {
+            _ if !in_tailnet => {
+                tracing::warn!(
+                    session_id = %redeemed.session_id,
+                    target = %redeemed.target_address,
+                    "refusing a target that is not a peer overlay address"
+                );
+                "target is not a device in this organisation's network".into()
+            }
             SessionKind::Ssh => {
                 self.ssh(&mut socket, &redeemed, &key, &start, &mut live)
                     .await
@@ -427,11 +501,10 @@ impl Gateway {
         else {
             return "error".into();
         };
-        let Ok(address) =
-            format!("{}:{}", redeemed.target_address, redeemed.port).parse::<SocketAddr>()
-        else {
+        let Ok(ip) = redeemed.target_address.parse::<IpAddr>() else {
             return "error".into();
         };
+        let address = SocketAddr::new(ip, redeemed.port);
         let target = ssh::Target {
             address,
             host_key,

@@ -2,6 +2,11 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import { rawSqlClient } from "./db/client";
+import {
+  UNTRUSTED_CLIENT_KEY,
+  trustedClientAddress,
+  trustedProxyHops,
+} from "./client-ip-core";
 
 export class RequestSecurityError extends Error {
   constructor(
@@ -28,6 +33,15 @@ function trustedOrigins(): Set<string> {
 }
 
 export function assertSameOrigin(request: Request): void {
+  assertTrustedOrigin(request);
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    throw new RequestSecurityError("JSON content type is required.", 415);
+  }
+}
+
+/** Origin check alone, for plain HTML form posts. */
+export function assertTrustedOrigin(request: Request): void {
   const origin = request.headers.get("origin");
   if (!origin) {
     throw new RequestSecurityError("Request origin is required.", 403);
@@ -41,16 +55,20 @@ export function assertSameOrigin(request: Request): void {
   if (!trustedOrigins().has(parsed)) {
     throw new RequestSecurityError("Request origin is not allowed.", 403);
   }
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().startsWith("application/json")) {
-    throw new RequestSecurityError("JSON content type is required.", 415);
-  }
 }
 
+/**
+ * Rate-limit key for the client. The left of `X-Forwarded-For` is whatever
+ * the client sent, so only the hop written by a trusted proxy counts
+ * (`BLAKTAIL_TRUSTED_PROXY_HOPS`); otherwise every request shares one key.
+ */
 export function requestRateLimitIdentity(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || request.headers.get("x-real-ip") || "unknown";
-  return createHash("sha256").update(address.slice(0, 128)).digest("hex");
+  const address =
+    trustedClientAddress(
+      request.headers,
+      trustedProxyHops(process.env.BLAKTAIL_TRUSTED_PROXY_HOPS),
+    ) ?? UNTRUSTED_CLIENT_KEY;
+  return createHash("sha256").update(address).digest("hex");
 }
 
 export async function consumeRateLimit(

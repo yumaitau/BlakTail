@@ -1,11 +1,18 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { auth } from "./auth";
 import { getSignInPolicy, jitDomainCheck } from "./auth-policy";
 import { linkFreshnessRefusal } from "./auth-policy-core";
 import { writeConsoleAudit } from "./console-audit";
 import { db, rawSqlClient } from "./db/client";
 import { identityProvider, oidcLoginState } from "./db/schema";
+import {
+  OIDC_STATE_TTL_SECONDS,
+  bindingMatches,
+  newBindingSecret,
+  oidcLinkDecision,
+  safeRedirectPath,
+} from "./oidc-flow-core";
 import {
   OidcTokenError,
   emailDomainAllowed,
@@ -199,7 +206,16 @@ export async function deleteIdentityProvider(input: {
   });
 }
 
-export async function startOidcLogin(organisationId: string, redirectTo: string) {
+/**
+ * Starts a sign-in, or a link when `link` names the authenticated user and
+ * session that asked for it from Settings. The caller must put `binding` in
+ * the browser-binding cookie; the callback refuses without it.
+ */
+export async function startOidcLogin(
+  organisationId: string,
+  redirectTo: string,
+  link?: { userId: string; sessionId: string },
+): Promise<{ location: string; binding: string }> {
   const [provider] = await db()
     .select()
     .from(identityProvider)
@@ -211,15 +227,21 @@ export async function startOidcLogin(organisationId: string, redirectTo: string)
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(createHash("sha256").update(verifier).digest());
   const nonce = base64url(randomBytes(24));
+  // Abandoned attempts would otherwise accumulate forever.
+  await pruneExpiredOidcStates();
   const state = crypto.randomUUID();
+  const binding = newBindingSecret();
   await db().insert(oidcLoginState).values({
     id: state,
     organisationId,
     providerId: provider.id,
     codeVerifier: verifier,
     nonce,
-    redirectTo: redirectTo.startsWith("/") ? redirectTo : "/control-center",
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    redirectTo: safeRedirectPath(redirectTo),
+    bindingHash: binding.hash,
+    linkUserId: link?.userId ?? null,
+    linkSessionId: link?.sessionId ?? null,
+    expiresAt: new Date(Date.now() + OIDC_STATE_TTL_SECONDS * 1000),
   });
   const url = new URL(metadata.authorization_endpoint);
   url.searchParams.set("response_type", "code");
@@ -230,7 +252,28 @@ export async function startOidcLogin(organisationId: string, redirectTo: string)
   url.searchParams.set("nonce", nonce);
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
-  return url.toString();
+  return { location: url.toString(), binding: binding.secret };
+}
+
+export async function pruneExpiredOidcStates(now: Date = new Date()): Promise<number> {
+  const removed = await db()
+    .delete(oidcLoginState)
+    .where(lt(oidcLoginState.expiresAt, now))
+    .returning({ id: oidcLoginState.id });
+  return removed.length;
+}
+
+export async function organisationHasSso(organisationId: string): Promise<boolean> {
+  const rows = await db()
+    .select({ id: identityProvider.id })
+    .from(identityProvider)
+    .where(
+      and(
+        eq(identityProvider.organisationId, organisationId),
+        eq(identityProvider.enabled, true),
+      ),
+    );
+  return rows.length > 0;
 }
 
 type OidcMetadata = {
@@ -277,22 +320,35 @@ export type CompletedOidcLogin = {
   userId: string;
   organisationId: string;
   redirectTo: string;
+  /** True when this finished an explicit link into the current session. */
+  linked: boolean;
 };
 
 export async function completeOidcLogin(input: {
   state: string;
   code: string;
-  linkingUserId?: string;
-  linkingSessionCreatedAt?: Date;
+  /** Value of the browser-binding cookie set by /api/oidc/start. */
+  binding: string | null;
+  /** The browser's current session, used only to finish an explicit link. */
+  currentSession: { userId: string; sessionId: string; createdAt: Date } | null;
 }): Promise<CompletedOidcLogin> {
   const [login] = await db()
-    .select()
-    .from(oidcLoginState)
-    .where(eq(oidcLoginState.id, input.state));
+    .delete(oidcLoginState)
+    .where(eq(oidcLoginState.id, input.state))
+    .returning();
   if (!login || login.expiresAt.getTime() <= Date.now()) {
     throw new OidcError("Sign-in request expired. Start again.");
   }
-  await db().delete(oidcLoginState).where(eq(oidcLoginState.id, input.state));
+  if (!bindingMatches(login.bindingHash, input.binding)) {
+    throw new OidcError(
+      "This sign-in was started in a different browser. Start again.",
+    );
+  }
+  const decision = oidcLinkDecision(login, input.currentSession);
+  if ("refusal" in decision) {
+    throw new OidcError(decision.refusal);
+  }
+  const linkingUserId = decision.linkingUserId ?? undefined;
   const [provider] = await db()
     .select()
     .from(identityProvider)
@@ -365,10 +421,10 @@ export async function completeOidcLogin(input: {
       "That identity is not in an allowed organisation group.",
     );
   }
-  const linkRefusal = input.linkingUserId
+  const linkRefusal = linkingUserId
     ? linkFreshnessRefusal(
         await getSignInPolicy(login.organisationId),
-        input.linkingSessionCreatedAt ?? new Date(0),
+        input.currentSession?.createdAt ?? new Date(0),
       )
     : null;
   const sql = rawSqlClient();
@@ -380,15 +436,15 @@ export async function completeOidcLogin(input: {
     `;
     let userId: string;
     if (bound) {
-      if (input.linkingUserId && input.linkingUserId !== bound.user_id) {
+      if (linkingUserId && linkingUserId !== bound.user_id) {
         throw new OidcError(
           "This identity is already linked to a different account.",
         );
       }
       userId = bound.user_id;
-    } else if (input.linkingUserId) {
+    } else if (linkingUserId) {
       if (linkRefusal) throw new OidcError(linkRefusal);
-      userId = input.linkingUserId;
+      userId = linkingUserId;
       await transaction`
         INSERT INTO external_identity (
           id, organisation_id, provider_id, issuer, subject, user_id,
@@ -507,12 +563,13 @@ export async function completeOidcLogin(input: {
     result: "ok",
     targetType: "external_identity",
     targetId: claims.sub,
-    details: { issuer: provider.issuer, jit: !input.linkingUserId },
+    details: { issuer: provider.issuer, jit: !linkingUserId },
   });
   return {
     userId: outcome.userId,
     organisationId: login.organisationId,
     redirectTo: login.redirectTo,
+    linked: Boolean(linkingUserId),
   };
 }
 
@@ -526,7 +583,9 @@ export async function establishConsoleSession(userId: string): Promise<{
   maxAge: number;
 }> {
   const ctx = await auth.$context;
-  const session = (await ctx.internalAdapter.createSession(userId)) as {
+  const session = (await ctx.internalAdapter.createSession(userId, false, {
+    authMethod: "sso",
+  })) as {
     token?: string;
   } | null;
   if (!session?.token) {

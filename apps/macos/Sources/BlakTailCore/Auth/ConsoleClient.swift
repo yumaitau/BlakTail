@@ -316,6 +316,16 @@ public struct ConsoleClient: Sendable {
         try validate(response: response, data: data)
     }
 
+    /// App sign-out: revokes this desktop credential on the console.
+    public func revokeCredential() async throws {
+        let (data, response) = try await request(
+            path: "/api/desktop/auth/token",
+            method: "DELETE",
+            body: nil
+        )
+        try validate(response: response, data: data)
+    }
+
     private func request(
         path: String,
         method: String,

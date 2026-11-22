@@ -12,6 +12,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::AbortHandle,
 };
 
@@ -20,6 +21,7 @@ const MAX_HEADER: usize = 8_192;
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const MAX_LISTING: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CONNECTIONS: usize = 32;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct DriveView {
@@ -76,14 +78,21 @@ impl DriveBrowser {
         let listen_addr = listener.local_addr()?;
         let fingerprint = fingerprint(&shares);
         let served = Arc::new(shares);
+        let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let port = listen_addr.port();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
+                let Ok(permit) = limit.clone().try_acquire_owned() else {
+                    drop(stream);
+                    continue;
+                };
                 let shares = served.clone();
                 tokio::spawn(async move {
-                    let _ = handle(stream, &shares).await;
+                    let _ = handle(stream, &shares, port).await;
+                    drop(permit);
                 });
             }
         });
@@ -288,10 +297,10 @@ fn locate<'a>(shares: &'a [CatalogShare], path: &str) -> Target<'a> {
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    if parts
-        .iter()
-        .any(|part| *part == "." || *part == ".." || part.contains('\0'))
-    {
+    // Same rule as the overlay listener: no `..`, dot-files, separators,
+    // stream names or control characters (CR/LF would split the request
+    // this browser writes to the origin).
+    if parts.iter().any(|part| !crate::jail::safe_component(part)) {
         return Target::Rejected;
     }
     match parts.as_slice() {
@@ -382,6 +391,7 @@ fn index_page(shares: &[CatalogShare]) -> String {
 struct Request {
     method: String,
     path: String,
+    host: Option<String>,
     depth: Option<String>,
     destination: Option<String>,
     overwrite: Option<String>,
@@ -389,7 +399,28 @@ struct Request {
     body: Vec<u8>,
 }
 
-async fn handle(mut stream: TcpStream, shares: &[CatalogShare]) -> Result<(), Error> {
+/// Only a request addressed to the loopback listener itself is served, so
+/// a web page that rebinds its own name to 127.0.0.1 cannot drive it.
+fn loopback_host(host: Option<&str>, port: u16) -> bool {
+    let Some(host) = host.map(str::trim) else {
+        return false;
+    };
+    let name = match host.rsplit_once(':') {
+        Some((name, given)) if !name.ends_with(':') && name != "[" => {
+            if given.parse::<u16>().ok() != Some(port) {
+                return false;
+            }
+            name
+        }
+        _ => host,
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+async fn handle(mut stream: TcpStream, shares: &[CatalogShare], port: u16) -> Result<(), Error> {
     let mut buffer = vec![0u8; MAX_HEADER];
     let length = tokio::time::timeout(REQUEST_TIMEOUT, stream.read(&mut buffer))
         .await
@@ -409,6 +440,9 @@ async fn handle(mut stream: TcpStream, shares: &[CatalogShare]) -> Result<(), Er
         return write_plain(&mut stream, 400, "Bad Request", "bad request\n").await;
     };
     parsed.body = buffer[header_end + 4..length].to_vec();
+    if !loopback_host(parsed.host.as_deref(), port) {
+        return write_plain(&mut stream, 403, "Forbidden", "forbidden host\n").await;
+    }
     if let Some(needed) = parsed.content_length {
         if needed > MAX_BODY {
             return write_plain(&mut stream, 413, "Payload Too Large", "file is too large\n").await;
@@ -483,6 +517,7 @@ fn parse_request(raw: &str) -> Option<Request> {
     let method = parts.next()?.to_ascii_uppercase();
     let target = parts.next().unwrap_or("/");
     let path = percent_decode(target.split('?').next().unwrap_or("/"))?;
+    let mut host = None;
     let mut depth = None;
     let mut destination = None;
     let mut overwrite = None;
@@ -493,7 +528,9 @@ fn parse_request(raw: &str) -> Option<Request> {
             continue;
         };
         let value = value.trim();
-        if name.eq_ignore_ascii_case("depth") {
+        if name.eq_ignore_ascii_case("host") {
+            host = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("depth") {
             depth = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("destination") {
             destination = Some(value.to_owned());
@@ -506,6 +543,7 @@ fn parse_request(raw: &str) -> Option<Request> {
     Some(Request {
         method,
         path,
+        host,
         depth,
         destination,
         overwrite,
@@ -523,18 +561,24 @@ async fn proxy(
 ) -> Result<(), Error> {
     let method = parsed.method.as_str();
     let body = &parsed.body;
+    let label = crate::share::href_encode(&share.label);
+    let rest = crate::share::href_encode(rest);
     let origin_path = if rest.is_empty() {
-        format!("/{}/", share.label)
+        format!("/{label}/")
     } else if directory {
-        format!("/{}/{}/", share.label, rest)
+        format!("/{label}/{rest}/")
     } else {
-        format!("/{}/{}", share.label, rest)
+        format!("/{label}/{rest}")
     };
     let mut request = format!(
         "{method} {origin_path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
         share.origin
     );
     if let Some(depth) = parsed.depth.as_deref() {
+        let depth = depth.to_ascii_lowercase();
+        if !matches!(depth.as_str(), "0" | "1" | "infinity") {
+            return write_plain(client, 400, "Bad Request", "invalid depth\n").await;
+        }
         request.push_str(&format!("Depth: {depth}\r\n"));
     }
     if let Some(destination) = parsed.destination.as_deref() {
@@ -544,6 +588,9 @@ async fn proxy(
         request.push_str(&format!("Destination: {rewritten}\r\n"));
     }
     if let Some(overwrite) = parsed.overwrite.as_deref() {
+        if !matches!(overwrite, "T" | "F") {
+            return write_plain(client, 400, "Bad Request", "invalid overwrite\n").await;
+        }
         request.push_str(&format!("Overwrite: {overwrite}\r\n"));
     }
     if !body.is_empty() || method == "PUT" {
@@ -595,7 +642,21 @@ fn rewrite_destination(value: &str, share: &CatalogShare) -> Option<String> {
     let path = percent_decode(path.split('?').next().unwrap_or(path))?;
     let prefix = format!("/{}/{}/{}", share.domain, share.machine, share.label);
     let rest = path.strip_prefix(&prefix)?;
-    Some(format!("/{}{rest}", share.label))
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    let parts = rest
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.iter().any(|part| !crate::jail::safe_component(part)) {
+        return None;
+    }
+    Some(format!(
+        "/{}/{}",
+        crate::share::href_encode(&share.label),
+        crate::share::href_encode(&parts.join("/"))
+    ))
 }
 
 fn adjust_listing(raw: &str, share: &CatalogShare) -> String {
@@ -929,6 +990,36 @@ mod tests {
         )
         .await;
         assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+        for path in [
+            "/abcdef12.blaktail/store/files/.env",
+            "/abcdef12.blaktail/store/files/a%0d%0aX-Injected:%201",
+            "/abcdef12.blaktail/store/files/a%20HTTP/1.1%0d%0a",
+        ] {
+            let refused = http(browser.listen_addr(), "GET", path).await;
+            assert!(refused.starts_with("HTTP/1.1 403"), "{path}: {refused}");
+        }
+        let bad_depth = http_headers(
+            browser.listen_addr(),
+            "PROPFIND",
+            "/abcdef12.blaktail/store/files/",
+            &[("Depth", "1\rX: y")],
+        )
+        .await;
+        assert!(bad_depth.starts_with("HTTP/1.1 400"), "{bad_depth}");
+        // A rebound web origin sends its own name as Host.
+        let rebound = raw(
+            browser.listen_addr(),
+            "GET /abcdef12.blaktail/store/files/note.txt HTTP/1.1\r\nHost: evil.example:8080\r\n\r\n",
+        )
+        .await;
+        assert!(rebound.starts_with("HTTP/1.1 403"), "{rebound}");
+        assert!(!rebound.contains("hello-share"), "{rebound}");
+        let no_host = raw(
+            browser.listen_addr(),
+            "GET /abcdef12.blaktail/store/files/note.txt HTTP/1.1\r\n\r\n",
+        )
+        .await;
+        assert!(no_host.starts_with("HTTP/1.1 403"), "{no_host}");
         browser.stop();
         server.stop();
         fs::remove_dir_all(root).unwrap();
@@ -951,6 +1042,48 @@ mod tests {
         panic!("no free localhost port for drive test");
     }
 
+    #[test]
+    fn host_must_name_the_loopback_listener() {
+        assert!(loopback_host(Some("127.0.0.1:8080"), 8080));
+        assert!(loopback_host(Some("localhost:8080"), 8080));
+        assert!(loopback_host(Some("[::1]:8080"), 8080));
+        assert!(loopback_host(Some("LOCALHOST"), 8080));
+        assert!(!loopback_host(Some("127.0.0.1:9090"), 8080));
+        assert!(!loopback_host(Some("localhost.evil.example:8080"), 8080));
+        assert!(!loopback_host(Some("evil.example"), 8080));
+        assert!(!loopback_host(None, 8080));
+    }
+
+    #[test]
+    fn destination_is_reencoded_inside_the_share() {
+        let share = CatalogShare {
+            domain: "abcdef12.blaktail".into(),
+            machine: "store".into(),
+            label: "files".into(),
+            origin: "127.0.0.1:5647".parse().unwrap(),
+            read_only: false,
+        };
+        assert_eq!(
+            rewrite_destination(
+                "http://127.0.0.1:8080/abcdef12.blaktail/store/files/a%20b.txt",
+                &share
+            )
+            .as_deref(),
+            Some("/files/a%20b.txt")
+        );
+        assert!(rewrite_destination("/abcdef12.blaktail/store/files/a%0d%0aX:1", &share).is_none());
+        assert!(rewrite_destination("/abcdef12.blaktail/store/files/../x", &share).is_none());
+        assert!(rewrite_destination("/abcdef12.blaktail/store/filesx/a", &share).is_none());
+    }
+
+    async fn raw(addr: SocketAddr, request: &str) -> String {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut body = Vec::new();
+        client.read_to_end(&mut body).await.unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
     async fn http(addr: SocketAddr, method: &str, path: &str) -> String {
         http_headers(addr, method, path, &[]).await
     }
@@ -963,7 +1096,7 @@ mod tests {
     ) -> String {
         let mut client = TcpStream::connect(addr).await.unwrap();
         let mut request =
-            format!("{method} {path} HTTP/1.1\r\nHost: browser\r\nConnection: close\r\n");
+            format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
         for (name, value) in headers {
             request.push_str(&format!("{name}: {value}\r\n"));
         }

@@ -203,7 +203,9 @@ is `deploy/homelab/prove-acl-services.sh`.
 
 `drive` is optional. Leave it out and an enabled share stays available to
 any device the rest of the policy can already reach. The share's own
-read-only flag still decides whether a file can be sent.
+read-only flag still decides whether a file can be sent, and writes also need
+`BLAKTAIL_ALLOW_WRITABLE_SHARES=1` on the sharing device (see
+[drive.md](drive.md#publish)). Policy cannot turn that on.
 
 When `drive` is present it fails closed. `share` lists who may publish a
 folder. `access` lists who may open the folder browser on their own device.

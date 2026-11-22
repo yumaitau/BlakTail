@@ -151,14 +151,53 @@ final class TaglineTests: XCTestCase {
 }
 
 final class BrowserSignInTokenTests: XCTestCase {
-    func testReadsTokenFromFragment() throws {
-        let url = URL(string: "blaktail://auth/callback#token=abc%20def")!
-        XCTAssertEqual(try BrowserSignIn.token(from: url), "abc def")
+    func testS256ChallengeMatchesConsole() {
+        // Same vector as apps/console/scripts/desktop-auth.test.mjs.
+        XCTAssertEqual(
+            PKCERequest.challenge(for: "fake-verifier-0123456789-abcdefghijklmnopqrstuvwxyz"),
+            "UGabefOy04PGSwE8r2regzUpjOv3s3b-B6535dMR02k"
+        )
     }
 
-    func testReadsTokenFromQuery() throws {
-        let url = URL(string: "blaktail://auth/callback?token=session-token")!
-        XCTAssertEqual(try BrowserSignIn.token(from: url), "session-token")
+    func testRandomRequestIsUrlSafeAndFresh() throws {
+        let first = try PKCERequest.random()
+        let second = try PKCERequest.random()
+        XCTAssertEqual(first.verifier.count, 43)
+        XCTAssertEqual(first.state.count, 43)
+        XCTAssertNotEqual(first.verifier, second.verifier)
+        XCTAssertNotEqual(first.state, second.state)
+        XCTAssertNil(first.verifier.rangeOfCharacter(from: CharacterSet(charactersIn: "+/=")))
+    }
+
+    func testStartURLCarriesChallengeNotVerifier() throws {
+        let pkce = PKCERequest(verifier: "fake-verifier-0123456789-abcdefghijklmnopqrstuvwxyz", state: "fake-state-0123456789")
+        let url = BrowserSignIn.startURL(consoleBaseURL: URL(string: "https://console.example.org.au")!, pkce: pkce)
+        let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(items.first(where: { $0.name == "code_challenge" })?.value, pkce.challenge)
+        XCTAssertEqual(items.first(where: { $0.name == "code_challenge_method" })?.value, "S256")
+        XCTAssertEqual(items.first(where: { $0.name == "redirect_uri" })?.value, "blaktail://auth/callback")
+        XCTAssertFalse(url.absoluteString.contains(pkce.verifier))
+    }
+
+    func testReadsCodeWhenStateMatches() throws {
+        let url = URL(string: "blaktail://auth/callback?code=btc_fake&state=fake-state-0123456789")!
+        XCTAssertEqual(try BrowserSignIn.authorizationCode(from: url, expectedState: "fake-state-0123456789"), "btc_fake")
+    }
+
+    func testRejectsWrongStateOrLegacyToken() {
+        let wrong = URL(string: "blaktail://auth/callback?code=btc_fake&state=other-state-0123456789")!
+        XCTAssertThrowsError(try BrowserSignIn.authorizationCode(from: wrong, expectedState: "fake-state-0123456789")) {
+            XCTAssertEqual($0 as? BrowserSignInError, .stateMismatch)
+        }
+        let legacy = URL(string: "blaktail://auth/callback#token=session-token")!
+        XCTAssertThrowsError(try BrowserSignIn.authorizationCode(from: legacy, expectedState: "fake-state-0123456789"))
+    }
+
+    func testDeniedCallbackIsCancelled() {
+        let url = URL(string: "blaktail://auth/callback?error=access_denied&state=fake-state-0123456789")!
+        XCTAssertThrowsError(try BrowserSignIn.authorizationCode(from: url, expectedState: "fake-state-0123456789")) {
+            XCTAssertEqual($0 as? BrowserSignInError, .cancelled)
+        }
     }
 }
 

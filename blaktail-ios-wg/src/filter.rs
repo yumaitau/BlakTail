@@ -1383,6 +1383,28 @@ fn parse_embedded(data: &[u8]) -> Option<Packet> {
 // ---------------------------------------------------------------------------
 // C ABI for the iOS/Android hosts and the Windows agent.
 
+/// Installs a deny-all inbound policy (only replies to this device's own
+/// flows pass) until `blaktail_tunnel_set_policy` replaces it. A new tunnel
+/// otherwise starts unfiltered for legacy hosts; Android calls this on create
+/// so a phone without a stored policy fails closed.
+///
+/// # Safety
+/// `tunnel` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn blaktail_tunnel_deny_until_policy(tunnel: *mut BlakTailTunnel) -> i32 {
+    if tunnel.is_null() {
+        return RESULT_ERR;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let Ok(mut inner) = (*tunnel).inner.lock() else {
+            return RESULT_ERR;
+        };
+        inner.filter.set_policy(Policy::deny_all());
+        RESULT_DONE
+    }))
+    .unwrap_or(RESULT_ERR)
+}
+
 /// Replaces the inbound policy from the coordinator's `peers` JSON array.
 /// Invalid JSON installs a deny-all policy (fail closed) and returns -1.
 ///

@@ -24,7 +24,8 @@ successful exchange mints a distinct hashed `bto_` access token that expires
 in at most one hour, plus `organisation_id` so callers can set
 `X-BlakTail-Organisation`. The static `bta_` secret remains a bootstrap
 Bearer option. Requested `scope` must be empty or a subset of the registered
-scopes; the access token still carries the registered set. Revoking the
+scopes; the access token carries exactly the requested scopes, or the
+registered set when none are requested. Revoking the
 client rejects later access tokens. Webhook destinations are minted separately
 and their signing secrets are not OAuth credentials.
 

@@ -264,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => unreachable!("validated coordinator database backend"),
     };
+    blaktail_coord::check_diagnostics_exposure(metrics_bind, diagnostics_token.as_deref())?;
     let metrics = Arc::new(CoordMetrics::default());
     let metrics_listener = tokio::net::TcpListener::bind(metrics_bind).await?;
     let metrics_router =
@@ -302,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = axum_server::bind_rustls(bind, tls)
             .handle(api_handle)
-            .serve(api_router.into_make_service()) => result?,
+            .serve(api_router.into_make_service_with_connect_info::<SocketAddr>()) => result?,
         result = axum::serve(metrics_listener, metrics_router.into_make_service())
             .with_graceful_shutdown(async move {
                 if !*metrics_shutdown.borrow() {

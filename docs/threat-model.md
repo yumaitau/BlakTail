@@ -20,7 +20,7 @@ BlakTail is a WireGuard mesh. Devices join an organisation tailnet, talk peer to
 | Node credential expiry | Coordinator node records | Default 90-day control-plane and peer-map lifetime; re-auth rotates the token |
 | Relay capability secret | Coordinator and relay env only | Attacker can register or hijack relay identities; it is separate from console-session signing |
 | Console sessions and `BETTER_AUTH_SECRET` | Onshore Postgres and console env | Account takeover of the operator UI |
-| `BLAKTAIL_AUTH_HMAC_SECRET` | Console and coordinator env | Forgery of console sessions into the coordinator |
+| `BLAKTAIL_AUTH_HMAC_SECRET` | Console and coordinator env | Forgery of console assertions as any person and role in any organisation. It is also the root key for everything the coordinator seals or signs: remote-job signing keys, the remote SSH user CA and private-service CA keys, webhook and notification-channel secrets, posture integration secrets, agent provider credentials and full-logging content. With a database copy it opens all of them. See [After revoke](#5-after-revoke) for what rotating it breaks |
 | Bootstrap/invitation credentials | Shown once to operator/invitee; SHA-256 hashes in Postgres | First-owner or invited-role takeover before expiry/use |
 | TLS private key | Coordinator host | Intercept of control-plane HTTP |
 
@@ -28,6 +28,10 @@ The coordinator stores hashes of join keys and node tokens, not the secrets them
 Browser enrollment follows the same rule: SQLite stores hashes of the high-entropy
 device secret and the short display code. Approval creates a single-use grant bound
 to the waiting node name and WireGuard public key; the raw secret stays in the agent.
+Starting an enrollment is unauthenticated, so the coordinator accepts only a
+real WireGuard public key (base64 of 32 bytes), caps the body at 4 KiB and
+allows 10 starts a minute per source address (IPv6 per /64), on top of the
+1,000 pending enrollments cap.
 
 ## Trust boundaries
 
@@ -46,7 +50,7 @@ to the waiting node name and WireGuard public key; the raw secret stays in the a
 - Nodes treat the coordinator as the source of truth for membership and ACL.
 - Relays are organisation infrastructure. They forward opaque UDP. They are not a second control plane.
 - GitHub holds public code. It must not hold keys, env files, or the coordinator database.
-- CI runs on GitHub-hosted runners (`ubuntu-latest`, `macos-latest`). The tree is never uploaded to a scanning SaaS; gitleaks and cargo-deny run as checksum-pinned binaries inside the workflow.
+- CI (build, test, gitleaks, cargo-deny, releases, PR review) runs on GitHub-hosted runners (`ubuntu-latest`, `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-latest`, `macos-15`, `macos-15-intel`). Only two manual drills use self-hosted runners: `aws-e2e.yml` (`[self-hosted, linux]`, `aws-e2e` environment) and `two-vm-e2e.yml` (`[self-hosted]`, also weekly). Neither runs on `pull_request`, so fork code never reaches them. The tree is never uploaded to a scanning SaaS; gitleaks and cargo-deny run as checksum-pinned binaries inside the workflow.
 
 ## Attackers we actually design for
 
@@ -85,15 +89,34 @@ always-on onshore gateway. What each compromise buys:
   coordinator, sealed with the coordinator secret) and cannot see RDP
   passwords except those typed during its compromise. Suspend or revoke the
   gateway node to stop it.
-- **Database write without the coordinator secret.** Cannot sign a runnable
-  job (the job key is derived from the coordinator secret) and cannot read
-  the CA key. It can change a pinned host key, but that alone does not
-  redirect a session: the device's overlay address routes only to the peer
-  holding its WireGuard key.
+- **Database write without the coordinator secret.** Cannot forge console
+  assertions, sign a runnable job (the job key is derived from the
+  coordinator secret) or read any sealed value (CA keys, webhook, channel,
+  posture and agent provider secrets). It can change a pinned host key, but
+  that alone does not redirect a session: the device's overlay address
+  routes only to the peer holding its WireGuard key. It is still not a safe
+  boundary: everything unsealed is plaintext and authoritative, including
+  the policy, roles, node-token hashes and the endpoints sealed secrets are
+  sent to. Sealed values are not bound to their row, so rewriting an agent
+  provider's base URL or a posture integration's endpoint in the database
+  sends the stored credential there. Treat database write as coordinator
+  compromise for everything except reading sealed values.
 - **Compromised coordinator.** Can issue certificates and sign jobs for any
   opted-in device of that organisation. Opt-in on the device (sshd drop-in,
   `BLAKTAIL_SSH_USER_CA`, `--allow-remote-jobs`) is the boundary; leave it
   off where that risk is unacceptable.
+
+### Desktop and mobile app sign-in
+
+The apps sign in with PKCE ([console.md](console.md#desktop-and-mobile-sign-in)).
+A page that sends a signed-in person to `/desktop/auth` gets nothing without the
+person pressing **Allow**, and the console page cannot be framed. Another app
+that registers `blaktail://` and catches the callback gets only a 60-second code
+it cannot redeem without the verifier. A stolen desktop credential is scoped to
+`/api/desktop/*`, cannot be used as a browser cookie, and dies with app sign-out,
+30 days, or the approving browser session. Suspension and role changes apply on
+the next request. Limit: someone who persuades the person to press **Allow** for
+a request they did not start gets that person's desktop access.
 
 ### Offshore SaaS mistake
 
@@ -164,7 +187,9 @@ These are not optional hardening. They are the v1 bar.
    organisation activation is staged until console identity is ready, and
    bootstrap locks after one success. Later users require owner-issued,
    organisation-bound invitations. Sole-owner recovery requires the exact owner
-   email from a trusted host and revokes existing sessions.
+   email from a trusted host, rotates the password, removes the owner's
+   single sign-on bindings and two-step verification, revokes the sessions of
+   every login identity linked to the owner, and audits each count.
 
 ## Honest limits
 
@@ -185,11 +210,23 @@ recovery: if the private key may have leaked, revoke the node and enrol a new on
 
 **Revoke is not instant if the coordinator is down.** Peers keep the last applied WireGuard configuration when polling fails, so existing tunnels survive a coordinator outage. That is deliberate. It also means a revoke does not propagate until peers can reach the coordinator again.
 
-**Overlay shares are unauthenticated HTTP and read-only WebDAV.** The listener
-binds only the node's tailnet IPv4 address. Anyone who can already reach that
-node over the overlay can list and read the published directory. There is no
-share password. macOS still has no packet filter, so the bind is the control
-there. Writable uploads are rejected.
+**Overlay shares are unauthenticated HTTP and WebDAV.** The listener binds
+only the node's tailnet IPv4 address and there is no share password. Without a
+`drive` policy, anyone who can reach that address and port can list and read
+the published folder. With a `drive` policy the listener matches the TCP source
+address against the coordinator's caller grants; WireGuard only delivers a
+peer's packets with source addresses in that peer's allowed IPs, so the grant
+follows the peer's overlay address, but it trusts the coordinator's grant list,
+and any process or local user on the sharing device (loopback or its own
+overlay address, including through the folder browser on `127.0.0.1:8080`)
+gets the device's local grant. macOS still has no packet filter, so the bind is
+the control there. Every share is served read-only unless the agent on the
+sharing device runs with `BLAKTAIL_ALLOW_WRITABLE_SHARES=1`; the coordinator,
+console and policy cannot turn writes on, only narrow them. With the opt-in, a
+share marked writable accepts `PUT`, `MKCOL`, `DELETE` and `MOVE` from anyone
+the rules above allow, and files are written as the agent's user (root or
+SYSTEM). Paths never follow links or junctions out of the folder, and
+dot-files are refused.
 
 **This is not IRAP.** Public code, org-held keys, and onshore hosting are the product. Formal accreditation is out of scope.
 
@@ -283,6 +320,33 @@ sudo shred -u /etc/blaktail/blaktaild.env 2>/dev/null || sudo rm -f /etc/blaktai
 
 Mint a new single-use join key with a short expiry (an hour, not a month). Enrol only the replacement device. Rotate `BLAKTAIL_AUTH_HMAC_SECRET` and `BETTER_AUTH_SECRET` if those files were on the same laptop.
 
+Rotating `BLAKTAIL_AUTH_HMAC_SECRET` is not just a session reset. Nothing is
+re-sealed automatically, so plan for all of this:
+
+- Set the same new value on the console and the coordinator and restart both;
+  outstanding console assertions stop working (they are short-lived).
+- Webhook destinations: sealed signing secrets no longer open and deliveries
+  are skipped. Recreate each destination and give receivers the new secret.
+- Notification channels: Slack/Teams URLs and signing secrets no longer open.
+  Re-enter them.
+- Posture integrations: secrets no longer open and syncs fail. Re-enter each
+  secret.
+- Agent gateway: provider credentials no longer open, so grants fail;
+  re-enter each credential. Sealed full-logging content becomes unreadable
+  for good.
+- Private services: the organisation CA key no longer opens, so certificate
+  issue fails until the organisation's `service_cas` row is removed and a new
+  CA is generated. Clients that trusted the old CA must trust the new one.
+- Browser remote access: the SSH user CA key no longer opens, so every redeem
+  fails. Remove the organisation's `remote_access_settings` row and set the
+  gateway again to create a new CA; agents write the new CA public key on
+  their next poll.
+- Remote jobs: the job signing key is derived from the secret, so it changes.
+  Every device pinned the old key and keeps remote jobs off until its
+  `remote-jobs.pub` (in the agent state directory) is removed. Jobs are signed
+  at approval, so runs approved but not yet claimed fail verification; let
+  them expire and approve them again.
+
 ## What never goes in git
 
 The public repository is the product. Keys are not.
@@ -302,7 +366,7 @@ If a secret does land in git: treat it as leaked, rotate it, rewrite or abandon 
 
 ## CI
 
-GitHub-hosted runners. The security workflow must not upload the tree to a scanning SaaS; scanners are pinned binaries fetched with verified checksums.
+GitHub-hosted runners for every push and pull request, including the gitleaks and cargo-deny jobs. Self-hosted runners serve only `aws-e2e.yml` (`workflow_dispatch`, `aws-e2e` environment, AWS access through OIDC) and `two-vm-e2e.yml` (`workflow_dispatch` and a weekly schedule, SSH to two disposable VMs); keep them on hosts that hold no long-lived secrets and never add a `pull_request` trigger to either. Every `uses:` is pinned to a commit SHA. The security workflow must not upload the tree to a scanning SaaS; scanners are pinned binaries fetched with verified checksums.
 
 | Check | Job |
 | --- | --- |

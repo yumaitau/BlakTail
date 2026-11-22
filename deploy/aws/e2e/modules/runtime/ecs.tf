@@ -95,6 +95,8 @@ resource "aws_ecs_task_definition" "console" {
         { name = "BETTER_AUTH_URL", value = local.public_url },
         { name = "BETTER_AUTH_TRUSTED_ORIGINS", value = local.public_url },
         { name = "COORD_BASE_URL", value = local.public_url },
+        # API Gateway and the internal ALB each append one X-Forwarded-For hop.
+        { name = "BLAKTAIL_TRUSTED_PROXY_HOPS", value = "2" },
       ]
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.console.arn}:DATABASE_URL::" },

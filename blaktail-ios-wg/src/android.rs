@@ -1,6 +1,6 @@
 //! JNI entry points for the Android VpnService. The packet pump stays in Kotlin.
 
-use crate::filter::blaktail_tunnel_set_policy;
+use crate::filter::{blaktail_tunnel_deny_until_policy, blaktail_tunnel_set_policy};
 use crate::relay::{self, with_relay};
 use crate::BlakTailTunnel;
 use crate::{
@@ -53,7 +53,17 @@ pub extern "system" fn Java_au_org_blaktail_NativeTunnel_create<'local>(
     {
         return 0;
     }
-    unsafe { blaktail_tunnel_create(private.as_ptr()) as jlong }
+    let tunnel = unsafe { blaktail_tunnel_create(private.as_ptr()) };
+    if tunnel.is_null() {
+        return 0;
+    }
+    // Fail closed: a phone with no stored policy filters inbound traffic as
+    // deny-all until the coordinator's grants arrive via setPolicy.
+    if unsafe { blaktail_tunnel_deny_until_policy(tunnel) } != 0 {
+        unsafe { blaktail_tunnel_free(tunnel) };
+        return 0;
+    }
+    tunnel as jlong
 }
 
 #[no_mangle]

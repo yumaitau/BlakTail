@@ -2,7 +2,8 @@
 # interface and node credential; blaktail-gateway dials devices only over
 # that overlay. Run guacd (guacamole/guacd) in the same network namespace
 # for RDP. Start the agent first (`blaktaild up` / `run`), then the gateway.
-FROM rust:1.98-slim-bookworm AS build
+# rust:1.98-slim-bookworm (index digest; refresh: docker buildx imagetools inspect rust:1.98-slim-bookworm)
+FROM rust@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY config ./config
@@ -17,7 +18,9 @@ COPY blaktaild ./blaktaild
 COPY blaktail-ios-wg ./blaktail-ios-wg
 RUN cargo build --release -p blaktaild -p blaktail-gateway -p blaktail-config
 
-FROM debian:bookworm-slim
+# debian:bookworm-slim (index digest; refresh: docker buildx imagetools inspect debian:bookworm-slim)
+
+FROM debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates iproute2 iptables wireguard-tools \

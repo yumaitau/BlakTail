@@ -62,6 +62,7 @@ export async function saveSignInPolicyAction(formData: FormData): Promise<Result
     await saveSignInPolicy(ctx, {
       stepUpMaxAgeMinutes: parseStepUpMinutes(formData.get("stepUpMaxAgeMinutes")),
       requireMfaForPrivileged: formData.get("requireMfaForPrivileged") === "true",
+      trustIdpMfa: formData.get("trustIdpMfa") === "true",
     });
     revalidatePath("/settings");
     return { ok: true, data: undefined };

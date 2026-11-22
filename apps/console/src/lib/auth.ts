@@ -6,6 +6,8 @@ import { twoFactor } from "better-auth/plugins/two-factor";
 import { db } from "./db/client";
 import * as schema from "./db/schema";
 import { writeConsoleAudit } from "./console-audit";
+import { CLIENT_IP_HEADER } from "./client-ip-core";
+import { sessionAuthMethodFor } from "./auth-policy-core";
 
 const betterAuthSecret = process.env.BETTER_AUTH_SECRET;
 if (!betterAuthSecret || Buffer.byteLength(betterAuthSecret) < 32) {
@@ -44,9 +46,53 @@ export const auth = betterAuth({
       "/change-password": { window: 60, max: 5 },
     },
   },
+  advanced: {
+    ipAddress: {
+      // Never the raw X-Forwarded-For: its left side is client-controlled.
+      // src/proxy.ts derives this header from BLAKTAIL_TRUSTED_PROXY_HOPS and
+      // drops any client-sent copy. Without trusted proxies it is absent and
+      // Better Auth falls back to one shared bucket per path.
+      ipAddressHeaders: [CLIENT_IP_HEADER],
+      disableIpTracking: false,
+    },
+  },
   session: {
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
+    additionalFields: {
+      // How this session signed in. Set server-side only, never from input.
+      authMethod: { type: "string", required: false, input: false },
+    },
+  },
+  account: {
+    additionalFields: {
+      // BlakTail's own column (migration 0002), not Better Auth's. Declared so
+      // Better Auth >=1.7.3 writes it instead of failing its schema check.
+      issuer: { type: "string", required: false, input: false },
+    },
+  },
+  databaseHooks: {
+    account: {
+      create: {
+        // Better Auth only creates password accounts here; SSO and SCIM rows
+        // are written by BlakTail with their own issuer. Anything else is left
+        // without an issuer and fails closed on NOT NULL.
+        before: async (account) =>
+          account.providerId === "credential"
+            ? { data: { ...account, issuer: "local:credential" } }
+            : undefined,
+      },
+    },
+    session: {
+      create: {
+        before: async (session, context) => ({
+          data: {
+            ...session,
+            authMethod: sessionAuthMethodFor(context?.path, session.authMethod),
+          },
+        }),
+      },
+    },
   },
   trustedOrigins: (
     process.env.BETTER_AUTH_TRUSTED_ORIGINS ??

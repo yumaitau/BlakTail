@@ -260,6 +260,21 @@ pub fn resolve_user(_name: &str) -> Result<RunAs, String> {
     Err("remote jobs are supported on Linux and macOS only".into())
 }
 
+/// Root's uid or a primary gid of 0 (root's group, which owns much of the
+/// system) is never an acceptable job identity.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn unprivileged(uid: u32, gid: u32) -> Result<(), String> {
+    if uid == 0 {
+        return Err("remote jobs must not run as root; name an unprivileged user".into());
+    }
+    if gid == 0 {
+        return Err(
+            "remote jobs must not run with primary group 0; name an unprivileged user".into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub fn resolve_user(name: &str) -> Result<RunAs, String> {
     let c_name = std::ffi::CString::new(name).map_err(|_| "invalid user name")?;
@@ -271,9 +286,7 @@ pub fn resolve_user(name: &str) -> Result<RunAs, String> {
     }
     // SAFETY: non-null result of getpwnam.
     let (uid, gid) = unsafe { ((*entry).pw_uid, (*entry).pw_gid) };
-    if uid == 0 {
-        return Err("remote jobs must not run as root; name an unprivileged user".into());
-    }
+    unprivileged(uid, gid)?;
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
     if euid != 0 && euid != uid {
@@ -745,5 +758,12 @@ mod tests {
     fn root_is_never_a_job_user() {
         assert!(resolve_user("root").is_err());
         assert!(resolve_user("no-such-blaktail-user").is_err());
+    }
+
+    #[test]
+    fn root_group_is_never_a_job_identity() {
+        assert!(unprivileged(0, 1000).is_err());
+        assert!(unprivileged(1000, 0).is_err());
+        assert!(unprivileged(1000, 1000).is_ok());
     }
 }

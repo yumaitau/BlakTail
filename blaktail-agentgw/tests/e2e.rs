@@ -442,6 +442,44 @@ async fn redaction_happens_before_forwarding_and_full_logs_store_redacted_text()
 }
 
 #[tokio::test]
+async fn full_logs_store_redacted_model_output_too() {
+    // "Yaama" (JSON answer) and "Kaya" (first SSE delta) stand in for a
+    // secret the model echoes back. A fresh lab per case keeps exactly one
+    // usage record in view.
+    for (stream, expected) in [(false, "[REDACTED]"), (true, "[REDACTED] mob")] {
+        let lab = Lab::start(json!({
+            "redact_patterns": ["Yaama", "Kaya"],
+            "logging_mode": "full",
+            "log_retention_days": 7,
+        }))
+        .await;
+        let response = lab.chat(&lab.secret, chat_body(stream)).await;
+        assert_eq!(response.status(), 200);
+        // The caller still receives the provider's answer unchanged.
+        let text = response.text().await.unwrap();
+        assert!(
+            text.contains(if stream { "Kaya" } else { "Yaama" }),
+            "{text}"
+        );
+        let state = lab.today().await;
+        let recent = &state["usage"]["recent"][0];
+        let (status, content) = lab
+            .owner(
+                reqwest::Method::GET,
+                &format!(
+                    "/agents/requests/{}/content",
+                    recent["id"].as_str().unwrap()
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(content["response"], expected, "stream={stream}");
+        lab.assert_no_secrets_logged();
+    }
+}
+
+#[tokio::test]
 async fn models_lists_only_what_the_key_may_use() {
     let lab = Lab::start(json!({})).await;
     let response = lab

@@ -78,16 +78,6 @@ function cookies(response) {
     .join("; ");
 }
 
-function cookieValue(cookieHeader, names) {
-  for (const part of cookieHeader.split(";")) {
-    const separator = part.indexOf("=");
-    if (separator < 0) continue;
-    const name = part.slice(0, separator).trim();
-    if (names.includes(name)) return part.slice(separator + 1).trim();
-  }
-  return null;
-}
-
 async function jsonRequest(baseUrl, path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method ?? "POST",
@@ -110,6 +100,41 @@ async function jsonRequest(baseUrl, path, options = {}) {
     // Empty 204 responses are expected.
   }
   return { response, body };
+}
+
+/** Runs the desktop PKCE sign-in for a browser cookie and returns the app credential. */
+async function desktopCredential(baseUrl, cookie) {
+  const verifier = randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const state = randomUUID().replaceAll("-", "");
+  const authorise = await jsonRequest(baseUrl, "/api/desktop/auth/authorize", {
+    cookie,
+    body: {
+      redirect_uri: "blaktail://auth/callback",
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    },
+  });
+  assert.equal(authorise.response.status, 200, JSON.stringify(authorise.body));
+  const callback = new URL(authorise.body.redirect);
+  assert.equal(`${callback.protocol}//${callback.host}${callback.pathname}`, "blaktail://auth/callback");
+  assert.equal(callback.searchParams.get("state"), state);
+  const code = callback.searchParams.get("code");
+  const wrong = await jsonRequest(baseUrl, "/api/desktop/auth/token", {
+    body: { code: "btc_not-a-real-code", code_verifier: verifier },
+  });
+  assert.equal(wrong.response.status, 400);
+  const exchanged = await jsonRequest(baseUrl, "/api/desktop/auth/token", {
+    body: { code, code_verifier: verifier },
+  });
+  assert.equal(exchanged.response.status, 200, JSON.stringify(exchanged.body));
+  assert.match(exchanged.body.token, /^btd_/u);
+  const replay = await jsonRequest(baseUrl, "/api/desktop/auth/token", {
+    body: { code, code_verifier: verifier },
+  });
+  assert.equal(replay.response.status, 400);
+  return exchanged.body.token;
 }
 
 async function waitForConsole(baseUrl, child, log) {
@@ -182,7 +207,7 @@ const coordinator = createServer(async (request, response) => {
   if (wgOnlyList && request.method === "POST") {
     const body = JSON.parse(raw);
     const peer = {
-      id: `wg-only-${wgOnlyList[1]}-${Date.now()}`,
+      id: randomUUID(),
       name: body.name,
       kind: body.kind ?? "wireguard_only",
       wg_public_key: body.wg_public_key,
@@ -360,6 +385,7 @@ try {
   `;
   const ownerNodeId = randomUUID();
   const linkedNodeId = randomUUID();
+  const secondOwnerNodeId = randomUUID();
   const credentialExpiry = Math.floor(Date.now() / 1000) + 86_400;
   const node = (id, name, route = null) => ({
     id,
@@ -635,11 +661,26 @@ try {
     /(?:^|; )(?:__Secure-)?better-auth\.session_token=([^;]+)/u,
   );
   assert.ok(tokenMatch);
-  const linkedDesktopMe = await fetch(`${baseUrl}/api/desktop/me`, {
+  // The browser session token is no longer accepted as a desktop Bearer.
+  const sessionAsBearer = await fetch(`${baseUrl}/api/desktop/me`, {
     headers: { authorization: `Bearer ${decodeURIComponent(tokenMatch[1])}` },
+  });
+  assert.equal(sessionAsBearer.status, 401);
+  const linkedCredential = await desktopCredential(baseUrl, ownerCookie);
+  const linkedDesktopMe = await fetch(`${baseUrl}/api/desktop/me`, {
+    headers: { authorization: `Bearer ${linkedCredential}` },
   });
   assert.equal(linkedDesktopMe.status, 200);
   assert.equal((await linkedDesktopMe.json()).organisations.length, 2);
+  const appSignOut = await fetch(`${baseUrl}/api/desktop/auth/token`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${linkedCredential}` },
+  });
+  assert.equal(appSignOut.status, 204);
+  const afterAppSignOut = await fetch(`${baseUrl}/api/desktop/me`, {
+    headers: { authorization: `Bearer ${linkedCredential}` },
+  });
+  assert.equal(afterAppSignOut.status, 401);
 
   const allDevices = await fetch(`${baseUrl}/api/devices`, {
     headers: { cookie: ownerCookie },
@@ -1030,7 +1071,7 @@ try {
     `;
   });
   coordinatorNodes.set(secondOwner.coordOrgId, [
-    node(`node-${secondOwner.coordOrgId}`, "ranger-field-laptop", "10.42.0.0/24"),
+    node(secondOwnerNodeId, "ranger-field-laptop", "10.42.0.0/24"),
   ]);
   const secondOwnerSignIn = await jsonRequest(
     baseUrl,
@@ -1143,14 +1184,8 @@ try {
   });
   assert.equal((await afterRevoke.json()).peers[0].revoked_at !== null, true);
 
-  const sessionCookieNames = [
-    "better-auth.session_token",
-    "__Secure-better-auth.session_token",
-  ];
-  const memberBearer = cookieValue(memberCookie, sessionCookieNames);
-  const ownerBearer = cookieValue(ownerCookie, sessionCookieNames);
-  assert.ok(memberBearer);
-  assert.ok(ownerBearer);
+  const memberBearer = await desktopCredential(baseUrl, memberCookie);
+  const ownerBearer = await desktopCredential(baseUrl, ownerCookie);
 
   const cookieOnlyDesktopInventory = await fetch(
     `${baseUrl}/api/desktop/devices`,

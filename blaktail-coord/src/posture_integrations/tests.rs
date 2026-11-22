@@ -879,3 +879,47 @@ fn backoff_grows_respects_retry_after_and_stays_bounded() {
     assert!(backoff_secs(30, 900, None) <= 3600 * 6 / 5);
     assert!(backoff_secs(1, 900, Some(600)) >= 600);
 }
+
+#[tokio::test]
+async fn bodies_without_content_length_are_capped_while_streaming() {
+    use tokio::io::AsyncWriteExt;
+    // A close-delimited body: no Content-Length, read until EOF.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK
+Content-Type: application/json
+Connection: close
+
+",
+                    )
+                    .await;
+                for _ in 0..16 {
+                    if socket.write_all(&[b' '; 1024]).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    let client = reqwest::Client::new();
+    let response = client.get(&url).send().await.unwrap();
+    assert!(response.content_length().is_none());
+    assert_eq!(
+        read_capped(response, 4 * 1024).await.unwrap_err(),
+        AdapterError::TooLarge
+    );
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(
+        read_capped(response, 16 * 1024).await.unwrap().len(),
+        16 * 1024
+    );
+}

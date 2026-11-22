@@ -38,9 +38,14 @@ class MainActivity : AppCompatActivity() {
         val signIn = Button(this).apply {
             text = "Sign in"
             setOnClickListener {
-                val base = console.text.toString().trimEnd('/')
-                val uri = Uri.parse("$base/desktop/auth?redirect_uri=blaktail://auth/callback")
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
+                val pending = DesktopSignIn.start(console.text.toString())
+                // Kept until the callback arrives; the activity may be recreated meanwhile.
+                getSharedPreferences("blaktail", MODE_PRIVATE).edit()
+                    .putString(PENDING_VERIFIER, pending.verifier)
+                    .putString(PENDING_STATE, pending.state)
+                    .putString(PENDING_CONSOLE, pending.console)
+                    .apply()
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(DesktopSignIn.startUrl(pending))))
             }
         }
         val enrol = Button(this).apply {
@@ -62,7 +67,7 @@ class MainActivity : AppCompatActivity() {
                         getSharedPreferences("blaktail", MODE_PRIVATE).edit()
                             .putString("address", joined.address)
                             .putString("nodeId", joined.id)
-                            .putString("nodeToken", joined.nodeToken)
+                            .putString("nodeToken", Secrets.seal(joined.nodeToken))
                             .putString("coordinator", coordinator.text.toString())
                             .putStringSet("peers", map.peers.toSet())
                             .putString("policy", map.policy)
@@ -118,29 +123,62 @@ class MainActivity : AppCompatActivity() {
     private fun acceptCallback(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme != "blaktail") return
-        val token = data.fragment
-            ?.split('&')
-            ?.firstNotNullOfOrNull { part ->
-                part.removePrefix("token=").takeIf { part.startsWith("token=") }
+        val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
+        val verifier = prefs.getString(PENDING_VERIFIER, null)
+        val expectedState = prefs.getString(PENDING_STATE, null)
+        val consoleBase = prefs.getString(PENDING_CONSOLE, null)
+        // Nothing pending: an unsolicited or replayed callback (or a re-delivered intent).
+        if (expectedState == null) return
+        val code = DesktopSignIn.code(data.scheme, data.host, data.path, data::getQueryParameter, expectedState)
+        if (code == null || verifier == null || consoleBase == null) {
+            // A callback for our request that was cancelled ends it; anything else is ignored.
+            if (data.getQueryParameter("state") == expectedState) {
+                clearPending(prefs)
+                status.text = "Sign-in did not complete. Try Sign in again."
             }
-            ?.let(Uri::decode)
-            ?: return
-        status.text = "Signed in. Enrol this phone, then approve the code in the console."
-        getSharedPreferences("blaktail", MODE_PRIVATE).edit().putString("session", token).apply()
+            return
+        }
+        // One attempt per request: a replayed callback finds nothing pending.
+        clearPending(prefs)
+        val pending = DesktopSignIn.Pending(verifier, expectedState, consoleBase)
+        thread {
+            runCatching { DesktopSignIn.exchange(pending, code) }
+                .onSuccess { token ->
+                    prefs.edit().putString("session", Secrets.seal(token)).putString("console", consoleBase).apply()
+                    runOnUiThread {
+                        status.text = "Signed in. Enrol this phone, then approve the code in the console."
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread { status.text = error.message ?: "Sign-in failed" }
+                }
+        }
+    }
+
+    private fun clearPending(prefs: android.content.SharedPreferences) {
+        prefs.edit().remove(PENDING_VERIFIER).remove(PENDING_STATE).remove(PENDING_CONSOLE).apply()
+    }
+
+    companion object {
+        private const val PENDING_VERIFIER = "signInVerifier"
+        private const val PENDING_STATE = "signInState"
+        private const val PENDING_CONSOLE = "signInConsole"
     }
 
     private fun privateKey(): ByteArray {
         val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
-        prefs.getString("privateKey", null)?.let { return Base64.decode(it, Base64.NO_WRAP) }
+        Secrets.read(prefs, "privateKey")?.let { return Base64.decode(it, Base64.NO_WRAP) }
         val created = ByteArray(32).also(SecureRandom()::nextBytes)
-        prefs.edit().putString("privateKey", Base64.encodeToString(created, Base64.NO_WRAP)).apply()
+        prefs.edit()
+            .putString("privateKey", Secrets.seal(Base64.encodeToString(created, Base64.NO_WRAP)))
+            .apply()
         return created
     }
 
     private fun connectTunnel() {
         val prefs = getSharedPreferences("blaktail", MODE_PRIVATE)
         val address = prefs.getString("address", null)
-        val key = prefs.getString("privateKey", null)
+        val key = Secrets.read(prefs, "privateKey")
         if (address == null || key == null) {
             status.text = "Join this phone before connecting"
             return

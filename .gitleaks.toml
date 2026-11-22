@@ -1,5 +1,6 @@
 # Secret scanning for the public BlakTail tree.
-# Run on self-hosted runners only. Do not send the repo to a scanning SaaS.
+# Run inside CI (GitHub-hosted runners, see docs/threat-model.md "CI") or locally.
+# Do not send the repo to a scanning SaaS.
 
 title = "BlakTail"
 

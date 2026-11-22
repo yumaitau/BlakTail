@@ -429,3 +429,81 @@ async fn renews_when_due_and_refuses_routes_when_refused_or_unhealthy() {
     runtime.manage(&api, &off, dir.path()).await;
     assert_eq!(runtime.routed(), 0);
 }
+
+const NAMESPACE: &str = "svc.12345678.blaktail";
+
+fn service_ca(constraints: Option<Vec<rcgen::GeneralSubtree>>, ca: bool) -> (String, KeyPair) {
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "test service CA");
+    if ca {
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    }
+    params.name_constraints = constraints.map(|permitted| rcgen::NameConstraints {
+        permitted_subtrees: permitted,
+        excluded_subtrees: Vec::new(),
+    });
+    (params.self_signed(&key).unwrap().pem(), key)
+}
+
+fn namespace_only() -> Option<Vec<rcgen::GeneralSubtree>> {
+    Some(vec![rcgen::GeneralSubtree::DnsName(NAMESPACE.into())])
+}
+
+#[test]
+fn service_ca_check_accepts_only_a_single_constrained_ca() {
+    let (pem, key) = service_ca(namespace_only(), true);
+    let checked = check_service_ca(&pem, NAMESPACE, 0).unwrap();
+    assert_eq!(checked.permitted, vec![NAMESPACE.to_owned()]);
+    assert_eq!(checked.fingerprint, pem_fingerprint(&pem).unwrap());
+    assert_eq!(pem_fingerprint(&checked.pem).unwrap(), checked.fingerprint);
+    assert!(checked.not_after > 0);
+
+    let (other, _) = service_ca(namespace_only(), true);
+    let two = format!("{pem}{other}");
+    assert!(check_service_ca(&two, NAMESPACE, 0).is_err());
+    assert!(pem_fingerprint(&two).is_err());
+    let with_key = format!("{pem}{}", key.serialize_pem());
+    assert!(check_service_ca(&with_key, NAMESPACE, 0).is_err());
+
+    let (unconstrained, _) = service_ca(None, true);
+    assert!(check_service_ca(&unconstrained, NAMESPACE, 0).is_err());
+    let (elsewhere, _) = service_ca(
+        Some(vec![rcgen::GeneralSubtree::DnsName("example.com".into())]),
+        true,
+    );
+    assert!(check_service_ca(&elsewhere, NAMESPACE, 0).is_err());
+    let (wider, _) = service_ca(
+        Some(vec![
+            rcgen::GeneralSubtree::DnsName(NAMESPACE.into()),
+            rcgen::GeneralSubtree::DnsName("example.com".into()),
+        ]),
+        true,
+    );
+    assert!(check_service_ca(&wider, NAMESPACE, 0).is_err());
+    let (leaf, _) = service_ca(namespace_only(), false);
+    assert!(check_service_ca(&leaf, NAMESPACE, 0).is_err());
+    assert!(check_service_ca(&pem, NAMESPACE, i64::MAX).is_err());
+    assert!(check_service_ca(&pem, "svc.12345678.blaktail.", 0).is_err());
+}
+
+#[test]
+fn service_namespace_must_be_dns_labels() {
+    assert!(valid_service_namespace(NAMESPACE));
+    for bad in [
+        "",
+        "blaktail",
+        "svc.blaktail",
+        "svc..x.blaktail",
+        "svc.a b.blaktail",
+        "svc.12345678.blaktail\nx",
+        "svc.-x.blaktail",
+        "SVC.12345678.blaktail",
+        "svc.12345678.blaktail/x",
+    ] {
+        assert!(!valid_service_namespace(bad), "{bad:?}");
+    }
+}

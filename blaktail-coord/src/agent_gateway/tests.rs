@@ -541,6 +541,54 @@ async fn provider_credential_is_never_returned_or_stored_in_clear() {
 }
 
 #[tokio::test]
+async fn changing_base_url_needs_the_credential_again() {
+    let lab = lab().await;
+    let id = lab.provider["id"].as_str().unwrap();
+    let patch = |body: Value| {
+        let router = lab.router.clone();
+        let org = lab.org;
+        let path = format!("/providers/{id}");
+        async move { console(&router, Method::PATCH, org, Role::Admin, &path, body).await }
+    };
+    // Same endpoint, only normalised differently: the stored credential stays.
+    let (status, view) =
+        patch(json!({"revision": 1, "base_url": "http://10.0.0.5:11434/v1/"})).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["has_credential"], true);
+    // A new endpoint with the old sealed credential would redirect the secret.
+    let (status, error) =
+        patch(json!({"revision": 2, "base_url": "http://10.0.0.99:11434/v1"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let stored: String = sqlx::query_scalar("SELECT base_url FROM agent_providers")
+        .fetch_one(&lab.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "http://10.0.0.5:11434/v1");
+    // Re-entering the credential with the new endpoint is fine.
+    let (status, view) = patch(json!({
+        "revision": 2,
+        "base_url": "http://10.0.0.99:11434/v1",
+        "credential": "sk-test-new-endpoint-credential",
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["base_url"], "http://10.0.0.99:11434/v1");
+    // So is clearing it.
+    let (status, view) = patch(json!({
+        "revision": 3,
+        "base_url": "http://10.0.0.5:11434/v1",
+        "clear_credential": true,
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["has_credential"], false);
+    // Without a stored credential there is nothing to redirect.
+    let (status, view) =
+        patch(json!({"revision": 4, "base_url": "http://10.0.0.6:11434/v1"})).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+}
+
+#[tokio::test]
 async fn provider_validation() {
     let lab = lab().await;
     let cases = [

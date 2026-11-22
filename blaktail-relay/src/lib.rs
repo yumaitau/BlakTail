@@ -174,6 +174,35 @@ struct Client {
     last_seen: Instant,
 }
 
+/// Longer than the agents' steady 25 s REGISTER keepalive, so a healthy
+/// registration is never "silent".
+const TAKEOVER_SILENCE: Duration = Duration::from_secs(30);
+
+/// Whether a valid REGISTER from `source` may replace the live registration
+/// for the same node at another address. A REGISTER replayed by someone who
+/// saw it on the wire carries the same token, so from another IP it cannot
+/// take a node's traffic while the node is still heard from. Allowed:
+/// - the same source (a refresh);
+/// - the same IP (a NAT rebinding, a restarted socket, or UDP and WebSocket
+///   from one host);
+/// - a live registration silent for [`TAKEOVER_SILENCE`] (the node moved or
+///   lost its path);
+/// - over UDP only, a strictly newer token (the node's next coordinator
+///   poll). A WebSocket registration is TLS-protected and is not displaced
+///   this way, so a UDP probe cannot strand a node's WebSocket traffic.
+fn takeover_allowed(
+    live: &Client,
+    live_ip: Option<IpAddr>,
+    source: PeerAddr,
+    source_ip: IpAddr,
+    expires_at: u64,
+) -> bool {
+    live.addr == source
+        || live_ip == Some(source_ip)
+        || live.last_seen.elapsed() >= TAKEOVER_SILENCE
+        || (matches!(live.addr, PeerAddr::Udp(_)) && expires_at > live.expires_at)
+}
+
 struct Bucket {
     tokens: f64,
     last_refill: Instant,
@@ -394,6 +423,9 @@ pub enum StreamEvent {
         id: u64,
         remote: SocketAddr,
         tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        /// Set by the relay task once this connection holds a valid
+        /// registration; connections that never get one are closed.
+        registered: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     Frame {
         id: u64,
@@ -420,6 +452,7 @@ struct Hub {
     source_buckets: HashMap<IpAddr, Bucket>,
     node_buckets: HashMap<[u8; ID_LEN], Bucket>,
     streams: HashMap<u64, (SocketAddr, tokio::sync::mpsc::Sender<Vec<u8>>)>,
+    stream_registered: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Hub {
@@ -479,6 +512,13 @@ impl Hub {
                     metrics.registers_rejected.fetch_add(1, Relaxed);
                     return None;
                 }
+                if let Some(live) = self.clients.get(&id) {
+                    let live_ip = self.remote(live.addr).map(|remote| remote.ip());
+                    if !takeover_allowed(live, live_ip, source, source_addr.ip(), expires_at) {
+                        metrics.registers_rejected.fetch_add(1, Relaxed);
+                        return None;
+                    }
+                }
                 // One UDP source address (or one WebSocket) represents one
                 // enrolled node. Re-registration replaces stale identity there.
                 self.clients
@@ -491,6 +531,11 @@ impl Hub {
                         last_seen: Instant::now(),
                     },
                 );
+                if let PeerAddr::Stream(stream) = source {
+                    if let Some(flag) = self.stream_registered.get(&stream) {
+                        flag.store(true, Relaxed);
+                    }
+                }
                 metrics.registers_ok.fetch_add(1, Relaxed);
                 None
             }
@@ -616,6 +661,7 @@ pub async fn serve_with_streams(
         source_buckets: HashMap::new(),
         node_buckets: HashMap::new(),
         streams: HashMap::new(),
+        stream_registered: HashMap::new(),
     };
     let mut events_open = true;
     // Full-size receive buffer: a smaller buffer would truncate oversize
@@ -632,13 +678,15 @@ pub async fn serve_with_streams(
                 hub.handle(&buf[..len], PeerAddr::Udp(source_addr))
             }
             event = events.recv(), if events_open => match event {
-                Some(StreamEvent::Open { id, remote, tx }) => {
+                Some(StreamEvent::Open { id, remote, tx, registered }) => {
                     hub.streams.insert(id, (remote, tx));
+                    hub.stream_registered.insert(id, registered);
                     None
                 }
                 Some(StreamEvent::Frame { id, frame }) => hub.handle(&frame, PeerAddr::Stream(id)),
                 Some(StreamEvent::Closed { id }) => {
                     hub.streams.remove(&id);
+                    hub.stream_registered.remove(&id);
                     hub.clients.retain(|_, client| client.addr != PeerAddr::Stream(id));
                     None
                 }
@@ -678,6 +726,36 @@ pub async fn serve_with_streams(
     }
 }
 
+/// Makes room in a full bucket table instead of refusing every new source
+/// (which let a flood of spoofed addresses lock out real nodes). Buckets
+/// that would have refilled to the burst are dropped first: they hold no
+/// state a fresh bucket would not. If that frees less than an eighth of the
+/// table, the least recently used eighth goes too, so the sort is amortised
+/// over many inserts.
+fn evict_buckets<K: Copy + Eq + Hash>(
+    buckets: &mut HashMap<K, Bucket>,
+    now: Instant,
+    rate_per_sec: u32,
+    rate_burst: u32,
+) {
+    let burst = rate_burst as f64;
+    buckets.retain(|_, bucket| {
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens + elapsed * f64::from(rate_per_sec) < burst
+    });
+    let target = MAX_RATE_BUCKETS - MAX_RATE_BUCKETS / 8;
+    if buckets.len() > target {
+        let mut by_age: Vec<(Instant, K)> = buckets
+            .iter()
+            .map(|(key, bucket)| (bucket.last_refill, *key))
+            .collect();
+        by_age.sort_unstable_by_key(|(last, _)| *last);
+        for (_, key) in by_age.into_iter().take(buckets.len() - target) {
+            buckets.remove(&key);
+        }
+    }
+}
+
 /// Token-bucket admission per source IP.
 fn admit<K: Copy + Eq + Hash>(
     buckets: &mut HashMap<K, Bucket>,
@@ -685,10 +763,10 @@ fn admit<K: Copy + Eq + Hash>(
     rate_per_sec: u32,
     rate_burst: u32,
 ) -> bool {
-    if buckets.len() >= MAX_RATE_BUCKETS && !buckets.contains_key(&key) {
-        return false;
-    }
     let now = Instant::now();
+    if buckets.len() >= MAX_RATE_BUCKETS && !buckets.contains_key(&key) {
+        evict_buckets(buckets, now, rate_per_sec, rate_burst);
+    }
     let bucket = buckets.entry(key).or_insert(Bucket {
         tokens: rate_burst as f64,
         last_refill: now,
@@ -729,6 +807,110 @@ mod tests {
         frame.extend_from_slice(dest);
         frame.extend_from_slice(payload);
         frame
+    }
+
+    fn hub() -> Hub {
+        Hub {
+            config: RelayConfig {
+                auth_secret: secret(),
+                ..RelayConfig::default()
+            },
+            metrics: Arc::new(Metrics::default()),
+            clients: HashMap::new(),
+            source_buckets: HashMap::new(),
+            node_buckets: HashMap::new(),
+            streams: HashMap::new(),
+            stream_registered: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn replayed_register_cannot_take_over_a_live_registration() {
+        let mut hub = hub();
+        let victim = PeerAddr::Udp("198.51.100.1:5000".parse().unwrap());
+        let attacker = PeerAddr::Udp("203.0.113.9:6000".parse().unwrap());
+        let id = [0xAA; ID_LEN];
+        let seen_on_the_wire = register_frame(&id, 300, &secret());
+        assert!(hub.handle(&seen_on_the_wire, victim).is_none());
+        assert_eq!(hub.clients[&id].addr, victim);
+        // Same token from another address: refused, victim keeps the slot.
+        assert!(hub.handle(&seen_on_the_wire, attacker).is_none());
+        assert_eq!(hub.clients[&id].addr, victim);
+        let ping = blaktail_relay_proto::ping_frame(&id);
+        assert!(hub.handle(&ping, attacker).is_none());
+        // The real node re-registering from its own address is fine.
+        assert!(hub.handle(&seen_on_the_wire, victim).is_none());
+        assert_eq!(hub.clients[&id].addr, victim);
+        // Same IP, new port (NAT rebinding or a new socket) may move it.
+        let rebound = PeerAddr::Udp("198.51.100.1:5001".parse().unwrap());
+        assert!(hub.handle(&seen_on_the_wire, rebound).is_none());
+        assert_eq!(hub.clients[&id].addr, rebound);
+        // A strictly newer token (next coordinator poll) may move it to
+        // another IP; the older token cannot then pull it back.
+        let newer = register_frame(&id, 400, &secret());
+        let roamed = PeerAddr::Udp("192.0.2.44:7000".parse().unwrap());
+        assert!(hub.handle(&newer, roamed).is_none());
+        assert_eq!(hub.clients[&id].addr, roamed);
+        assert!(hub.handle(&seen_on_the_wire, attacker).is_none());
+        assert_eq!(hub.clients[&id].addr, roamed);
+        // A registration silent past the keepalive may be taken over.
+        hub.clients.get_mut(&id).unwrap().last_seen =
+            Instant::now() - TAKEOVER_SILENCE - Duration::from_secs(1);
+        assert!(hub.handle(&newer, victim).is_none());
+        assert_eq!(hub.clients[&id].addr, victim);
+    }
+
+    #[test]
+    fn websocket_registration_is_not_displaced_by_a_newer_udp_token() {
+        let mut hub = hub();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        hub.streams
+            .insert(9, ("192.0.2.80:443".parse().unwrap(), tx));
+        let stream = PeerAddr::Stream(9);
+        let id = [0xCC; ID_LEN];
+        assert!(hub
+            .handle(&register_frame(&id, 300, &secret()), stream)
+            .is_none());
+        assert_eq!(hub.clients[&id].addr, stream);
+        let udp = PeerAddr::Udp("203.0.113.9:6000".parse().unwrap());
+        assert!(hub
+            .handle(&register_frame(&id, 400, &secret()), udp)
+            .is_none());
+        assert_eq!(hub.clients[&id].addr, stream);
+    }
+
+    #[test]
+    fn full_bucket_table_evicts_instead_of_refusing_new_sources() {
+        let mut buckets: HashMap<u32, Bucket> = HashMap::new();
+        let now = Instant::now();
+        // Every bucket recently drained, so none is reclaimable as "refilled".
+        for key in 0..MAX_RATE_BUCKETS as u32 {
+            buckets.insert(
+                key,
+                Bucket {
+                    tokens: 0.0,
+                    last_refill: now,
+                },
+            );
+        }
+        assert!(admit(&mut buckets, u32::MAX, 1, 10));
+        assert!(buckets.len() <= MAX_RATE_BUCKETS);
+        assert!(buckets.contains_key(&u32::MAX));
+        // Refilled buckets are reclaimed first.
+        let mut buckets: HashMap<u32, Bucket> = HashMap::new();
+        let old = now - Duration::from_secs(60);
+        for key in 0..MAX_RATE_BUCKETS as u32 {
+            buckets.insert(
+                key,
+                Bucket {
+                    tokens: 0.0,
+                    last_refill: if key == 7 { now } else { old },
+                },
+            );
+        }
+        assert!(admit(&mut buckets, u32::MAX, 1, 10));
+        assert!(buckets.contains_key(&7));
+        assert_eq!(buckets.len(), 2);
     }
 
     #[test]

@@ -186,13 +186,21 @@ sudo blaktaild trust-service-ca                                 # install
 ```
 
 The command fetches the CA from `GET /v1/nodes/:node/service-ca` (node token;
-public material only), checks the SHA-256 fingerprint against the coordinator's
-record, prints the fingerprint and the name constraint, and asks for `yes`
-before installing (`--yes` skips the prompt). Linux: written to
+public material only) and refuses it unless the PEM holds exactly one
+certificate, that certificate is a CA with a critical name constraint
+permitting only this network's `svc.<prefix>.blaktail` namespace, it has not
+expired, and its SHA-256 fingerprint matches the coordinator's record. The
+coordinator's fingerprint is only a consistency check: pass `--fingerprint`
+with the value from the console's Services page to pin it. The command prints
+the fingerprint and the constraint read from the certificate, and asks for
+`yes` before installing (`--yes` skips the prompt). Only that one certificate
+is written or installed. Linux: written to
 `/usr/local/share/ca-certificates/` and `update-ca-certificates` (or
 `/etc/pki/ca-trust/source/anchors/` and `update-ca-trust extract`). macOS:
 `security add-trusted-cert -d -r trustRoot` into the System keychain, which asks
-for an administrator. Browsers with their own trust store (Firefox) need the CA
+for an administrator; the file is staged in a private directory under the
+state directory. Windows: not installed by the agent; use `--output` and import
+the file yourself. Browsers with their own trust store (Firefox) need the CA
 imported separately. Compare the fingerprint with the console's Services page.
 
 Old clients: any client that trusts the CA and honours X.509 name constraints

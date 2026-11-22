@@ -25,7 +25,8 @@ import {
 } from "@/lib/coord-notifications";
 import { listPendingInvitations } from "@/lib/invitations";
 import { listIdentitySettings } from "@/lib/identity-links";
-import { listIdentityProviders, listMemberships } from "@/lib/oidc";
+import { listIdentityProviders, listMemberships, organisationHasSso } from "@/lib/oidc";
+import { safeDetail } from "@/lib/errors";
 import { getSignInPolicy, identityAssurance, listDomains } from "@/lib/auth-policy";
 import { MFA_PRIVILEGED_ROLES } from "@/lib/auth-policy-core";
 import { errorText } from "@/lib/server-errors";
@@ -91,8 +92,20 @@ function navGroups(ctx: ConsoleContext, hasConflicts: boolean): SettingsNavGroup
   return groups;
 }
 
-export default async function SettingsPage() {
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ sso_link_error?: string | string[] }>;
+}) {
   const ctx = await requireConsoleContext();
+  const params = await searchParams;
+  const rawLinkError = Array.isArray(params.sso_link_error)
+    ? params.sso_link_error[0]
+    : params.sso_link_error;
+  // Attacker-controlled query: show it only if it reads like our own sentence.
+  const linkError = rawLinkError
+    ? (safeDetail(rawLinkError, 240) ?? "Single sign-on linking didn't start.")
+    : null;
   return (
     <ConsoleShell ctx={ctx} current="/settings">
       <div className="stack">
@@ -101,7 +114,7 @@ export default async function SettingsPage() {
           description={`Your own account, and how ${ctx.organisationName} signs people in, provisions them and sends events to other systems.`}
         />
         <Suspense fallback={<SettingsSkeleton />}>
-          <SettingsContent ctx={ctx} />
+          <SettingsContent ctx={ctx} linkError={linkError} />
         </Suspense>
       </div>
     </ConsoleShell>
@@ -124,7 +137,13 @@ function SettingsSkeleton() {
   );
 }
 
-async function SettingsContent({ ctx }: { ctx: ConsoleContext }) {
+async function SettingsContent({
+  ctx,
+  linkError,
+}: {
+  ctx: ConsoleContext;
+  linkError: string | null;
+}) {
   const owner = can(ctx.role, "manage_security");
   const canApiClients = can(ctx.role, "manage_api_clients");
   const canIntegrations = can(ctx.role, "manage_integrations");
@@ -142,6 +161,7 @@ async function SettingsContent({ ctx }: { ctx: ConsoleContext }) {
     notificationCapabilities,
     directorySettings,
     groupMappings,
+    hasSso,
   ] = await Promise.all([
     owner ? listPendingInvitations(ctx) : Promise.resolve([]),
     listIdentitySettings(ctx),
@@ -166,6 +186,7 @@ async function SettingsContent({ ctx }: { ctx: ConsoleContext }) {
     ),
     owner ? getDirectorySettings(ctx.organisationId) : Promise.resolve(DEFAULT_DIRECTORY_SETTINGS),
     owner ? listGroupMappings(ctx.organisationId) : Promise.resolve([]),
+    organisationHasSso(ctx.organisationId),
   ]);
   const destinations = webhooks.data;
   const plainWebhooks = destinations.filter((destination) => (destination.kind ?? "webhook") === "webhook");
@@ -224,6 +245,24 @@ async function SettingsContent({ ctx }: { ctx: ConsoleContext }) {
             networkAccounts={identitySettings.networkAccounts}
             conflicts={identitySettings.conflicts}
           />
+          {hasSso || linkError ? (
+            <Section
+              id="sso-link"
+              headingLevel={3}
+              title="Link single sign-on"
+              description={`Add your ${ctx.organisationName} identity-provider sign-in to this account. Needs a recent sign-in; the link finishes only in this browser and this session.`}
+            >
+              {linkError ? <Alert tone="error">{linkError}</Alert> : null}
+              {hasSso ? (
+                <form action="/api/oidc/start" method="post">
+                  <input type="hidden" name="organisation" value={ctx.organisationId} />
+                  <button type="submit" className="button secondary ui-button">
+                    Link single sign-on
+                  </button>
+                </form>
+              ) : null}
+            </Section>
+          ) : null}
           <div id="account-security" className="settings-group">
             {assurance.hasPassword ? <ChangePassword /> : null}
             <AccountSecurity

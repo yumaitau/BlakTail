@@ -59,6 +59,8 @@ export const session = pgTable("session", {
   userId: text("user_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
+  /** password | password_mfa | sso, recorded at creation; see auth-policy-core. */
+  authMethod: text("auth_method"),
 });
 
 export const account = pgTable(
@@ -270,6 +272,54 @@ export const scimToken = pgTable(
   (table) => [index("scim_token_org_idx").on(table.organisationId)],
 );
 
+/** Desktop/mobile app PKCE codes: hashed, 60 s, single use. */
+export const desktopAuthCode = pgTable(
+  "desktop_auth_code",
+  {
+    id: text("id").primaryKey(),
+    codeHash: text("code_hash").notNull().unique(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => session.id, { onDelete: "cascade" }),
+    codeChallenge: text("code_challenge").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("desktop_auth_code_expiry_idx").on(table.expiresAt)],
+);
+
+/** Desktop/mobile app Bearer credentials, separate from browser sessions. */
+export const desktopCredential = pgTable(
+  "desktop_credential",
+  {
+    id: text("id").primaryKey(),
+    tokenHash: text("token_hash").notNull().unique(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => session.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("desktop_credential_user_idx").on(table.userId),
+    index("desktop_credential_session_idx").on(table.sessionId),
+  ],
+);
+
 export const oidcLoginState = pgTable(
   "oidc_login_state",
   {
@@ -283,6 +333,13 @@ export const oidcLoginState = pgTable(
     codeVerifier: text("code_verifier").notNull(),
     nonce: text("nonce").notNull(),
     redirectTo: text("redirect_to").notNull(),
+    /** SHA-256 of the browser-binding cookie set by /api/oidc/start. */
+    bindingHash: text("binding_hash").notNull(),
+    /** Set only by an explicit, authenticated link start from Settings. */
+    linkUserId: text("link_user_id").references(() => user.id, {
+      onDelete: "cascade",
+    }),
+    linkSessionId: text("link_session_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -582,6 +639,7 @@ export const organisationSignInPolicy = pgTable(
     requireMfaForPrivileged: boolean("require_mfa_for_privileged")
       .notNull()
       .default(false),
+    trustIdpMfa: boolean("trust_idp_mfa").notNull().default(false),
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
     }),

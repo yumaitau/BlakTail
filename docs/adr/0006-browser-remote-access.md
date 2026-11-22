@@ -54,6 +54,8 @@ browser ──TLS (console origin)──▶ onshore gateway ──WireGuard (its
    (not suspended, revoked, deleted or credential-expired), and gateway
    lifecycle `active`. It returns a single-use session id bound to (person,
    organisation, gateway node, target node, OS user) with a short TTL.
+   The gateway → target network and `ssh` grants are checked as well; the
+   person rule and both grants are re-checked at redeem and on each report.
 4. The browser opens a WebSocket to the gateway with that id. The gateway
    redeems it once with the coordinator and dials the target over WireGuard.
 

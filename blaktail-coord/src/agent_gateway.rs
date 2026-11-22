@@ -835,6 +835,8 @@ async fn update_provider(
     if input.clear_credential && new_credential.is_some() {
         return Err(bad("send either a new credential or clear_credential"));
     }
+    let keeps_stored_credential =
+        current_sealed.is_some() && !input.clear_credential && new_credential.is_none();
     let sealed = if input.clear_credential {
         None
     } else if let Some(credential) = &new_credential {
@@ -847,6 +849,14 @@ async fn update_provider(
         &residency,
         sealed.is_some(),
     )?;
+    // The stored credential was entered for one endpoint. Pointing it at
+    // another would let anyone who can edit providers redirect the secret to
+    // a host they control, so a changed endpoint needs the credential again.
+    if keeps_stored_credential && base_url != before.base_url {
+        return Err(bad(
+            "re-enter the credential (or clear it) when changing the base URL",
+        ));
+    }
     let models = match &input.models {
         Some(models) => check_models(models, false)?,
         None => before.models.clone(),

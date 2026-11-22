@@ -1,7 +1,7 @@
 # macOS desktop app
 
 Native SwiftUI menu bar app and endpoint manager. It signs in through the onshore
-console (Better Auth), stores the session token in Keychain, shows every machine
+console (Better Auth), stores its own desktop credential in Keychain, shows every machine
 across every authorised network workspace, and starts or stops local `blaktaild`
 without using the terminal.
 
@@ -19,7 +19,7 @@ CLI.
 | `apps/macos/Sources/BlakTail` | Menu bar, endpoint manager, local connection, and Settings |
 | `apps/console/src/app/desktop` | Browser sign-in page for ASWebAuthenticationSession |
 | `apps/console/src/app/api/desktop` | Session, selected-network join key, inventory, rename, route, and revoke APIs |
-| `apps/console/src/lib/desktop-auth.ts` | Bearer session → console context |
+| `apps/console/src/lib/desktop-auth.ts` | PKCE codes, desktop credentials (Bearer) → console context |
 
 Console bridge files merge with the Next.js console from the Better Auth work. They call the
 same onshore coordinator; no offshore IdP.
@@ -64,16 +64,20 @@ organisation ID in `X-BlakTail-Organisation`; the server resolves membership aga
 and refuses cross-network or member-only changes.
 
 When a person links another login in the web console, the Mac app keeps the same
-Better Auth session and the next refresh includes the linked identity's network
+desktop credential and the next refresh includes the linked identity's network
 accounts and endpoints. The local Mac still has one active data-plane enrolment;
 the endpoint manager can inspect and administer every authorised network at once.
 
 ## Sign in and connect
 
 1. Set the onshore console URL in Settings (Australian-hosted HTTPS only).
-2. **Sign in…** opens ASWebAuthenticationSession against `/desktop/auth`.
-3. After sign-in, the console redirects to `blaktail://auth/callback#token=…`. The token is
-   stored in Keychain (`au.org.blaktail.desktop` / `better-auth.session_token`).
+2. **Sign in…** opens ASWebAuthenticationSession against `/desktop/auth` with a
+   random `state` and a PKCE S256 `code_challenge` (see [Desktop and mobile sign-in](console.md#desktop-and-mobile-sign-in)).
+3. After sign-in, the person presses **Allow**. The console redirects to
+   `blaktail://auth/callback?code=…&state=…`; the app checks `state` and swaps the
+   code and its verifier for a desktop credential (`btd_…`, not the browser session).
+   It is stored in Keychain (`au.org.blaktail.desktop` / `better-auth.session_token`,
+   the account name kept for compatibility).
 4. Choose which authorised network this Mac should join. The choice is explicit
    and does not hide machines from the other workspaces.
 5. **Connect** asks the selected network to mint a short-lived join key, then runs
@@ -84,7 +88,8 @@ the endpoint manager can inspect and administer every authorised network at once
    interface stops, but enrolment remains for a later **Connect**. It does not
    revoke the endpoint. Revocation stays behind the explicit, confirmed endpoint action.
 8. **Quit** clears transient UI state. It does not leave the join key in argv, environment,
-   or UserDefaults. The session token may remain in Keychain until **Sign out**.
+   or UserDefaults. The desktop credential may remain in Keychain until **Sign out**,
+   which revokes it on the console and deletes the Keychain item.
 
 About BlakTail shows the shared project mission:
 
