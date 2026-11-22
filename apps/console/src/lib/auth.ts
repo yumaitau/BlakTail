@@ -64,7 +64,25 @@ export const auth = betterAuth({
       authMethod: { type: "string", required: false, input: false },
     },
   },
+  account: {
+    additionalFields: {
+      // BlakTail's own column (migration 0002), not Better Auth's. Declared so
+      // Better Auth >=1.7.3 writes it instead of failing its schema check.
+      issuer: { type: "string", required: false, input: false },
+    },
+  },
   databaseHooks: {
+    account: {
+      create: {
+        // Better Auth only creates password accounts here; SSO and SCIM rows
+        // are written by BlakTail with their own issuer. Anything else is left
+        // without an issuer and fails closed on NOT NULL.
+        before: async (account) =>
+          account.providerId === "credential"
+            ? { data: { ...account, issuer: "local:credential" } }
+            : undefined,
+      },
+    },
     session: {
       create: {
         before: async (session, context) => ({

@@ -207,7 +207,7 @@ const coordinator = createServer(async (request, response) => {
   if (wgOnlyList && request.method === "POST") {
     const body = JSON.parse(raw);
     const peer = {
-      id: `wg-only-${wgOnlyList[1]}-${Date.now()}`,
+      id: randomUUID(),
       name: body.name,
       kind: body.kind ?? "wireguard_only",
       wg_public_key: body.wg_public_key,
@@ -385,6 +385,7 @@ try {
   `;
   const ownerNodeId = randomUUID();
   const linkedNodeId = randomUUID();
+  const secondOwnerNodeId = randomUUID();
   const credentialExpiry = Math.floor(Date.now() / 1000) + 86_400;
   const node = (id, name, route = null) => ({
     id,
@@ -1070,7 +1071,7 @@ try {
     `;
   });
   coordinatorNodes.set(secondOwner.coordOrgId, [
-    node(`node-${secondOwner.coordOrgId}`, "ranger-field-laptop", "10.42.0.0/24"),
+    node(secondOwnerNodeId, "ranger-field-laptop", "10.42.0.0/24"),
   ]);
   const secondOwnerSignIn = await jsonRequest(
     baseUrl,
