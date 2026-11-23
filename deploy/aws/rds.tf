@@ -42,6 +42,6 @@ resource "aws_db_instance" "postgres" {
   storage_encrypted       = true
   backup_retention_period = 7
   skip_final_snapshot     = true
-  deletion_protection     = false
+  deletion_protection     = var.db_deletion_protection
   tags                    = local.tags
 }

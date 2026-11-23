@@ -69,6 +69,12 @@ variable "db_multi_az" {
   default     = true
 }
 
+variable "db_deletion_protection" {
+  description = "Block deletion of the RDS instance. Set false only before an intentional destroy."
+  type        = bool
+  default     = true
+}
+
 variable "coord_desired_count" {
   description = "Coordinator replicas. Keep zero for the first apply, run the explicit migration task, then set at least two."
   type        = number
