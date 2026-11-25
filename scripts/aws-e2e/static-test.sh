@@ -51,7 +51,7 @@ assert_digest_ref 'example.invalid/blaktail/coord@sha256:aaaaaaaaaaaaaaaaaaaaaaa
 
 sh -n "$SCRIPT_DIR"/*.sh
 grep -q '^  workflow_dispatch:' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
-grep -q 'runs-on: \[self-hosted, linux\]' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
+grep -q 'runs-on: \[yuma-linux-x64\]' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
 grep -q 'id-token: write' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
 grep -q 'environment: aws-e2e' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
 grep -q 'cancel-in-progress: false' "$REPO_ROOT/.github/workflows/aws-e2e.yml"
