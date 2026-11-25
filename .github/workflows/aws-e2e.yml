@@ -36,7 +36,7 @@ concurrency:
 jobs:
   end-to-end:
     name: Deploy, manually enrol, prove, destroy
-    runs-on: [yuma-linux-x64]
+    runs-on: [yuma-linux]
     environment: aws-e2e
     timeout-minutes: 120
     env:
