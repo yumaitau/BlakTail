@@ -1,0 +1,61 @@
+name: E2E nightly
+
+# End-to-end suites run here only, never in push or pull-request CI.
+# aws-e2e.yml and two-vm-e2e.yml are separate and unchanged.
+on:
+  schedule:
+    - cron: '0 15 * * *' # 02:00 AEDT
+  workflow_dispatch:
+
+jobs:
+  console-e2e:
+    name: console HTTP E2E
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: blaktail
+          POSTGRES_PASSWORD: blaktail
+          POSTGRES_DB: blaktail
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blaktail -d blaktail"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://blaktail:blaktail@127.0.0.1:5432/blaktail
+      BETTER_AUTH_SECRET: ci-better-auth-secret-at-least-32-chars
+      BETTER_AUTH_URL: http://localhost:3000
+      COORD_BASE_URL: https://coord.example.internal
+      BLAKTAIL_AUTH_HMAC_SECRET: ci-auth-hmac-secret-at-least-32-chars
+      TEST_DATABASE_URL: postgres://blaktail:blaktail@127.0.0.1:5432/blaktail
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install
+        run: bun ci
+
+      - name: Migrate with Bun SQL
+        run: bun --filter @blaktail/console db:migrate
+
+      - name: Build
+        run: bun --filter @blaktail/console build
+
+      - name: Auth and invitation HTTP E2E
+        run: bun --filter @blaktail/console test:auth-e2e
+
+      - name: Roles, step-up and TOTP HTTP E2E
+        run: bun --filter @blaktail/console test:roles-e2e
+
+      - name: SCIM Groups, role mapping and deprovision grace E2E
+        run: bun --filter @blaktail/console test:scim-e2e

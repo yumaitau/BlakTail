@@ -139,12 +139,3 @@ jobs:
 
       - name: Build
         run: bun --filter @blaktail/console build
-
-      - name: Auth and invitation HTTP E2E
-        run: bun --filter @blaktail/console test:auth-e2e
-
-      - name: Roles, step-up and TOTP HTTP E2E
-        run: bun --filter @blaktail/console test:roles-e2e
-
-      - name: SCIM Groups, role mapping and deprovision grace E2E
-        run: bun --filter @blaktail/console test:scim-e2e
